@@ -1,0 +1,32 @@
+.\" Manual page for rdp-sessionmgr(8).  mdoc format.
+.Dd May 23, 2026
+.Dt RDP-SESSIONMGR 8
+.Os
+.Sh NAME
+.Nm rdp-sessionmgr
+.Nd privileged session broker for the Remote Desktop Protocol server
+.Sh SYNOPSIS
+.Nm
+.Sh DESCRIPTION
+.Nm
+is the privileged half of
+.Xr rdpd 8 .
+It receives authenticated session requests from the daemon over a
+local
+.Ux
+socket, runs PAM (or
+.Xr bsd_auth 3
+on
+.Ox ) ,
+allocates the per-user runtime directory, and forks the
+.Xr rdp-session 8
+helper as the target user.
+.Pp
+Phase 0 placeholder; not yet implemented.
+.Sh SEE ALSO
+.Xr rdpd 8 ,
+.Xr rdp-session 8
+.Sh AUTHORS
+.An Renaud Allard Aq Mt renaud@allard.it
+.Sh BUGS
+Not implemented in Phase 0.

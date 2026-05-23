@@ -1,0 +1,22 @@
+.\" Manual page for rdpd.conf(5).  mdoc format.
+.Dd May 23, 2026
+.Dt RDPD.CONF 5
+.Os
+.Sh NAME
+.Nm rdpd.conf
+.Nd configuration file for the Remote Desktop Protocol server
+.Sh DESCRIPTION
+.Nm
+will hold the runtime configuration for
+.Xr rdpd 8 :
+listen address, TLS certificate path, allowed authentication
+backends, channel allow-list, session command, and per-user limits.
+.Pp
+The grammar is not yet defined.  This page exists so the daemon's
+release tooling can reference it.
+.Sh SEE ALSO
+.Xr rdpd 8
+.Sh AUTHORS
+.An Renaud Allard Aq Mt renaud@allard.it
+.Sh BUGS
+Not implemented in Phase 0.

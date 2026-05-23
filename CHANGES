@@ -1,0 +1,346 @@
+rdpserver release notes
+
+Unreleased (0.0.9, Phase J)
+	NLA / CredSSP / NTLMv2 framework, NOT advertised yet.
+
+	Honest scoping: NLA cryptographically requires server-side
+	access to the user's NT hash (or a credential proxy that
+	knows it).  A standalone Linux/BSD daemon with PAM/bsd_auth
+	cannot decrypt the sealed TSCredentials without that hash;
+	the cleartext password never reaches us in the clear.
+	Production deployments need a hash backend -- winbind, sssd,
+	or a custom PAM module.  Until such a backend is wired in,
+	enabling NLA would only let us reach the authInfo decryption
+	step and fail.  The daemon therefore does NOT advertise
+	PROTOCOL_HYBRID in its X.224 negotiate response; xfreerdp
+	/sec:nla sees a clean negotiation failure and retries with
+	/sec:tls.
+
+	The wire and crypto pieces are in the tree for future use:
+
+	src/sec/nla_crypto.{c,h}: MD4 (NT hash), HMAC-MD5 (NTLMv2
+	hash + NTProofStr + sealing keys), stateful RC4 (TSCredentials
+	sealing/unsealing).  Thin EVP_*/HMAC wrappers around OpenSSL
+	or LibreSSL.  OpenSSL 3.0 deprecation warning is silenced
+	with a pragma; LibreSSL doesn't ship EVP_MAC yet so we stay
+	on the classic HMAC API.
+
+	src/sec/ntlm.{c,h}: NEGOTIATE/CHALLENGE/AUTHENTICATE wire
+	format from MS-NLMP.  ntlm_build_challenge generates a fresh
+	8-byte server challenge, picks compatible negotiate flags
+	(UNICODE + NTLM + EXTENDED_SESSIONSECURITY + 128 +
+	KEY_EXCH + TARGET_INFO), serialises a CHALLENGE_MESSAGE
+	with NB computer/domain names + RPC timestamp.
+	ntlm_verify_ntlmv2 computes NTHash -> NTLMv2Hash ->
+	NTProofStr and constant-time-compares against the client's
+	first 16 bytes of the NT response; on a match it derives the
+	SessionBaseKey.  ntlm_derive_exported_key RC4-unwraps the
+	EncryptedRandomSessionKey when KEY_EXCH is set.
+
+	src/sec/cssp.{c,h}: TSRequest DER builder + parser using the
+	existing BER helpers, with context-tagged components 0..3
+	(version, negoTokens, authInfo, pubKeyAuth).  A separate
+	parser handles TSCredentials -> TSPasswordCreds.
+
+	src/sec/nla.{c,h}: the server-side state machine that
+	stitches the above together.  Today it parses NEGOTIATE,
+	sends CHALLENGE, parses AUTHENTICATE, then fails at the
+	authInfo decryption step with a logged warning explaining
+	what backend is missing.
+
+	Fuzz coverage: the existing in-tree fuzzer gained cssp and
+	ntlm drivers (regress/fuzz/fuzz_parsers).  100 000 random-
+	byte iterations per parser under ASan + UBSan: zero crashes
+	across all 9 parsers (tpkt, x224, ber, per, mcs, cliprdr,
+	fp_input, cssp, ntlm).
+
+	New docs/SECURITY.md documents the trust model, the
+	privilege-separation layout, why NLA is currently a
+	framework-only feature, and the operator hook (a
+	`rdp_nla_get_nt_hash(user, domain, out_hash)` function) that
+	a hash backend would implement.
+
+Unreleased (0.0.8, Phase I)
+	Hardening sweep.
+
+	`./configure --enable-sanitizers` adds -fsanitize=address,
+	undefined to CFLAGS+LDFLAGS, drops _FORTIFY_SOURCE which
+	conflicts, and forces -O0 -g3 -fno-omit-frame-pointer.  The
+	full regress suite passes under ASan+UBSan on Linux/aarch64;
+	no leaks, no UB diagnostics.
+
+	regress/fuzz/fuzz_parsers: in-tree mini-fuzzer driving each
+	parser with random bytes of varying lengths (xorshift32 PRNG,
+	user-seedable for reproducibility).  Covers TPKT, X.224
+	(parse_cr + parse_dt), BER (length + universal/app tag +
+	integer/boolean/enumerated/octet-string), PER (length +
+	choice + OID + u16/u32 + h221_key + user_data_count), MCS
+	(parse_connect_initial + all DomainPDU parsers), CLIPRDR
+	(parse_hdr + parse_format_list both modes + parse_format_
+	data_request), and fast-path input.  2.1 million iterations
+	across three seeds under ASan+UBSan: zero crashes, zero
+	out-of-bounds, zero UB diagnostics.  `make fuzz` runs a
+	5000-iteration smoke pass over every parser.
+
+	pledge(2) on OpenBSD: each binary now drops to the minimum
+	promise set after its setup phase:
+	  - rdpd worker (after fork, before run_proxy):
+	      stdio inet unix
+	  - rdp-sessionmgr (after bind):
+	      stdio rpath wpath cpath unix proc exec id getpw
+	      dpath fattr
+	  - rdp-session (after Xvfb + xterm spawn):
+	      stdio rpath wpath cpath unix proc
+	The full live chain (xfreerdp from Linux -> OpenBSD daemon ->
+	bsd_auth -> rdp-session -> Xvfb -> xterm -> back) still works
+	with these pledges active; the listener correctly stays
+	unpledged so it can accept + fork + setuid.  On non-OpenBSD
+	the pledge calls compile to a no-op via the compat.h shim.
+
+	Static analysis: cppcheck pass surfaced no correctness bugs.
+	A dead inner struct in src/session/clip_x11.c was removed.
+
+	Out of scope for this phase: clang/libFuzzer (no clang on
+	the dev box), 24 CPU-hours of fuzzing per parser, multi-OS
+	CI matrix (no infra), and the Linux seccomp-bpf / FreeBSD
+	capsicum allow-lists -- the configure script does detect
+	those primitives so wiring them is straightforward when
+	the rest is ready.
+
+Unreleased (0.0.7, Phase H)
+	Clean disconnect.  The outbound MCS Disconnect Provider
+	Ultimatum was wrapped in a Send Data Indication, which the
+	spec does not permit -- the PDU is its own MCS choice (8),
+	not part of a Send Data exchange.  Added
+	src/daemon/conn.c::send_mcs_raw that wraps a bare MCS PDU
+	in X.224 DT + TPKT only, and routed the disconnect through
+	it.  On the wire the server now emits exactly 9 bytes
+	(TPKT 4 + X.224 DT 3 + MCS 2) on session end, which
+	Microsoft RDP clients and xfreerdp accept silently.
+
+	Shutdown Request PDU: when the client sends PDUTYPE2_SHUTDOWN_
+	REQUEST (mstsc's Ctrl+Alt+End maps to this), the worker now
+	replies with PDUTYPE2_SHUTDOWN_DENIED so the client follows
+	up with a graceful MCS Disconnect rather than a hard close.
+	Detection lives in maybe_dispatch_clip alongside the CLIPRDR
+	dispatcher (the I/O channel filter catches it).
+
+	TCP keepalive on accepted sockets via SO_KEEPALIVE plus
+	per-OS TCP_KEEPIDLE/INTVL/CNT (60s/10s/6) where the headers
+	are present.  Half-open TCP connections are detected within
+	about two minutes of silence, so the worker exits even if
+	the client process is killed without a TCP FIN.
+
+	DRDYNVC: minimal stub kept from earlier phases.  The channel
+	is joined at MCS connect; the daemon never initiates any
+	Capabilities Request, so xfreerdp doesn't try to open
+	dynamic channels and the channel sits silent for the
+	connection lifetime.  Full DRDYNVC support is a v2 item.
+
+	Verified live on OpenBSD: with rdp-session, Xvfb :100, xterm,
+	and a user shell all running, killing the xfreerdp process
+	from the local side caused the worker to detect TLS EOF,
+	emit the MCS Disconnect, close TLS, close the backend fd;
+	rdp-session saw EOF on its backend fd, terminated Xvfb and
+	xterm, and exited; rdp-sessionmgr's SIGCHLD reaper collected
+	them.  After teardown, `ps -fU rdptest` showed no remaining
+	processes; only rdpd and rdp-sessionmgr listeners stayed up.
+
+Unreleased (0.0.6, Phase G)
+	CLIPRDR: MS-RDPECLIP static virtual channel, text formats only
+	(CF_UNICODETEXT) for v1.  Bidirectional: copy text in the
+	per-user xterm and it lands in the local clipboard; copy on
+	the client side and paste in the xterm.
+
+	src/channels/cliprdr.{c,h}: PDU builders/parsers for
+	CB_MONITOR_READY, CB_CLIP_CAPS, CB_FORMAT_LIST (long format
+	names path), CB_FORMAT_LIST_RESPONSE, CB_FORMAT_DATA_REQUEST,
+	CB_FORMAT_DATA_RESPONSE.  Inbound format list parser
+	recognises both the long and short forms.  UTF-16LE <-> UTF-8
+	conversion uses src/common/utf16.
+
+	conn.c: identifies the CLIPRDR channel at MCS connect time by
+	walking the CS_NET channel list, dispatches incoming SDRs on
+	that channel to the cliprdr handler, sends Monitor Ready and
+	Caps to the client after activation, wraps outgoing CLIPRDR
+	PDUs in CHANNEL_PDU_HEADER + Send Data Indication + X.224 DT
+	+ TPKT.  No reassembly path yet (a single FIRST|LAST chunk
+	carries each PDU); fragmentation is a follow-up.
+
+	Backend RPC gains three message types: CLIP_OFFER (announce
+	available formats), CLIP_REQUEST (ask for a format), CLIP_DATA
+	(deliver the bytes).  Worker translates these to CLIPRDR PDUs
+	and vice-versa.
+
+	src/session/clip_x11.{c,h}: X11 selection bridge in
+	rdp-session.  XFixesSelectSelectionInput on CLIPBOARD detects
+	owner changes coming from xterm or other X clients; we then
+	XConvertSelection for UTF8_STRING into a scratch property,
+	read the bytes on SelectionNotify, and send CLIP_OFFER +
+	(later) CLIP_DATA to the worker.  On CLIP_OFFER from the
+	worker we claim CLIPBOARD via XSetSelectionOwner; on
+	SelectionRequest we answer the TARGETS query immediately and
+	defer text targets until CLIP_DATA arrives, replying with
+	XChangeProperty + a synthetic SelectionNotify.
+
+	The +clipboard flag must be passed to xfreerdp for the local
+	side to mirror the RDP clipboard into the local CLIPBOARD
+	selection.
+
+	Verified live on OpenBSD: xclip on display :100 in the
+	rdp-session ksh shell triggers a XFixesSelectionNotify ->
+	CLIP_OFFER -> CB_FORMAT_LIST -> CB_FORMAT_DATA_REQUEST ->
+	CLIP_REQUEST -> CLIP_DATA -> CB_FORMAT_DATA_RESPONSE round
+	trip; the text appears in the local Xvfb's CLIPBOARD where
+	xfreerdp deposited it.  The reverse direction works the same
+	way.
+
+Unreleased (0.0.5, Phase F)
+	rdp-session: a new binary, exec'd by rdp-sessionmgr after
+	SPAWN authenticates and drops privileges to the target user.
+	Spawns Xvfb on the first free DISPLAY in :100-:200, opens
+	it as an X client, sets up MIT-SHM XShm capture and XTest
+	input injection, then launches xterm.  Captures the root
+	window every 200 ms and pushes a FRAME backend message.
+	Reads INPUT_KEY/INPUT_MOUSE messages from the worker and
+	injects them via XTestFakeKeyEvent / XTestFakeButtonEvent.
+
+	Backend RPC: src/backend/proto.{h,c}.  AF_UNIX SOCK_STREAM
+	socket pair set up by sessmgr at SPAWN.  Length-prefixed
+	frames: HELLO_S2W (mode), FRAME (BGR 24bpp pixels), INPUT_KEY,
+	INPUT_MOUSE, BYE.
+
+	rdp-sessionmgr SPAWN op (was stubbed in Phase E): handler
+	verifies prior AUTH on the same connection, looks up the
+	authenticated user via getpwnam, fork()s, in the child does
+	initgroups + setresgid + setresuid, sets HOME/USER/SHELL/PATH
+	(now including /usr/X11R6/bin), exec()s rdp-session with the
+	socketpair on fd 3.  Returns the other end of the pair to
+	the worker via SCM_RIGHTS in the SPAWN reply.
+
+	Sessmgr connection model is now multi-op: a single connection
+	does AUTH then SPAWN, with the authenticated username
+	remembered between the two.  Closing the connection forgets
+	the auth.  Bug: the global SIGCHLD reaper raced with PAM
+	and bsd_auth's own waitpid() for their helper processes;
+	handle_auth now sets SIGCHLD to SIG_DFL around the
+	`rdp_auth_user` call and restores it afterwards.
+
+	rdpd worker: post-login proxy loop in conn.c.  After greeter
+	OK, calls rdp_sessmgr_spawn, receives backend fd, polls
+	{tls_fd, be_fd}.  TLS fast-path input -> INPUT_KEY/MOUSE
+	backend messages.  Backend FRAME messages -> tiled fast-path
+	bitmap updates over the same TLS connection.
+
+	Configure: probes for libX11, libXdamage, libXext, libXfixes,
+	libXtst.  Picks /usr/X11R6/include and -L/usr/X11R6/lib on
+	the BSDs.  Finds Xvfb in PATH or /usr/X11R6/bin and embeds
+	the path as RDP_XVFB_PATH at compile time.
+
+	Verified live on OpenBSD: rdp-sessionmgr (root via doas) +
+	rdpd (non-root) + xfreerdp from the Linux box.  A real shell
+	for user rdptest renders inside the xfreerdp window;
+	captured screenshot shows the xterm prompt "amd64$" with
+	the X root stipple, proving the full pipeline from xfreerdp
+	through TLS, the greeter, sessmgr AUTH+SPAWN, rdp-session,
+	Xvfb, and back.
+
+Unreleased (0.0.4, Phase E)
+	rdp-sessionmgr: a separate privileged daemon that owns
+	authentication.  AF_UNIX SOCK_SEQPACKET socket; each
+	request/response is one atomic datagram.  One op for v1:
+	AUTH user pass -> ok | fail.  SPAWN remains stubbed for
+	Phase F (X session helper).
+
+	Auth backends are picked by configure: PAM on Linux,
+	FreeBSD and NetBSD; bsd_auth on OpenBSD.  Linux PAM uses
+	the "login" service by default, overridable via -S; the
+	conversation callback feeds the password to
+	PAM_PROMPT_ECHO_OFF.  OpenBSD uses `auth_userokay(3)` and
+	links against `-lutil`.
+
+	Worker side: rdpd now takes -S sock_path.  conn.c plumbs
+	the path into rdp_greeter_run via the auth_fn hook the
+	greeter already had; when -S is omitted the previous
+	"accept any non-empty pair" stub stays in place for
+	development.  The password buffer makes one trip from
+	greeter -> worker -> sessmgr socket and is then
+	explicit_bzero'd on both ends.
+
+	Verified live: the OpenBSD daemon, with rdp-sessionmgr
+	running under doas, rejects wrong passwords for the fuzz
+	user and accepts the correct password for a throwaway
+	rdptest user (bcrypt-hashed via encrypt(1), wiped after
+	the test).  xfreerdp on the Linux box drives the full
+	connection; greeter shows "Authentication failed" in red
+	on rejection.
+
+Unreleased (0.0.3, Phase D)
+	Greeter: a login dialog drawn entirely via fast-path bitmap
+	updates (no drawing orders required, since the Demand Active
+	negotiates none).  Centred panel with "Username" and "Password"
+	fields, a Login button, and a status line.  Focus is cycled by
+	Tab; Enter advances Username -> Password and submits from
+	Password or the button.  Backspace deletes; Esc cancels.
+	Password is masked as bullets and `explicit_bzero`'d on every
+	transition out of SUBMITTING.
+
+	The font is an 8x16 PSF (public-domain Linux console face,
+	extracted by tools/mkfont.py).  US-layout scancode->ASCII map
+	in keymap.c; per-LCID layouts are a follow-up.  Authentication
+	is pluggable via a function pointer in rdp_greeter_run; the
+	default stub accepts any non-empty user/password pair.  Real
+	PAM/bsd_auth wiring lives in Phase E.
+
+	On submit the daemon's conn.c falls through from the greeter
+	to the previous Phase B/C post-login behaviour (solid frame
+	plus logged input events).
+
+	Verified live on the OpenBSD VM via xfreerdp: dialog renders,
+	Username and Password fields accept typed input, Tab moves
+	focus, password input shows as bullets.  Screenshots captured
+	in regress/integ for reference.
+
+Unreleased (0.0.2, Phase A)
+	Full RDP handshake implemented from scratch in C: TPKT (RFC 1006),
+	X.224 Class 0 with RDP_NEG_REQ/RSP, TLS server-side via OpenSSL
+	with on-the-fly self-signed cert generation, MCS Connect Initial
+	parse and Connect Response build (BER application tag 102 plus a
+	GCC Conference Create Response with SC_CORE / SC_SECURITY /
+	SC_NET blocks), Erect Domain Request, Attach User Confirm,
+	Channel Join Request/Confirm loop, RDP Security header + Client
+	Info PDU parse, "Valid Client" license alert, Demand Active with
+	the full set of mandatory caps (drawing orders disabled, glyph
+	cache disabled, bitmap cache empty, multifragment 0xFFFF, large
+	pointer 96x96), Confirm Active parse, finalization handshake
+	(Synchronize, Control Cooperate, Granted Control, Font Map).
+	The daemon then sends a fast-path Synchronize, System Pointer
+	Default, and a tiled solid bitmap update.  Fast-path input
+	(scancode, mouse, MouseX, sync, Unicode) is parsed and logged.
+	Clean disconnect on inbound MCS Disconnect Provider Ultimatum;
+	outbound disconnect on session end.
+
+	rdpd forks a worker per connection; the worker runs the state
+	machine, the parent reaps SIGCHLD.  Per-connection TLS uses a
+	shared SSL_CTX inherited via fork.  Self-signed certificate
+	generated to tmp/server.{crt,key} on first run.
+
+	Stubs in place for Phase D (greeter), Phase E (sessionmgr +
+	PAM), Phase F (rdp-session + Xvfb backend), Phase G (CLIPRDR),
+	and Phase J (NLA/CredSSP).  Backend vtable defined in
+	src/include/rdp_backend.h.
+
+	Verified via regress/integ/connect_test.py: full path through
+	TLS handshake, MCS Connect, Attach User, Channel Join.
+
+Unreleased (0.0.1, Phase 0)
+	Project skeleton.  Hand-rolled configure script probes for libtls
+	or OpenSSL, getrandom or arc4random, PAM or bsd_auth, and epoll
+	or kqueue.  Baseline rdpd daemon accepts connections on a listen
+	port (default 3389) and closes them immediately, logging each
+	accept.  Common library: bounded buffers, read/write helpers,
+	syslog wrapper, allocation wrappers, random byte source, string
+	and UTF-16 helpers.  Man page stubs for rdpd(8), rdpd.conf(5),
+	rdp-sessionmgr(8), and rdp-session(8).  Regress harness with
+	unit tests for the common library.  Builds on Linux (glibc);
+	targets OpenBSD, FreeBSD, NetBSD with stub adaptation paths.

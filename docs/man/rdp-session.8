@@ -1,0 +1,33 @@
+.\" Manual page for rdp-session(8).  mdoc format.
+.Dd May 23, 2026
+.Dt RDP-SESSION 8
+.Os
+.Sh NAME
+.Nm rdp-session
+.Nd per-user session helper for the Remote Desktop Protocol server
+.Sh SYNOPSIS
+.Nm
+.Sh DESCRIPTION
+.Nm
+is the unprivileged per-user component of the Remote Desktop
+Protocol server.  It is started by
+.Xr rdp-sessionmgr 8
+after authentication, with one end of a backend RPC socket pre-opened
+on a known file descriptor.  It launches
+.Xr Xvfb 1
+(or the configured X server), captures damaged regions with
+.Xr XDamage 3 ,
+injects input via the XTEST extension, bridges the X11 CLIPBOARD
+selection to the
+.Sy CLIPRDR
+RDP channel, and runs the user's session script
+.Pa ~/.xsession .
+.Pp
+Phase 0 placeholder; not yet implemented.
+.Sh SEE ALSO
+.Xr rdpd 8 ,
+.Xr rdp-sessionmgr 8
+.Sh AUTHORS
+.An Renaud Allard Aq Mt renaud@allard.it
+.Sh BUGS
+Not implemented in Phase 0.

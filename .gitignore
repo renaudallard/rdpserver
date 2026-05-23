@@ -1,0 +1,25 @@
+# build artefacts
+*.o
+*.a
+*.d
+config.mk
+src/include/config.h
+
+# binaries
+src/daemon/rdpd
+src/sessionmgr/rdp-sessionmgr
+src/session/rdp-session
+
+# regress + fuzz
+regress/common/*_test
+regress/wire/*_test
+regress/fuzz/fuzz_parsers
+
+# anything dropped under tmp/ at runtime (certs, test scratch, logs)
+tmp/*
+!tmp/.gitkeep
+
+# editor / tagger
+tags
+TAGS
+.depend

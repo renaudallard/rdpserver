@@ -1,0 +1,64 @@
+.\" Manual page for rdpd(8).  mdoc format.
+.Dd May 23, 2026
+.Dt RDPD 8
+.Os
+.Sh NAME
+.Nm rdpd
+.Nd Remote Desktop Protocol server
+.Sh SYNOPSIS
+.Nm
+.Op Fl df
+.Op Fl h Ar host
+.Op Fl p Ar port
+.Sh DESCRIPTION
+.Nm
+is the Remote Desktop Protocol server.  It listens for incoming RDP
+connections, presents a graphical login screen drawn directly with
+RDP drawing orders, authenticates the user, and spawns a fresh
+per-user X11 session.  The server speaks RDP natively; there is no
+VNC in the stack.
+.Pp
+This is the
+.Sy Phase A
+release: the daemon completes the full RDP handshake (TPKT, X.224,
+TLS, MCS, license, capability negotiation, finalization) and paints
+a solid background.  The login greeter, PAM session spawning, X11
+session helper, clipboard channel, and NLA are scaffolded but not
+yet implemented; see
+.Pa docs/ROADMAP.md
+in the source tree.
+.Pp
+The options are as follows:
+.Bl -tag -width Ds
+.It Fl d
+Enable debug logging.
+.It Fl f
+Run in the foreground and log to standard error instead of
+.Xr syslog 3 .
+.It Fl h Ar host
+Bind to
+.Ar host
+instead of all addresses.
+.It Fl p Ar port
+Listen on
+.Ar port
+instead of 3389.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /etc/rdpd.conf
+Configuration file (see
+.Xr rdpd.conf 5 ;
+not yet honoured in this release).
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh SEE ALSO
+.Xr rdpd.conf 5 ,
+.Xr rdp-sessionmgr 8 ,
+.Xr rdp-session 8
+.Sh AUTHORS
+.An Renaud Allard Aq Mt renaud@allard.it
+.Sh BUGS
+Phase 0 is the protocol skeleton only; it does not yet accept the RDP
+handshake.  See the project roadmap.

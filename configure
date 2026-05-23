@@ -1,0 +1,493 @@
+#! /bin/sh
+#
+# rdpserver configure script.
+#
+# Probes the host system and writes config.mk (build flags) and
+# src/include/config.h (feature defines).  POSIX sh; no bashisms.
+#
+# Usage: ./configure [--prefix=PATH] [--with-tls=libtls|openssl]
+#                    [--with-auth=pam|bsd_auth] [--enable-debug]
+#                    [--disable-hardening]
+
+set -e
+
+prefix=/usr/local
+sysconfdir=
+localstatedir=
+mandir=
+with_tls=auto
+with_auth=auto
+enable_debug=0
+enable_hardening=1
+enable_sanitizers=0
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--prefix=*)        prefix=${1#*=} ;;
+	--sysconfdir=*)    sysconfdir=${1#*=} ;;
+	--localstatedir=*) localstatedir=${1#*=} ;;
+	--mandir=*)        mandir=${1#*=} ;;
+	--with-tls=*)      with_tls=${1#*=} ;;
+	--with-auth=*)     with_auth=${1#*=} ;;
+	--enable-debug)    enable_debug=1 ;;
+	--disable-hardening) enable_hardening=0 ;;
+	--enable-sanitizers) enable_sanitizers=1; enable_debug=1 ;;
+	--help|-h)
+		cat <<EOF
+Usage: ./configure [options]
+
+  --prefix=PATH            install prefix (default /usr/local)
+  --sysconfdir=PATH        config dir (default PREFIX/etc)
+  --localstatedir=PATH     runtime dir (default /var)
+  --mandir=PATH            manual pages (default PREFIX/share/man)
+  --with-tls=libtls|openssl  TLS implementation (default: auto)
+  --with-auth=pam|bsd_auth   authentication backend (default: auto)
+  --enable-debug           build with -O0 -g3, no NDEBUG
+  --disable-hardening      omit hardening compile and link flags
+
+Environment: CC, CFLAGS, LDFLAGS, LIBS, PKG_CONFIG.
+EOF
+		exit 0
+		;;
+	*)
+		echo "configure: unknown option: $1" >&2
+		exit 1
+		;;
+	esac
+	shift
+done
+
+: ${CC:=cc}
+: ${PKG_CONFIG:=pkg-config}
+
+[ -z "$sysconfdir" ]    && sysconfdir=$prefix/etc
+[ -z "$localstatedir" ] && localstatedir=/var
+[ -z "$mandir" ]        && mandir=$prefix/share/man
+
+os=$(uname -s)
+arch=$(uname -m)
+
+echo "configure: host: $os $arch"
+echo "configure: compiler: $CC"
+
+# Build a temp dir under the project tree (per project policy: no /tmp).
+work=./tmp/configure.$$
+mkdir -p "$work"
+trap 'rm -rf "$work"' EXIT INT TERM
+
+cleanup_after_probe() {
+	rm -f "$work"/probe "$work"/probe.c "$work"/probe.err
+}
+
+# tryc CODE [EXTRA_CFLAGS] [EXTRA_LDFLAGS]
+# Compiles a C snippet; returns 0 on success.
+tryc() {
+	_code=$1
+	_cf=$2
+	_lf=$3
+	printf '%s\n' "$_code" > "$work"/probe.c
+	# shellcheck disable=SC2086
+	$CC $CFLAGS $_cf "$work"/probe.c -o "$work"/probe $LDFLAGS $_lf >"$work"/probe.err 2>&1
+	_r=$?
+	cleanup_after_probe
+	return $_r
+}
+
+probe() {
+	_name=$1
+	_code=$2
+	_cf=$3
+	_lf=$4
+	printf 'configure: checking %s ... ' "$_name"
+	if tryc "$_code" "$_cf" "$_lf"; then
+		echo yes
+		return 0
+	fi
+	echo no
+	return 1
+}
+
+# Always-required headers.
+probe "for <stdint.h>" '#include <stdint.h>
+int main(void) { return (int)sizeof(uint64_t); }' || {
+	echo "configure: <stdint.h> required" >&2; exit 1; }
+probe "for <unistd.h>" '#include <unistd.h>
+int main(void) { return (int)getpid(); }' || {
+	echo "configure: <unistd.h> required" >&2; exit 1; }
+
+HAVE_GETRANDOM=0
+probe "for getrandom(2)" '#include <sys/random.h>
+int main(void) { char b[4]; return getrandom(b, sizeof b, 0); }' \
+	&& HAVE_GETRANDOM=1
+
+HAVE_ARC4RANDOM=0
+probe "for arc4random_buf(3)" '#include <stdlib.h>
+int main(void) { char b[4]; arc4random_buf(b, sizeof b); return 0; }' \
+	&& HAVE_ARC4RANDOM=1
+
+if [ "$HAVE_GETRANDOM" = 0 ] && [ "$HAVE_ARC4RANDOM" = 0 ]; then
+	echo "configure: neither getrandom nor arc4random found" >&2
+	exit 1
+fi
+
+HAVE_STRLCPY=0
+probe "for strlcpy(3)" '#include <string.h>
+int main(void) { char d[4]; return (int)strlcpy(d, "x", sizeof d); }' \
+	&& HAVE_STRLCPY=1
+
+HAVE_REALLOCARRAY=0
+probe "for reallocarray(3)" '#include <stdlib.h>
+int main(void) { void *p = reallocarray(0, 4, 4); return p == 0; }' \
+	&& HAVE_REALLOCARRAY=1
+
+HAVE_EXPLICIT_BZERO=0
+probe "for explicit_bzero(3)" '#include <string.h>
+int main(void) { char b[4]; explicit_bzero(b, sizeof b); return 0; }' \
+	&& HAVE_EXPLICIT_BZERO=1
+
+HAVE_PLEDGE=0
+probe "for pledge(2)" '#include <unistd.h>
+int main(void) { return pledge("stdio", 0); }' && HAVE_PLEDGE=1
+
+HAVE_UNVEIL=0
+probe "for unveil(2)" '#include <unistd.h>
+int main(void) { return unveil(0, 0); }' && HAVE_UNVEIL=1
+
+HAVE_CAPSICUM=0
+probe "for capsicum cap_enter(2)" '#include <sys/capsicum.h>
+int main(void) { return cap_enter(); }' && HAVE_CAPSICUM=1
+
+HAVE_SECCOMP=0
+probe "for seccomp prctl" '#include <sys/prctl.h>
+#include <linux/seccomp.h>
+int main(void) { return prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); }' \
+	&& HAVE_SECCOMP=1
+
+HAVE_EPOLL=0
+probe "for epoll(7)" '#include <sys/epoll.h>
+int main(void) { return epoll_create1(0); }' && HAVE_EPOLL=1
+
+HAVE_KQUEUE=0
+probe "for kqueue(2)" '#include <sys/types.h>
+#include <sys/event.h>
+int main(void) { return kqueue(); }' && HAVE_KQUEUE=1
+
+if [ "$HAVE_EPOLL" = 0 ] && [ "$HAVE_KQUEUE" = 0 ]; then
+	echo "configure: warning: no epoll or kqueue; falling back to poll(2)"
+fi
+
+# TLS selection.  libtls is preferred (smaller API surface, no global
+# state, OpenBSD origin).  Fall back to OpenSSL.
+TLS_BACKEND=
+TLS_CFLAGS=
+TLS_LIBS=
+
+# pkg-config in some environments is a stub that returns empty output
+# but success.  Trust it only when it returns non-empty link flags.
+pcq() {
+	$PKG_CONFIG --exists "$1" 2>/dev/null || return 1
+	_o=$($PKG_CONFIG "$2" "$1" 2>/dev/null)
+	[ -n "$_o" ] || return 1
+	printf %s "$_o"
+}
+
+try_libtls() {
+	_cf=$(pcq libtls --cflags) || _cf=
+	_lf=$(pcq libtls --libs)   || _lf=-ltls
+	tryc '#include <tls.h>
+int main(void) { tls_init(); return 0; }' "$_cf" "$_lf" || return 1
+	TLS_BACKEND=libtls
+	TLS_CFLAGS=$_cf
+	TLS_LIBS=$_lf
+	return 0
+}
+
+try_openssl() {
+	_cf=$(pcq openssl --cflags) || _cf=
+	_lf=$(pcq openssl --libs)   || _lf="-lssl -lcrypto"
+	tryc '#include <openssl/ssl.h>
+int main(void) { SSL_library_init(); return 0; }' "$_cf" "$_lf" || return 1
+	TLS_BACKEND=openssl
+	TLS_CFLAGS=$_cf
+	TLS_LIBS=$_lf
+	return 0
+}
+
+case "$with_tls" in
+libtls)
+	printf 'configure: checking for libtls ... '
+	if try_libtls; then echo yes; else echo no; exit 1; fi ;;
+openssl)
+	printf 'configure: checking for openssl ... '
+	if try_openssl; then echo yes; else echo no; exit 1; fi ;;
+auto)
+	# Our current src/sec/tls.c uses the OpenSSL API.  On OpenBSD
+	# LibreSSL provides the same API alongside libtls, so we
+	# prefer the OpenSSL probe.  A native libtls path can be added
+	# later; for now picking libtls here would link without the
+	# required symbols.
+	printf 'configure: checking for openssl ... '
+	if try_openssl; then
+		echo yes
+	else
+		echo no
+		printf 'configure: checking for libtls ... '
+		if try_libtls; then echo yes
+		else echo no
+			echo "configure: no TLS library found" >&2; exit 1
+		fi
+	fi ;;
+*)
+	echo "configure: --with-tls must be libtls or openssl" >&2; exit 1 ;;
+esac
+echo "configure: tls backend: $TLS_BACKEND"
+
+# X11 development environment for the v1 backend.  Probe by compile
+# and link rather than pkg-config (some systems ship the stub variant
+# we saw on this host).  On the BSDs the headers live under
+# /usr/X11R6/include; we add the path conditionally.
+X11_CFLAGS=
+X11_LIBS=
+if [ -d /usr/X11R6/include ]; then
+	X11_CFLAGS="-I/usr/X11R6/include"
+fi
+if [ -d /usr/X11R6/lib ]; then
+	X11_LIBS="-L/usr/X11R6/lib"
+fi
+X11_LINK_LIBS="-lX11 -lXext -lXtst -lXdamage -lXfixes"
+
+HAVE_X11=0
+probe "for X11 development headers" '
+#include <X11/Xlib.h>
+#include <X11/extensions/Xdamage.h>
+#include <X11/extensions/XShm.h>
+#include <X11/extensions/XTest.h>
+#include <X11/extensions/Xfixes.h>
+int main(void) {
+	(void)XOpenDisplay; (void)XDamageCreate; (void)XShmAttach;
+	(void)XTestFakeKeyEvent; (void)XFixesQueryExtension;
+	return 0;
+}' "$X11_CFLAGS" "$X11_LIBS $X11_LINK_LIBS" && HAVE_X11=1
+
+if [ "$HAVE_X11" = 1 ]; then
+	X11_LIBS="$X11_LIBS $X11_LINK_LIBS"
+else
+	echo "configure: warning: X11 headers/libs not found; rdp-session won't be built"
+	X11_CFLAGS=
+	X11_LIBS=
+fi
+
+# Xvfb binary path.  Embedded into rdp-session at compile time so we
+# spawn it without scanning PATH each connection.
+XVFB_PATH=
+for p in /usr/X11R6/bin/Xvfb /usr/bin/Xvfb /usr/local/bin/Xvfb; do
+	if [ -x "$p" ]; then XVFB_PATH=$p; break; fi
+done
+[ -n "$XVFB_PATH" ] && echo "configure: Xvfb at $XVFB_PATH"
+
+# Auth backend.  PAM on Linux/FreeBSD/NetBSD/macOS; bsd_auth on OpenBSD.
+AUTH_BACKEND=
+AUTH_LIBS=
+
+try_pam() {
+	tryc '#include <security/pam_appl.h>
+int main(void) { pam_handle_t *p = 0; (void)p; return 0; }' "" "-lpam" \
+		|| return 1
+	AUTH_BACKEND=pam
+	AUTH_LIBS=-lpam
+}
+
+try_bsdauth() {
+	tryc '#include <sys/types.h>
+#include <login_cap.h>
+#include <bsd_auth.h>
+int main(void) { return auth_userokay((char*)"x",0,0,(char*)"x"); }' \
+		"" "-lutil" || return 1
+	AUTH_BACKEND=bsd_auth
+	AUTH_LIBS=-lutil
+}
+
+case "$with_auth" in
+pam)
+	printf 'configure: checking for PAM ... '
+	if try_pam; then echo yes; else echo no; exit 1; fi ;;
+bsd_auth)
+	printf 'configure: checking for bsd_auth ... '
+	if try_bsdauth; then echo yes; else echo no; exit 1; fi ;;
+auto)
+	# Prefer bsd_auth on OpenBSD; PAM otherwise.
+	if [ "$os" = OpenBSD ]; then
+		printf 'configure: checking for bsd_auth ... '
+		if try_bsdauth; then echo yes
+		else echo no
+			printf 'configure: checking for PAM ... '
+			try_pam && echo yes || { echo no
+				echo "no auth backend" >&2; exit 1; }
+		fi
+	else
+		printf 'configure: checking for PAM ... '
+		if try_pam; then echo yes
+		else echo no
+			echo "configure: PAM required on $os" >&2; exit 1
+		fi
+	fi ;;
+*)
+	echo "configure: --with-auth must be pam or bsd_auth" >&2; exit 1 ;;
+esac
+echo "configure: auth backend: $AUTH_BACKEND"
+
+# Hardening flags.  Only set what the compiler accepts.
+warn_cflags='-Wall -Wextra -Wshadow -Wstrict-prototypes -Wpointer-arith'
+warn_cflags="$warn_cflags -Wcast-qual -Wundef -Wwrite-strings -Wformat=2"
+warn_cflags="$warn_cflags -Wmissing-prototypes -Wold-style-definition"
+
+if [ "$enable_hardening" = 1 ]; then
+	hard_cflags='-fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIE'
+	hard_ldflags='-pie -Wl,-z,relro,-z,now,-z,noexecstack'
+else
+	hard_cflags=
+	hard_ldflags=
+fi
+
+if [ "$enable_debug" = 1 ]; then
+	opt_cflags='-O0 -g3'
+else
+	opt_cflags='-O2 -g'
+fi
+
+san_cflags=
+san_ldflags=
+if [ "$enable_sanitizers" = 1 ]; then
+	# ASan + UBSan.  Disable hardening that conflicts (_FORTIFY_SOURCE
+	# triggers false positives, PIE link is fine).
+	san_cflags='-fsanitize=address,undefined -fno-omit-frame-pointer'
+	san_ldflags='-fsanitize=address,undefined'
+	# Stack protector is fine alongside ASan.  Drop FORTIFY_SOURCE.
+	hard_cflags=$(echo "$hard_cflags" | sed 's/-D_FORTIFY_SOURCE=2//')
+fi
+
+# Filter warning flags through the compiler so older toolchains don't choke.
+accepted_warn=
+for f in $warn_cflags; do
+	if tryc 'int main(void){return 0;}' "$f -Werror" ""; then
+		accepted_warn="$accepted_warn $f"
+	fi
+done
+accepted_warn=$(echo $accepted_warn)
+
+CFLAGS="$opt_cflags $accepted_warn $hard_cflags $san_cflags $CFLAGS"
+LDFLAGS="$hard_ldflags $san_ldflags $LDFLAGS"
+
+# Emit config.h
+cat > src/include/config.h <<EOF
+/*
+ * Copyright (c) 2026 Renaud Allard <renaud@allard.it>
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ *
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in
+ *    the documentation and/or other materials provided with the
+ *    distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+ * COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+ * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+ * ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGES.
+ */
+/*
+ * src/include/config.h -- generated by ./configure on $(date -u +%Y-%m-%dT%H:%M:%SZ)
+ * Do not edit by hand.
+ */
+#ifndef RDP_CONFIG_H
+#define RDP_CONFIG_H
+
+#define RDP_OS_$( printf %s "$os" | tr a-z A-Z | tr -c 'A-Z0-9' _ ) 1
+#define RDP_VERSION_STR "0.0.1-dev"
+
+#define HAVE_GETRANDOM        $HAVE_GETRANDOM
+#define HAVE_ARC4RANDOM       $HAVE_ARC4RANDOM
+#define HAVE_STRLCPY          $HAVE_STRLCPY
+#define HAVE_REALLOCARRAY     $HAVE_REALLOCARRAY
+#define HAVE_EXPLICIT_BZERO   $HAVE_EXPLICIT_BZERO
+#define HAVE_PLEDGE           $HAVE_PLEDGE
+#define HAVE_UNVEIL           $HAVE_UNVEIL
+#define HAVE_CAPSICUM         $HAVE_CAPSICUM
+#define HAVE_SECCOMP          $HAVE_SECCOMP
+#define HAVE_EPOLL            $HAVE_EPOLL
+#define HAVE_KQUEUE           $HAVE_KQUEUE
+#define HAVE_X11              $HAVE_X11
+
+#define RDP_XVFB_PATH         "$XVFB_PATH"
+
+#define RDP_TLS_$(echo $TLS_BACKEND | tr a-z A-Z) 1
+#define RDP_AUTH_$(echo $AUTH_BACKEND | tr a-z A-Z) 1
+
+#define RDP_SYSCONFDIR    "$sysconfdir"
+#define RDP_LOCALSTATEDIR "$localstatedir"
+
+#endif /* RDP_CONFIG_H */
+EOF
+
+# Emit config.mk
+cat > config.mk <<EOF
+# config.mk -- generated by ./configure on $(date -u +%Y-%m-%dT%H:%M:%SZ)
+# Do not edit by hand.
+
+PREFIX        = $prefix
+SYSCONFDIR    = $sysconfdir
+LOCALSTATEDIR = $localstatedir
+MANDIR        = $mandir
+
+CC      = $CC
+CFLAGS  = $CFLAGS -Isrc/include
+LDFLAGS = $LDFLAGS
+
+TLS_BACKEND  = $TLS_BACKEND
+TLS_CFLAGS   = $TLS_CFLAGS
+TLS_LIBS     = $TLS_LIBS
+
+AUTH_BACKEND = $AUTH_BACKEND
+AUTH_LIBS    = $AUTH_LIBS
+
+HAVE_X11    = $HAVE_X11
+X11_CFLAGS  = $X11_CFLAGS
+X11_LIBS    = $X11_LIBS
+XVFB_PATH   = $XVFB_PATH
+
+# Sessionmgr backend selected by configure.
+$(if [ "$AUTH_BACKEND" = bsd_auth ]; then
+	echo "SESSMGR_AUTH_OBJ = src/sessionmgr/auth_bsdauth.o"
+else
+	echo "SESSMGR_AUTH_OBJ = src/sessionmgr/auth_pam.o"
+fi)
+
+OS = $os
+EOF
+
+cat <<EOF
+
+configure: done
+  prefix       $prefix
+  sysconfdir   $sysconfdir
+  localstatedir $localstatedir
+  mandir       $mandir
+  tls backend  $TLS_BACKEND
+  auth backend $AUTH_BACKEND
+  os           $os ($arch)
+
+Next: make
+EOF
