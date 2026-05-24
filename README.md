@@ -77,7 +77,8 @@ text. After auth, a backend RPC shuttles pixel frames from
 | NLA / CredSSP / NTLMv2 | partial | Wire framework only; needs a hash backend (winbind, sssd) to validate without a cleartext side-channel.  The daemon doesn't advertise PROTOCOL_HYBRID; `xfreerdp /sec:nla` is rejected cleanly. |
 | RemoteFX / RDPGFX / H.264 | ✗ | Clients negotiate down to legacy bitmap. |
 | Audio (MS-RDPEA), drive / printer / serial redirection | ✗ | |
-| Multi-monitor, dynamic resize, session reconnect | ✗ | |
+| Session reconnect (auto-reconnect cookie) | ✓ infra | Save Session Info PDU with ARC cookie, Client Info ARC parser, sessmgr SUSPEND/RESUME ops, conn.c reconnect path. Works on clean disconnect; SIGKILL resilience needs sessmgr-retained fd (next item). |
+| Multi-monitor, dynamic resize | ✗ | |
 | Native Xorg DDX (xrdpdev-style), Wayland backend | ✗ | The backend interface accommodates a future native module. |
 
 ## Supported clients

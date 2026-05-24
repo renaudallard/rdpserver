@@ -135,5 +135,59 @@ rdp_client_info_parse(const uint8_t *p, size_t len,
 	READ_STR(cbWorkingDir, info->working_dir);
 
 	#undef READ_STR
+
+	/* Parse optional extraInfo area (MS-RDPBCGR 2.2.1.11.1.1.1).
+	 * Walk past clientAddress, clientDir, clientTimeZone (172 bytes),
+	 * clientSessionId (4), performanceFlags (4), then check for
+	 * cbAutoReconnectLen + autoReconnectCookie. */
+	info->have_arc = 0;
+	{
+		/* clientAddressFamily (2) + cbClientAddress (2) */
+		if (off + 4 > len) return 0;
+		{
+			uint16_t cbAddr = (uint16_t)p[off + 2]
+				| ((uint16_t)p[off + 3] << 8);
+			off += 4 + cbAddr;
+		}
+		/* cbClientDir (2) + clientDir */
+		if (off + 2 > len) return 0;
+		{
+			uint16_t cbDir = (uint16_t)p[off]
+				| ((uint16_t)p[off + 1] << 8);
+			off += 2 + cbDir;
+		}
+		/* clientTimeZone (172) + clientSessionId (4) + performanceFlags (4) */
+		off += 172 + 4 + 4;
+		if (off > len) return 0;
+		/* cbAutoReconnectLen (2) */
+		if (off + 2 > len) return 0;
+		{
+			uint16_t cbArc = (uint16_t)p[off]
+				| ((uint16_t)p[off + 1] << 8);
+			off += 2;
+			if (cbArc == 28 && off + 28 <= len) {
+				/* ARC_CS_PRIVATE_PACKET: cbLen(4) version(4)
+				 * logonId(4) securityVerifier(16) */
+				uint32_t arcVer;
+				off += 4; /* cbLen */
+				arcVer = (uint32_t)p[off]
+					| ((uint32_t)p[off + 1] << 8)
+					| ((uint32_t)p[off + 2] << 16)
+					| ((uint32_t)p[off + 3] << 24);
+				off += 4;
+				if (arcVer == 1) {
+					info->arc_logon_id =
+						(uint32_t)p[off]
+						| ((uint32_t)p[off + 1] << 8)
+						| ((uint32_t)p[off + 2] << 16)
+						| ((uint32_t)p[off + 3] << 24);
+					off += 4;
+					memcpy(info->arc_security_verifier,
+						p + off, 16);
+					info->have_arc = 1;
+				}
+			}
+		}
+	}
 	return 0;
 }

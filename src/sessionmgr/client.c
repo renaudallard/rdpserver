@@ -198,3 +198,95 @@ rdp_sessmgr_close(struct rdp_sessmgr *s)
 	s->fd = -1;
 	explicit_bzero(s->auth_user, sizeof s->auth_user);
 }
+
+int
+rdp_sessmgr_suspend(const char *sock_path,
+		uint32_t logon_id, int be_fd)
+{
+	int fd;
+	uint8_t req[8];
+	struct msghdr msg;
+	struct iovec iov;
+	char cbuf[CMSG_SPACE(sizeof(int))];
+	struct cmsghdr *cmsg;
+	uint8_t resp[8];
+	ssize_t n;
+
+	fd = connect_unix(sock_path);
+	if (fd < 0) return -1;
+	memset(req, 0, sizeof req);
+	req[0] = RDP_SESSMGR_OP_SUSPEND;
+	req[4] = (uint8_t)(logon_id & 0xff);
+	req[5] = (uint8_t)((logon_id >> 8) & 0xff);
+	req[6] = (uint8_t)((logon_id >> 16) & 0xff);
+	req[7] = (uint8_t)((logon_id >> 24) & 0xff);
+
+	memset(&msg, 0, sizeof msg);
+	iov.iov_base = req;
+	iov.iov_len = sizeof req;
+	msg.msg_iov = &iov;
+	msg.msg_iovlen = 1;
+	msg.msg_control = cbuf;
+	msg.msg_controllen = sizeof cbuf;
+	cmsg = CMSG_FIRSTHDR(&msg);
+	cmsg->cmsg_level = SOL_SOCKET;
+	cmsg->cmsg_type = SCM_RIGHTS;
+	cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+	memcpy(CMSG_DATA(cmsg), &be_fd, sizeof(int));
+	if (sendmsg(fd, &msg, 0) < 0) {
+		(void)close(fd);
+		return -1;
+	}
+	n = recv(fd, resp, sizeof resp, 0);
+	(void)close(fd);
+	if (n < 1 || resp[0] != RDP_SESSMGR_OK) return -1;
+	return 0;
+}
+
+int
+rdp_sessmgr_resume(const char *sock_path,
+		uint32_t logon_id, int *fd_out)
+{
+	int fd;
+	uint8_t req[8];
+	uint8_t resp[8];
+	struct msghdr msg;
+	struct iovec iov;
+	char cbuf[CMSG_SPACE(sizeof(int))];
+	struct cmsghdr *cmsg;
+	ssize_t n;
+	int recvd_fd = -1;
+
+	fd = connect_unix(sock_path);
+	if (fd < 0) return -1;
+	memset(req, 0, sizeof req);
+	req[0] = RDP_SESSMGR_OP_RESUME;
+	req[4] = (uint8_t)(logon_id & 0xff);
+	req[5] = (uint8_t)((logon_id >> 8) & 0xff);
+	req[6] = (uint8_t)((logon_id >> 16) & 0xff);
+	req[7] = (uint8_t)((logon_id >> 24) & 0xff);
+	if (send(fd, req, sizeof req, 0) != (ssize_t)sizeof req) {
+		(void)close(fd);
+		return -1;
+	}
+	memset(&msg, 0, sizeof msg);
+	iov.iov_base = resp;
+	iov.iov_len = sizeof resp;
+	msg.msg_iov = &iov;
+	msg.msg_iovlen = 1;
+	msg.msg_control = cbuf;
+	msg.msg_controllen = sizeof cbuf;
+	n = recvmsg(fd, &msg, 0);
+	(void)close(fd);
+	if (n < 1 || resp[0] != RDP_SESSMGR_OK) return -1;
+	for (cmsg = CMSG_FIRSTHDR(&msg); cmsg;
+	     cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+		if (cmsg->cmsg_level == SOL_SOCKET
+		    && cmsg->cmsg_type == SCM_RIGHTS
+		    && cmsg->cmsg_len >= CMSG_LEN(sizeof(int)))
+			memcpy(&recvd_fd, CMSG_DATA(cmsg), sizeof(int));
+	}
+	if (recvd_fd < 0) return -1;
+	*fd_out = recvd_fd;
+	return 0;
+}

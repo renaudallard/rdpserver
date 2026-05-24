@@ -70,4 +70,14 @@ int rdp_sessmgr_spawn(struct rdp_sessmgr *s,
 
 void rdp_sessmgr_close(struct rdp_sessmgr *s);
 
+/* SUSPEND: worker hands its backend fd + logonId to sessmgr so the
+ * session stays alive across a reconnect. */
+int rdp_sessmgr_suspend(const char *sock_path,
+		uint32_t logon_id, int be_fd);
+
+/* RESUME: new worker presents a logonId; sessmgr returns the
+ * matching backend fd if the session is still alive. */
+int rdp_sessmgr_resume(const char *sock_path,
+		uint32_t logon_id, int *fd_out);
+
 #endif /* RDP_SESSIONMGR_H */

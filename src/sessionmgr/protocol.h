@@ -60,8 +60,10 @@
 
 #include <stdint.h>
 
-#define RDP_SESSMGR_OP_AUTH   0x01
-#define RDP_SESSMGR_OP_SPAWN  0x02
+#define RDP_SESSMGR_OP_AUTH    0x01
+#define RDP_SESSMGR_OP_SPAWN   0x02
+#define RDP_SESSMGR_OP_SUSPEND 0x03
+#define RDP_SESSMGR_OP_RESUME  0x04
 
 #define RDP_SESSMGR_OK        0x00
 #define RDP_SESSMGR_FAIL      0x01
@@ -89,6 +91,25 @@
  *              That fd is one end of a SOCK_STREAM socketpair; the
  *              other end has been handed to the rdp-session child
  *              as fd 3 before exec.
+ *
+ * SUSPEND request (worker -> sessmgr, on client disconnect):
+ *   u8  op       = 3
+ *   u8  reserved
+ *   u16 reserved
+ *   u32 logonId
+ *   Ancillary: the backend fd via SCM_RIGHTS.
+ * SUSPEND reply: status byte.
+ *
+ * RESUME request (new worker -> sessmgr, on reconnect attempt):
+ *   u8  op       = 4
+ *   u8  reserved
+ *   u16 reserved
+ *   u32 logonId
+ * RESUME reply: status byte. On success, the backend fd is returned
+ *   via SCM_RIGHTS.
  */
+
+#define RDP_SESSMGR_SUSPEND_MAX     16
+#define RDP_SESSMGR_SUSPEND_TIMEOUT 120  /* seconds */
 
 #endif /* RDP_SESSMGR_PROTOCOL_H */

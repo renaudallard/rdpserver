@@ -54,6 +54,7 @@
 #include "../include/rdp_log.h"
 
 #include "../common/io.h"
+#include "../common/rand.h"
 #include "../sec/tls.h"
 #include "../wire/tpkt.h"
 #include "../wire/x224.h"
@@ -752,7 +753,11 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 	uint16_t desktop_w = 0, desktop_h = 0;
 	struct rdp_tls_ctx *tls = cfg->tls;
 	struct clip_state clip = {0};
+	struct rdp_client_info client_info;
+	uint32_t logon_id = 0;
+	uint8_t  arc_random[16] = {0};
 	clip.user_id = user_id;
+	memset(&client_info, 0, sizeof client_info);
 
 	rdp_debug("conn[%s]: starting", peer);
 
@@ -931,14 +936,16 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 				goto done;
 			}
 			if (rdp_client_info_parse(payload + sh,
-				payload_len - (size_t)sh, &info,
+				payload_len - (size_t)sh, &client_info,
 				&pw, &pw_len) < 0) {
 				rdp_err("conn[%s]: bad Client Info", peer);
 				goto done;
 			}
-			rdp_info("conn[%s]: user=%s domain=%s shell=%s",
-				peer, info.username[0] ? info.username : "?",
-				info.domain, info.alt_shell);
+			rdp_info("conn[%s]: user=%s domain=%s arc=%s",
+				peer,
+				client_info.username[0] ? client_info.username : "?",
+				client_info.domain,
+				client_info.have_arc ? "yes" : "no");
 			break;
 		}
 		rdp_err("conn[%s]: unexpected MCS type 0x%02x",
@@ -1055,6 +1062,47 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 		if (pn > 0) (void)rdp_tls_write_full(t, pkt, (size_t)pn);
 	}
 
+	/* Check for auto-reconnect cookie.  If the client presented one
+	 * and the sessmgr still holds the suspended backend, skip the
+	 * greeter entirely and resume the existing session. */
+	if (client_info.have_arc
+	    && cfg->sessmgr_sock != NULL && cfg->sessmgr_sock[0] != '\0') {
+		int be_fd = -1;
+		rdp_info("conn[%s]: reconnect attempt logonId=%u",
+			peer, (unsigned)client_info.arc_logon_id);
+		if (rdp_sessmgr_resume(cfg->sessmgr_sock,
+			client_info.arc_logon_id, &be_fd) == 0) {
+			rdp_info("conn[%s]: resumed backend fd %d",
+				peer, be_fd);
+			/* Generate a fresh ARC cookie for the next
+			 * potential reconnect. */
+			logon_id = rdp_rand_u32();
+			rdp_rand_bytes(arc_random, sizeof arc_random);
+			{
+				uint8_t ssi[128];
+				ssize_t sn = rdp_pdu_build_save_session_info_arc(
+					ssi, sizeof ssi, user_id,
+					RDP_CONN_SHARE_ID,
+					logon_id, arc_random);
+				if (sn > 0)
+					(void)send_send_data(t, user_id,
+						io_channel, ssi, (size_t)sn);
+			}
+			run_proxy(t, be_fd, &clip, peer);
+			/* On disconnect: try to SUSPEND the session so it
+			 * survives for the next reconnect. */
+			if (rdp_sessmgr_suspend(cfg->sessmgr_sock,
+				logon_id, be_fd) == 0) {
+				rdp_info("conn[%s]: session suspended", peer);
+			} else {
+				(void)close(be_fd);
+			}
+			goto send_disconnect;
+		}
+		rdp_debug("conn[%s]: reconnect failed; falling through "
+			"to greeter", peer);
+	}
+
 	{
 		struct rdp_greeter_result gr;
 		struct rdp_sessmgr sm = { -1, {0} };
@@ -1089,13 +1137,43 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 				goto done;
 			}
 			rdp_sessmgr_close(&sm);
+
+			/* Issue an auto-reconnect cookie so the client can
+			 * resume this session if the connection drops. */
+			logon_id = rdp_rand_u32();
+			rdp_rand_bytes(arc_random, sizeof arc_random);
+			{
+				uint8_t ssi[128];
+				ssize_t sn = rdp_pdu_build_save_session_info_arc(
+					ssi, sizeof ssi, user_id,
+					RDP_CONN_SHARE_ID,
+					logon_id, arc_random);
+				if (sn > 0)
+					(void)send_send_data(t, user_id,
+						io_channel, ssi, (size_t)sn);
+			}
+
 			rdp_info("conn[%s]: backend fd %d (cliprdr=%s)",
 				peer, be_fd,
 				clip.enabled ? "enabled" : "off");
 			run_proxy(t, be_fd, &clip, peer);
-			(void)close(be_fd);
+
+			/* On disconnect: try to SUSPEND so a reconnecting
+			 * client can resume without re-authenticating. */
+			if (cfg->sessmgr_sock != NULL
+			    && cfg->sessmgr_sock[0] != '\0'
+			    && rdp_sessmgr_suspend(cfg->sessmgr_sock,
+				logon_id, be_fd) == 0) {
+				rdp_info("conn[%s]: session suspended "
+					"(logonId=%u)", peer,
+					(unsigned)logon_id);
+			} else {
+				(void)close(be_fd);
+			}
 		}
 	}
+
+send_disconnect:
 
 	/* Outbound MCS Disconnect Provider Ultimatum.  This is its own
 	 * MCS PDU type, NOT a Send Data Indication -- wrap in X.224 DT +

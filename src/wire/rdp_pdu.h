@@ -70,9 +70,16 @@
 #define RDP_PDU2_REFRESH_RECT      33
 #define RDP_PDU2_FONTLIST          39
 #define RDP_PDU2_FONTMAP           40
-#define RDP_PDU2_SHUTDOWN_REQUEST 36
-#define RDP_PDU2_SHUTDOWN_DENIED  37
+#define RDP_PDU2_SHUTDOWN_REQUEST  36
+#define RDP_PDU2_SHUTDOWN_DENIED   37
 #define RDP_PDU2_SAVE_SESSION_INFO 38
+
+#define RDP_INFOTYPE_LOGON              0
+#define RDP_INFOTYPE_LOGON_LONG         1
+#define RDP_INFOTYPE_LOGON_PLAINNOTIFY  2
+#define RDP_INFOTYPE_LOGON_EXTENDED     3
+
+#define RDP_LOGON_EX_AUTORECONNECTCOOKIE 0x00000001
 
 #define RDP_STREAM_LOW   1
 #define RDP_STREAM_MED   2
@@ -134,5 +141,12 @@ ssize_t rdp_pdu_build_font_map(uint8_t *out, size_t cap,
  * is already stripped).  Hands the inner cap-set blob to the caller. */
 int rdp_pdu_extract_confirm_active(const uint8_t *p, size_t len,
 		const uint8_t **caps_out, size_t *caps_len_out);
+
+/* Build a Server Save Session Info PDU carrying the auto-reconnect
+ * cookie (ARC_SC_PRIVATE_PACKET).  Returns total share-data PDU
+ * bytes. */
+ssize_t rdp_pdu_build_save_session_info_arc(uint8_t *out, size_t cap,
+		uint16_t pdu_source, uint32_t share_id,
+		uint32_t logon_id, const uint8_t arc_random[16]);
 
 #endif /* RDP_PDU_H */

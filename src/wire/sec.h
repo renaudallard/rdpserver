@@ -82,6 +82,10 @@ struct rdp_client_info {
 	int      have_password;
 	char     working_dir[260];
 	char     alt_shell[260];
+	/* Auto-reconnect cookie from ARC_CS_PRIVATE_PACKET. */
+	int      have_arc;
+	uint32_t arc_logon_id;
+	uint8_t  arc_security_verifier[16];
 };
 
 /* Parse a single Security Header from p[..len) into *flags_out.

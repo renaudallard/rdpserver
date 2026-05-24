@@ -65,6 +65,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #define RDP_SESSMGR_BACKLOG 16
@@ -321,6 +322,115 @@ handle_spawn(int cfd, const uint8_t *req, size_t req_len,
 	return 0;
 }
 
+/* Suspended (disconnected) sessions awaiting reconnect. */
+struct suspended_session {
+	int      in_use;
+	uint32_t logon_id;
+	int      be_fd;
+	time_t   suspended_at;
+};
+
+static struct suspended_session
+	suspended[RDP_SESSMGR_SUSPEND_MAX];
+
+static void
+sweep_expired(void)
+{
+	time_t now = time(NULL);
+	int i;
+	for (i = 0; i < RDP_SESSMGR_SUSPEND_MAX; i++) {
+		if (!suspended[i].in_use) continue;
+		if (now - suspended[i].suspended_at
+		    > RDP_SESSMGR_SUSPEND_TIMEOUT) {
+			rdp_info("sweep: logonId %u timed out",
+				(unsigned)suspended[i].logon_id);
+			(void)close(suspended[i].be_fd);
+			suspended[i].in_use = 0;
+		}
+	}
+}
+
+static int
+handle_suspend(int cfd)
+{
+	/* Receive the backend fd via SCM_RIGHTS alongside the request. */
+	uint8_t buf[16];
+	char cbuf[CMSG_SPACE(sizeof(int))];
+	struct msghdr msg;
+	struct iovec iov;
+	struct cmsghdr *cmsg;
+	int recvd_fd = -1;
+	ssize_t n;
+	uint32_t logon_id;
+	int i, slot = -1;
+
+	memset(&msg, 0, sizeof msg);
+	iov.iov_base = buf;
+	iov.iov_len = sizeof buf;
+	msg.msg_iov = &iov;
+	msg.msg_iovlen = 1;
+	msg.msg_control = cbuf;
+	msg.msg_controllen = sizeof cbuf;
+	n = recvmsg(cfd, &msg, 0);
+	if (n < 8) return reply(cfd, RDP_SESSMGR_FAIL, -1);
+	for (cmsg = CMSG_FIRSTHDR(&msg); cmsg;
+	     cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+		if (cmsg->cmsg_level == SOL_SOCKET
+		    && cmsg->cmsg_type == SCM_RIGHTS
+		    && cmsg->cmsg_len >= CMSG_LEN(sizeof(int)))
+			memcpy(&recvd_fd, CMSG_DATA(cmsg), sizeof(int));
+	}
+	if (recvd_fd < 0)
+		return reply(cfd, RDP_SESSMGR_FAIL, -1);
+	logon_id = (uint32_t)buf[4] | ((uint32_t)buf[5] << 8)
+		| ((uint32_t)buf[6] << 16) | ((uint32_t)buf[7] << 24);
+	sweep_expired();
+	for (i = 0; i < RDP_SESSMGR_SUSPEND_MAX; i++) {
+		if (!suspended[i].in_use) { slot = i; break; }
+	}
+	if (slot < 0) {
+		rdp_warn("SUSPEND: no free slot");
+		(void)close(recvd_fd);
+		return reply(cfd, RDP_SESSMGR_FAIL, -1);
+	}
+	suspended[slot].in_use = 1;
+	suspended[slot].logon_id = logon_id;
+	suspended[slot].be_fd = recvd_fd;
+	suspended[slot].suspended_at = time(NULL);
+	rdp_info("SUSPEND: logonId %u in slot %d",
+		(unsigned)logon_id, slot);
+	return reply(cfd, RDP_SESSMGR_OK, -1);
+}
+
+static int
+handle_resume(int cfd, const uint8_t *req, size_t req_len)
+{
+	uint32_t logon_id;
+	int i;
+
+	if (req_len < 8) return reply(cfd, RDP_SESSMGR_FAIL, -1);
+	logon_id = (uint32_t)req[4] | ((uint32_t)req[5] << 8)
+		| ((uint32_t)req[6] << 16) | ((uint32_t)req[7] << 24);
+	sweep_expired();
+	for (i = 0; i < RDP_SESSMGR_SUSPEND_MAX; i++) {
+		if (suspended[i].in_use
+		    && suspended[i].logon_id == logon_id) {
+			int fd = suspended[i].be_fd;
+			suspended[i].in_use = 0;
+			rdp_info("RESUME: logonId %u from slot %d",
+				(unsigned)logon_id, i);
+			if (reply(cfd, RDP_SESSMGR_OK, fd) != 0) {
+				(void)close(fd);
+				return -1;
+			}
+			(void)close(fd);
+			return 0;
+		}
+	}
+	rdp_debug("RESUME: logonId %u not found", (unsigned)logon_id);
+	return reply(cfd, RDP_SESSMGR_FAIL, -1);
+}
+
 static void
 handle_client(int cfd, const char *service)
 {
@@ -339,6 +449,12 @@ handle_client(int cfd, const char *service)
 			break;
 		case RDP_SESSMGR_OP_SPAWN:
 			(void)handle_spawn(cfd, buf, (size_t)n, auth_user);
+			break;
+		case RDP_SESSMGR_OP_SUSPEND:
+			(void)handle_suspend(cfd);
+			break;
+		case RDP_SESSMGR_OP_RESUME:
+			(void)handle_resume(cfd, buf, (size_t)n);
 			break;
 		default:
 			(void)reply(cfd, RDP_SESSMGR_ENOSYS, -1);
