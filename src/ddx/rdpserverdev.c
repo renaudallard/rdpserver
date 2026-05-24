@@ -340,7 +340,8 @@ ctrl_handle_input(struct rdpserver_dev *dev)
 		} else if (type == DDX_MSG_RESIZE && len >= sizeof(struct ddx_resize)) {
 			struct ddx_resize rs;
 			if (read(dev->ctrl_fd, &rs, sizeof rs) == sizeof rs) {
-				/* TODO: implement resize */
+				dev->resize_w = rs.width;
+				dev->resize_h = rs.height;
 			}
 		} else {
 			uint8_t skip[256];
@@ -405,10 +406,82 @@ rdpserver_CloseScreen(ScreenPtr pScreen)
 }
 
 static void
+do_resize(ScreenPtr pScreen, struct rdpserver_dev *dev, int new_w, int new_h)
+{
+	ScrnInfoPtr pScrn = xf86ScreenToScrn(pScreen);
+	PixmapPtr rootpix;
+	xf86CrtcConfigPtr config;
+	DisplayModeRec mode;
+
+	if (new_w < 64 || new_h < 64 || new_w > 8192 || new_h > 8192)
+		return;
+	if (new_w == dev->width && new_h == dev->height)
+		return;
+
+	xf86DrvMsg(pScrn->scrnIndex, X_INFO, "resize %dx%d -> %dx%d\n",
+	    dev->width, dev->height, new_w, new_h);
+
+	if (dev->damage_registered && dev->damage != NULL) {
+		DamageUnregister(dev->damage);
+		dev->damage_registered = FALSE;
+	}
+
+	if (alloc_framebuffer(dev, new_w, new_h) != 0) {
+		xf86DrvMsg(pScrn->scrnIndex, X_ERROR,
+		    "resize framebuffer alloc failed\n");
+		return;
+	}
+
+	pScrn->virtualX = new_w;
+	pScrn->virtualY = new_h;
+
+	rootpix = pScreen->GetScreenPixmap(pScreen);
+	pScreen->ModifyPixmapHeader(rootpix, new_w, new_h,
+	    -1, -1, dev->stride, dev->fb);
+
+	pScreen->width = new_w;
+	pScreen->height = new_h;
+	pScreen->mmWidth = new_w * 254 / 960;
+	pScreen->mmHeight = new_h * 254 / 960;
+
+	memset(&mode, 0, sizeof mode);
+	mode.HDisplay = new_w;
+	mode.VDisplay = new_h;
+
+	config = XF86_CRTC_CONFIG_PTR(pScrn);
+	if (config != NULL && config->num_crtc > 0) {
+		xf86CrtcPtr crtc = config->crtc[0];
+		crtc->mode = mode;
+		crtc->x = 0;
+		crtc->y = 0;
+	}
+
+	if (dev->damage != NULL) {
+		DamageRegister(&rootpix->drawable, dev->damage);
+		dev->damage_registered = TRUE;
+	}
+
+	RRScreenSizeNotify(pScreen);
+	RRTellChanged(pScreen);
+
+	if (dev->ctrl_fd >= 0)
+		ctrl_send_shm_ready(dev->ctrl_fd, dev->shm_fd,
+		    (uint16_t)new_w, (uint16_t)new_h,
+		    (uint32_t)dev->stride, (uint32_t)dev->shm_size);
+}
+
+static void
 rdpserver_BlockHandler(ScreenPtr pScreen, void *timeout)
 {
 	struct rdpserver_dev *dev = rdpserver_dev_from_screen(pScreen);
 	(void)timeout;
+
+	if (dev->resize_w > 0 && dev->resize_h > 0) {
+		int rw = dev->resize_w, rh = dev->resize_h;
+		dev->resize_w = 0;
+		dev->resize_h = 0;
+		do_resize(pScreen, dev, rw, rh);
+	}
 
 	if (dev->damage != NULL && dev->damage_registered) {
 		RegionPtr region = DamageRegion(dev->damage);

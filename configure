@@ -213,11 +213,17 @@ for _pc in \
 		_moddir=$(echo "$_moddir" | sed "s|\${prefix}|${_prefix}|g")
 		if [ -d "$_sdkdir" ] && [ -f "$_sdkdir/xf86.h" ]; then
 			XORG_CFLAGS="-I${_sdkdir} -fvisibility=hidden"
-			# pixman headers may be in a subdirectory
+			# pixman and X11 headers may be in subdirectories
 			for _pix in /usr/include/pixman-1 /usr/local/include/pixman-1 \
 				/usr/X11R6/include/pixman-1; do
 				if [ -f "$_pix/pixman.h" ]; then
 					XORG_CFLAGS="$XORG_CFLAGS -I$_pix"
+					break
+				fi
+			done
+			for _x11 in /usr/X11R6/include /usr/local/include; do
+				if [ -f "$_x11/X11/Xosdefs.h" ]; then
+					XORG_CFLAGS="$XORG_CFLAGS -I$_x11"
 					break
 				fi
 			done
@@ -340,6 +346,13 @@ for p in /usr/X11R6/bin/Xvfb /usr/bin/Xvfb /usr/local/bin/Xvfb; do
 	if [ -x "$p" ]; then XVFB_PATH=$p; break; fi
 done
 [ -n "$XVFB_PATH" ] && echo "configure: Xvfb at $XVFB_PATH"
+
+# Xorg binary path for DDX mode.
+XORG_PATH=
+for p in /usr/X11R6/bin/Xorg /usr/lib/xorg/Xorg /usr/local/bin/Xorg; do
+	if [ -x "$p" ]; then XORG_PATH=$p; break; fi
+done
+[ -n "$XORG_PATH" ] && echo "configure: Xorg at $XORG_PATH"
 
 # Auth backend.  PAM on Linux/FreeBSD/NetBSD/macOS; bsd_auth on OpenBSD.
 AUTH_BACKEND=
@@ -490,6 +503,7 @@ cat > src/include/config.h <<EOF
 #define HAVE_XORG_DDX         $HAVE_XORG_DDX
 
 #define RDP_XVFB_PATH         "$XVFB_PATH"
+#define RDP_XORG_PATH         "$XORG_PATH"
 
 #define RDP_TLS_$(echo $TLS_BACKEND | tr a-z A-Z) 1
 #define RDP_AUTH_$(echo $AUTH_BACKEND | tr a-z A-Z) 1

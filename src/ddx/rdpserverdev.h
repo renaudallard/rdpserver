@@ -52,6 +52,9 @@ struct rdpserver_dev {
 	DamagePtr            damage;
 	Bool                 damage_registered;
 
+	uint16_t             resize_w;
+	uint16_t             resize_h;
+
 	CloseScreenProcPtr               saved_CloseScreen;
 	CreateScreenResourcesProcPtr     saved_CreateScreenResources;
 	ScreenBlockHandlerProcPtr        saved_BlockHandler;

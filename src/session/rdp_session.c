@@ -413,9 +413,15 @@ spawn_xorg_ddx(int display_num, int w, int h, int ctrl_fd)
 	(void)setenv("RDPSERVER_H", hbuf, 1);
 	(void)setenv("RDPSERVER_CTRL_FD", fdbuf, 1);
 
+#ifdef __OpenBSD__
+	execl(RDP_XORG_PATH, "Xorg",
+	    "-noreset", "-ac",
+	    "-config", RDP_XORG_CONF_PATH, disp, (char *)NULL);
+#else
 	execl(RDP_XORG_PATH, "Xorg",
 	    "-noreset", "-sharevts", "-novtswitch", "-keeptty", "-ac",
 	    "-config", RDP_XORG_CONF_PATH, disp, (char *)NULL);
+#endif
 	(void)dprintf(2, "exec %s: %s\n", RDP_XORG_PATH, strerror(errno));
 	_exit(127);
 }
@@ -671,7 +677,61 @@ run_ddx_mode(int w, int h)
 			    | ((uint32_t)mhdr[6] << 16)
 			    | ((uint32_t)mhdr[7] << 24);
 
-			if (mtype == DDX_MSG_DAMAGE && mlen >= sizeof(struct ddx_damage_hdr)) {
+			if (mtype == DDX_MSG_SHM_READY
+			    && mlen >= sizeof(struct ddx_shm_ready)) {
+				int new_fd = -1;
+				struct ddx_shm_ready sr;
+				struct msghdr msg;
+				struct iovec iov;
+				char cbuf[CMSG_SPACE(sizeof(int))];
+				struct cmsghdr *cmsg;
+				ssize_t rr;
+
+				memset(&msg, 0, sizeof msg);
+				iov.iov_base = &sr;
+				iov.iov_len = sizeof sr;
+				msg.msg_iov = &iov;
+				msg.msg_iovlen = 1;
+				memset(cbuf, 0, sizeof cbuf);
+				msg.msg_control = cbuf;
+				msg.msg_controllen = sizeof cbuf;
+				do { rr = recvmsg(sv[0], &msg, 0); }
+				while (rr < 0 && errno == EINTR);
+				if (rr >= (ssize_t)sizeof sr) {
+					for (cmsg = CMSG_FIRSTHDR(&msg); cmsg;
+					     cmsg = CMSG_NXTHDR(&msg, cmsg))
+						if (cmsg->cmsg_level == SOL_SOCKET
+						    && cmsg->cmsg_type == SCM_RIGHTS)
+							memcpy(&new_fd, CMSG_DATA(cmsg),
+							    sizeof(int));
+					if (new_fd >= 0) {
+						uint32_t new_sz = sr.stride * sr.height;
+						uint8_t *new_fb = mmap(NULL, new_sz,
+						    PROT_READ, MAP_SHARED, new_fd, 0);
+						if (new_fb != MAP_FAILED) {
+							munmap(fb, fb_size);
+							close(shm_fd);
+							fb = new_fb;
+							fb_w = sr.width;
+							fb_h = sr.height;
+							fb_stride = sr.stride;
+							fb_size = new_sz;
+							shm_fd = new_fd;
+							free(row_buf);
+							row_buf = malloc((size_t)fb_w * 3);
+							rdp_info("DDX resize: %ux%u",
+							    (unsigned)fb_w, (unsigned)fb_h);
+							struct rdp_be_hello hello = {
+							    fb_w, fb_h, 24, 0};
+							(void)rdp_be_send(BE_FD,
+							    RDP_BE_HELLO_S2W,
+							    &hello, sizeof hello);
+						} else {
+							close(new_fd);
+						}
+					}
+				}
+			} else if (mtype == DDX_MSG_DAMAGE && mlen >= sizeof(struct ddx_damage_hdr)) {
 				struct ddx_damage_hdr dh;
 				if (rdp_read_full(sv[0], &dh, sizeof dh) == sizeof dh) {
 					int i;
