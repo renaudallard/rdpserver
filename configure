@@ -225,6 +225,19 @@ int main(void) { struct sio_hdl *h = sio_open(SIO_DEVANY, SIO_REC, 0); (void)h; 
 	fi
 fi
 
+HAVE_COREAUDIO=0
+if [ "$HAVE_PULSEAUDIO" = 0 ] && [ "$HAVE_SNDIO" = 0 ]; then
+	probe "for CoreAudio" '#include <AudioToolbox/AudioToolbox.h>
+int main(void) { AudioQueueRef q = 0; (void)q; return 0; }' \
+		"" "-framework AudioToolbox -framework CoreFoundation" \
+		&& HAVE_COREAUDIO=1
+	if [ "$HAVE_COREAUDIO" = 1 ]; then
+		AUDIO_LIBS="-framework AudioToolbox -framework CoreFoundation"
+		AUDIO_OBJ="src/session/audio_coreaudio.o"
+		echo "configure: CoreAudio available"
+	fi
+fi
+
 # Xorg DDX video driver module (optional).
 HAVE_XORG_DDX=0
 XORG_CFLAGS=
@@ -548,6 +561,7 @@ cat > src/include/config.h <<EOF
 #define HAVE_X264             $HAVE_X264
 #define HAVE_PULSEAUDIO       $HAVE_PULSEAUDIO
 #define HAVE_SNDIO            $HAVE_SNDIO
+#define HAVE_COREAUDIO        $HAVE_COREAUDIO
 #define HAVE_XORG_DDX         $HAVE_XORG_DDX
 
 #define RDP_XVFB_PATH         "$XVFB_PATH"

@@ -126,7 +126,7 @@ bmake (OpenBSD).
 | X11 | `libx11-dev`, `libxdamage-dev`, `libxtst-dev`, `libxfixes-dev`, `libxext-dev` | base X11 (`/usr/X11R6`) | XQuartz (`/opt/X11`) |
 | H.264 | `libx264-dev` | `pkg_add x264` | `brew install x264` |
 | X server | `xvfb` | `xvfb` package (or base) | XQuartz |
-| Audio (optional) | `libpulse-dev` | sndio (base) | not yet |
+| Audio (optional) | `libpulse-dev` | sndio (base) | CoreAudio (system) |
 | DDX driver (optional) | `xserver-xorg-dev` | Xorg SDK | XQuartz SDK |
 
 ## Run
