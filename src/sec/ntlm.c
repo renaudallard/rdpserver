@@ -151,7 +151,8 @@ ntlm_build_challenge(uint8_t *out, size_t cap,
 
 	target_utf16_len = rdp_utf8_to_utf16le(target_utf16,
 		sizeof target_utf16, target_name, strlen(target_name));
-	if (target_utf16_len == (size_t)-1) target_utf16_len = 0;
+	if (target_utf16_len == (size_t)-1 || target_utf16_len > sizeof target_utf16)
+		target_utf16_len = 0;
 
 	/* AV pairs: NB computer name (target), NB domain name (empty),
 	 * timestamp, EOL. */
