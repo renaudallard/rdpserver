@@ -54,6 +54,7 @@
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 
+#include <limits.h>
 #include <sys/stat.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -256,7 +257,8 @@ rdp_tls_read(struct rdp_tls *t, void *buf, size_t n)
 {
 	int r;
 	for (;;) {
-		r = SSL_read(t->ssl, buf, (int)n);
+		r = SSL_read(t->ssl, buf,
+			n > (size_t)INT_MAX ? INT_MAX : (int)n);
 		if (r > 0) return r;
 		if (r == 0) return 0;
 		int err = SSL_get_error(t->ssl, r);
@@ -272,7 +274,8 @@ rdp_tls_write(struct rdp_tls *t, const void *buf, size_t n)
 {
 	int r;
 	for (;;) {
-		r = SSL_write(t->ssl, buf, (int)n);
+		r = SSL_write(t->ssl, buf,
+			n > (size_t)INT_MAX ? INT_MAX : (int)n);
 		if (r > 0) return r;
 		int err = SSL_get_error(t->ssl, r);
 		if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE)
