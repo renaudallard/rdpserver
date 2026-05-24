@@ -67,7 +67,7 @@ rdp_pdu_build_share_data(uint8_t *out, size_t cap,
 	if (rdp_buf_put_u32le(&b, share_id) != 0) return -1;
 	if (rdp_buf_put_u8(&b, 0) != 0) return -1;  /* pad1 */
 	if (rdp_buf_put_u8(&b, RDP_STREAM_MED) != 0) return -1;
-	if (rdp_buf_put_u16le(&b, (uint16_t)(total_length - 6 - 6)) != 0) return -1;
+	if (rdp_buf_put_u16le(&b, (uint16_t)(total_length - 14)) != 0) return -1;
 	if (rdp_buf_put_u8(&b, pdu_type2) != 0) return -1;
 	if (rdp_buf_put_u8(&b, 0) != 0) return -1;  /* compressedType */
 	if (rdp_buf_put_u16le(&b, 0) != 0) return -1;  /* compressedLength */
