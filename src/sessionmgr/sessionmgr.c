@@ -511,6 +511,7 @@ handle_client(int cfd, const char *service)
 {
 	char auth_user[RDP_SESSMGR_USER_MAX + 1] = {0};
 	int retained_fd = -1;
+	int spawn_done = 0;
 
 	for (;;) {
 		uint8_t buf[RDP_SESSMGR_FRAME_MAX];
@@ -528,8 +529,9 @@ handle_client(int cfd, const char *service)
 			explicit_bzero(buf, (size_t)n);
 			break;
 		case RDP_SESSMGR_OP_SPAWN:
-			(void)handle_spawn(cfd, buf, (size_t)n, auth_user,
-				&retained_fd);
+			if (handle_spawn(cfd, buf, (size_t)n, auth_user,
+			    &retained_fd) == 0)
+				spawn_done = 1;
 			break;
 		case RDP_SESSMGR_OP_SUSPEND:
 			if (retained_fd >= 0) {
@@ -548,14 +550,19 @@ handle_client(int cfd, const char *service)
 	}
 
 	if (retained_fd >= 0) {
-		struct pollfd pfd;
-		pfd.fd = retained_fd;
-		pfd.events = 0;
-		pfd.revents = 0;
-		if (poll(&pfd, 1, 0) >= 0 && !(pfd.revents & (POLLHUP | POLLERR)))
-			auto_suspend(retained_fd);
-		else
+		if (!spawn_done) {
+			struct pollfd pfd;
+			pfd.fd = retained_fd;
+			pfd.events = 0;
+			pfd.revents = 0;
+			if (poll(&pfd, 1, 0) >= 0
+			    && !(pfd.revents & (POLLHUP | POLLERR)))
+				auto_suspend(retained_fd);
+			else
+				(void)close(retained_fd);
+		} else {
 			(void)close(retained_fd);
+		}
 		retained_fd = -1;
 	}
 	explicit_bzero(auth_user, sizeof auth_user);
