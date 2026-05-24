@@ -93,7 +93,11 @@ REGRESS_PROGS = \
 
 FUZZ_PROG = regress/fuzz/fuzz_parsers
 
-all: $(PROGS)
+# DDX video driver module (optional, needs xorg-server SDK).
+DDX_OBJS = src/ddx/rdpserverdev.o
+DDX_SO   = src/ddx/rdpserverdev_drv.so
+
+all: $(PROGS) $(DDX_TARGET)
 
 $(COMMON_LIB): $(COMMON_OBJS)
 	ar rcs $@ $(COMMON_OBJS)
@@ -124,6 +128,12 @@ $(BACKEND_LIB): $(BACKEND_OBJS)
 
 $(CHANNELS_LIB): $(CHANNELS_OBJS)
 	ar rcs $@ $(CHANNELS_OBJS)
+
+src/ddx/rdpserverdev.o: src/ddx/rdpserverdev.c
+	$(CC) $(CFLAGS) $(XORG_CFLAGS) -fPIC -c -o $@ src/ddx/rdpserverdev.c
+
+$(DDX_SO): $(DDX_OBJS)
+	$(CC) -shared -o $@ $(DDX_OBJS)
 
 src/session/rdp_session.o: src/session/rdp_session.c
 	$(CC) $(CFLAGS) $(X11_CFLAGS) -DRDP_XVFB_PATH=\"$(XVFB_PATH)\" \
@@ -200,6 +210,7 @@ clean:
 	rm -f $(CHANNELS_OBJS) $(CHANNELS_LIB)
 	rm -f $(SESSION_OBJS) $(SESSION_PROG)
 	rm -f $(RDPD_OBJS) $(PROGS)
+	rm -f $(DDX_OBJS) $(DDX_SO)
 	rm -f regress/common/*.o regress/wire/*.o $(REGRESS_PROGS)
 
 distclean: clean
