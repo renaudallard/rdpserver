@@ -163,6 +163,7 @@ reply(int cfd, uint8_t status, int attach_fd)
 
 	memset(buf, 0, sizeof buf);
 	buf[0] = status;
+	memset(cbuf, 0, sizeof cbuf);
 
 	memset(&msg, 0, sizeof msg);
 	iov.iov_base = buf;
@@ -179,8 +180,13 @@ reply(int cfd, uint8_t status, int attach_fd)
 		cmsg->cmsg_len   = CMSG_LEN(sizeof(int));
 		memcpy(CMSG_DATA(cmsg), &attach_fd, sizeof(int));
 	}
-	if (sendmsg(cfd, &msg, 0) != (ssize_t)sizeof buf)
-		return -1;
+	{
+		ssize_t r;
+		do { r = sendmsg(cfd, &msg, 0); }
+		while (r < 0 && errno == EINTR);
+		if (r != (ssize_t)sizeof buf)
+			return -1;
+	}
 	return 0;
 }
 
@@ -199,12 +205,17 @@ spawn_session(const struct passwd *pw, uint16_t w, uint16_t h, int *out_fd)
 	}
 	if (pid == 0) {
 		char wbuf[8], hbuf[8];
+		int i;
 
 		(void)close(sv[0]);
 		if (sv[1] != 3) {
 			if (dup2(sv[1], 3) < 0) _exit(127);
 			(void)close(sv[1]);
 		}
+		/* Close all fds except 0-3 so leaked sessmgr sockets
+		 * don't persist into the user session. */
+		for (i = 4; i < 64; i++)
+			(void)close(i);
 		(void)setsid();
 		if (chdir(pw->pw_dir) != 0) {
 			if (chdir("/") != 0) { /* unreachable in practice */ }
@@ -555,8 +566,8 @@ main(int argc, char *argv[])
 	 * authenticated user (`getpw`), setuid in spawn_session (`id`),
 	 * read /etc/master.passwd (`rpath`) for getpwnam.  No outbound
 	 * TCP.  Non-OpenBSD systems get a no-op. */
-	if (pledge("stdio rpath wpath cpath unix proc exec id getpw "
-		"dpath fattr", NULL) != 0)
+	if (pledge("stdio rpath wpath cpath unix sendfd recvfd proc exec "
+		"id getpw dpath fattr", NULL) != 0)
 		rdp_warn("pledge sessmgr: %s", strerror(errno));
 
 	while (!want_shutdown) {
