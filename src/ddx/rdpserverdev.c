@@ -291,10 +291,8 @@ ctrl_send_damage(int ctrl_fd, RegionPtr region)
 static void
 ctrl_handle_input(struct rdpserver_dev *dev)
 {
-	uint8_t hdr[DDX_PROTO_HEADER];
 	uint32_t type, len;
 	struct pollfd pfd;
-	(void)dev;
 
 	for (;;) {
 		pfd.fd = dev->ctrl_fd;
@@ -303,14 +301,23 @@ ctrl_handle_input(struct rdpserver_dev *dev)
 		if (poll(&pfd, 1, 0) <= 0) break;
 		if (!(pfd.revents & POLLIN)) break;
 
-		ssize_t r = read(dev->ctrl_fd, hdr, sizeof hdr);
-		if (r <= 0) break;
-		if (r < (ssize_t)sizeof hdr) break;
+		while (dev->ctrl_hdr_off < DDX_PROTO_HEADER) {
+			ssize_t r = read(dev->ctrl_fd,
+			    dev->ctrl_hdr + dev->ctrl_hdr_off,
+			    DDX_PROTO_HEADER - dev->ctrl_hdr_off);
+			if (r <= 0) return;
+			dev->ctrl_hdr_off += (size_t)r;
+		}
+		dev->ctrl_hdr_off = 0;
 
-		type = (uint32_t)hdr[0] | ((uint32_t)hdr[1] << 8)
-		    | ((uint32_t)hdr[2] << 16) | ((uint32_t)hdr[3] << 24);
-		len = (uint32_t)hdr[4] | ((uint32_t)hdr[5] << 8)
-		    | ((uint32_t)hdr[6] << 16) | ((uint32_t)hdr[7] << 24);
+		type = (uint32_t)dev->ctrl_hdr[0]
+		    | ((uint32_t)dev->ctrl_hdr[1] << 8)
+		    | ((uint32_t)dev->ctrl_hdr[2] << 16)
+		    | ((uint32_t)dev->ctrl_hdr[3] << 24);
+		len = (uint32_t)dev->ctrl_hdr[4]
+		    | ((uint32_t)dev->ctrl_hdr[5] << 8)
+		    | ((uint32_t)dev->ctrl_hdr[6] << 16)
+		    | ((uint32_t)dev->ctrl_hdr[7] << 24);
 
 		if (type == DDX_MSG_INPUT_KEY && len >= sizeof(struct ddx_input_key)) {
 			struct ddx_input_key k;

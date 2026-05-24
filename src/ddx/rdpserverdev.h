@@ -59,6 +59,9 @@ struct rdpserver_dev {
 	CreateScreenResourcesProcPtr     saved_CreateScreenResources;
 	ScreenBlockHandlerProcPtr        saved_BlockHandler;
 	ScreenWakeupHandlerProcPtr       saved_WakeupHandler;
+
+	uint8_t              ctrl_hdr[8];
+	size_t               ctrl_hdr_off;
 };
 
 struct rdpserver_dev *rdpserver_dev_from_screen(ScreenPtr pScreen);
