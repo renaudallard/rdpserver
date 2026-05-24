@@ -157,6 +157,11 @@ HAVE_CAPSICUM=0
 probe "for capsicum cap_enter(2)" '#include <sys/capsicum.h>
 int main(void) { return cap_enter(); }' && HAVE_CAPSICUM=1
 
+HAVE_SETRESUID=0
+probe "for setresuid(2)" '#define _GNU_SOURCE
+#include <unistd.h>
+int main(void) { return setresuid(0,0,0); }' && HAVE_SETRESUID=1
+
 HAVE_SECCOMP=0
 probe "for seccomp prctl" '#include <sys/prctl.h>
 #include <linux/seccomp.h>
@@ -230,7 +235,8 @@ for _pc in \
 	/usr/lib/aarch64-linux-gnu/pkgconfig/xorg-server.pc \
 	/usr/lib/x86_64-linux-gnu/pkgconfig/xorg-server.pc \
 	/usr/local/lib/pkgconfig/xorg-server.pc \
-	/usr/X11R6/lib/pkgconfig/xorg-server.pc; do
+	/usr/X11R6/lib/pkgconfig/xorg-server.pc \
+	/opt/X11/lib/pkgconfig/xorg-server.pc; do
 	if [ -f "$_pc" ]; then
 		_sdkdir=$(sed -n 's/^sdkdir=//p' "$_pc")
 		_moddir=$(sed -n 's/^moduledir=//p' "$_pc")
@@ -294,6 +300,15 @@ int main(void) { tls_init(); return 0; }' "$_cf" "$_lf" || return 1
 try_openssl() {
 	_cf=$(pcq openssl --cflags) || _cf=
 	_lf=$(pcq openssl --libs)   || _lf="-lssl -lcrypto"
+	# Homebrew OpenSSL on macOS
+	for _brew in /opt/homebrew/opt/openssl@3 /usr/local/opt/openssl@3 \
+		/opt/homebrew/opt/openssl /usr/local/opt/openssl; do
+		if [ -z "$_cf" ] && [ -d "$_brew/include" ]; then
+			_cf="-I$_brew/include"
+			_lf="-L$_brew/lib -lssl -lcrypto"
+			break
+		fi
+	done
 	tryc '#include <openssl/ssl.h>
 int main(void) { SSL_library_init(); return 0; }' "$_cf" "$_lf" || return 1
 	TLS_BACKEND=openssl
@@ -337,12 +352,13 @@ echo "configure: tls backend: $TLS_BACKEND"
 # /usr/X11R6/include; we add the path conditionally.
 X11_CFLAGS=
 X11_LIBS=
-if [ -d /usr/X11R6/include ]; then
-	X11_CFLAGS="-I/usr/X11R6/include"
-fi
-if [ -d /usr/X11R6/lib ]; then
-	X11_LIBS="-L/usr/X11R6/lib"
-fi
+for _xdir in /usr/X11R6 /opt/X11 /usr/local; do
+	if [ -d "$_xdir/include/X11" ]; then
+		X11_CFLAGS="-I$_xdir/include"
+		X11_LIBS="-L$_xdir/lib"
+		break
+	fi
+done
 X11_LINK_LIBS="-lX11 -lXext -lXtst -lXdamage -lXfixes"
 
 HAVE_X11=0
@@ -369,14 +385,14 @@ fi
 # Xvfb binary path.  Embedded into rdp-session at compile time so we
 # spawn it without scanning PATH each connection.
 XVFB_PATH=
-for p in /usr/X11R6/bin/Xvfb /usr/bin/Xvfb /usr/local/bin/Xvfb; do
+for p in /usr/X11R6/bin/Xvfb /usr/bin/Xvfb /usr/local/bin/Xvfb /opt/X11/bin/Xvfb; do
 	if [ -x "$p" ]; then XVFB_PATH=$p; break; fi
 done
 [ -n "$XVFB_PATH" ] && echo "configure: Xvfb at $XVFB_PATH"
 
 # Xorg binary path for DDX mode.
 XORG_PATH=
-for p in /usr/X11R6/bin/Xorg /usr/lib/xorg/Xorg /usr/local/bin/Xorg; do
+for p in /usr/X11R6/bin/Xorg /usr/lib/xorg/Xorg /usr/local/bin/Xorg /opt/X11/bin/Xorg; do
 	if [ -x "$p" ]; then XORG_PATH=$p; break; fi
 done
 [ -n "$XORG_PATH" ] && echo "configure: Xorg at $XORG_PATH"
@@ -387,6 +403,8 @@ AUTH_LIBS=
 
 try_pam() {
 	tryc '#include <security/pam_appl.h>
+int main(void) { pam_handle_t *p = 0; (void)p; return 0; }' "" "-lpam" \
+		|| tryc '#include <pam/pam_appl.h>
 int main(void) { pam_handle_t *p = 0; (void)p; return 0; }' "" "-lpam" \
 		|| return 1
 	AUTH_BACKEND=pam
@@ -519,6 +537,7 @@ cat > src/include/config.h <<EOF
 #define HAVE_STRLCPY          $HAVE_STRLCPY
 #define HAVE_REALLOCARRAY     $HAVE_REALLOCARRAY
 #define HAVE_EXPLICIT_BZERO   $HAVE_EXPLICIT_BZERO
+#define HAVE_SETRESUID        $HAVE_SETRESUID
 #define HAVE_PLEDGE           $HAVE_PLEDGE
 #define HAVE_UNVEIL           $HAVE_UNVEIL
 #define HAVE_CAPSICUM         $HAVE_CAPSICUM

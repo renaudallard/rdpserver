@@ -233,8 +233,14 @@ spawn_session(const struct passwd *pw, uint16_t w, uint16_t h, int *out_fd)
 		(void)setenv("XDG_RUNTIME_DIR", "/tmp", 0);
 
 		if (initgroups(pw->pw_name, pw->pw_gid) != 0
+#if HAVE_SETRESUID
 		    || setresgid(pw->pw_gid, pw->pw_gid, pw->pw_gid) != 0
-		    || setresuid(pw->pw_uid, pw->pw_uid, pw->pw_uid) != 0) {
+		    || setresuid(pw->pw_uid, pw->pw_uid, pw->pw_uid) != 0
+#else
+		    || setgid(pw->pw_gid) != 0
+		    || setuid(pw->pw_uid) != 0
+#endif
+		    ) {
 			rdp_err("drop privs: %s", strerror(errno));
 			_exit(127);
 		}
@@ -555,8 +561,14 @@ try_drop_privs(const char *username)
 		return 0;
 	}
 	if (setgroups(1, &pw->pw_gid) != 0
+#if HAVE_SETRESUID
 	    || setresgid(pw->pw_gid, pw->pw_gid, pw->pw_gid) != 0
-	    || setresuid(pw->pw_uid, pw->pw_uid, pw->pw_uid) != 0) {
+	    || setresuid(pw->pw_uid, pw->pw_uid, pw->pw_uid) != 0
+#else
+	    || setgid(pw->pw_gid) != 0
+	    || setuid(pw->pw_uid) != 0
+#endif
+	    ) {
 		rdp_err("drop privs to '%s': %s", username, strerror(errno));
 		return -1;
 	}

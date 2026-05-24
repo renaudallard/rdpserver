@@ -44,7 +44,11 @@
 #include "../include/compat.h"
 #include "../include/rdp_log.h"
 
+#ifdef __APPLE__
+#include <pam/pam_appl.h>
+#else
 #include <security/pam_appl.h>
+#endif
 
 #include <errno.h>
 #include <stdlib.h>

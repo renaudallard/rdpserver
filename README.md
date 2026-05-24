@@ -7,7 +7,7 @@
     <img src="https://img.shields.io/badge/license-BSD--2--Clause-blue.svg?style=flat-square" alt="License"/>
   </a>
   <img src="https://img.shields.io/badge/language-C-blue.svg?style=flat-square" alt="C"/>
-  <img src="https://img.shields.io/badge/platform-Linux%20%7C%20OpenBSD-success.svg?style=flat-square" alt="Linux | OpenBSD"/>
+  <img src="https://img.shields.io/badge/platform-Linux%20%7C%20OpenBSD%20%7C%20macOS-success.svg?style=flat-square" alt="Linux | OpenBSD | macOS"/>
   <img src="https://img.shields.io/badge/status-alpha-orange.svg?style=flat-square" alt="alpha"/>
   <img src="https://img.shields.io/badge/deps-OpenSSL%20%2B%20libX11%20%2B%20libx264-informational.svg?style=flat-square" alt="OpenSSL + libX11 + libx264"/>
 </p>
@@ -119,16 +119,15 @@ bmake (OpenBSD).
 
 ### Dependencies
 
-| | Linux | OpenBSD |
-| --- | --- | --- |
-| TLS | OpenSSL 1.1+/3.x | LibreSSL (base) |
-| Auth | libpam | bsd_auth (base + `-lutil`) |
-| X11 | `libx11-dev`, `libxdamage-dev`, `libxtst-dev`, `libxfixes-dev`, `libxext-dev` | base X11 (`/usr/X11R6`) |
-| H.264 | `libx264-dev` | `pkg_add x264` |
-| X server | `xvfb` | `xvfb` package (or base) |
-| Audio (optional) | `libpulse-dev` | sndio (base) |
-| DDX driver (optional) | `xserver-xorg-dev` | Xorg SDK |
-| Optional clipboard helper for tests | `xclip` | `pkg_add xclip` |
+| | Linux | OpenBSD | macOS |
+| --- | --- | --- | --- |
+| TLS | OpenSSL 1.1+/3.x | LibreSSL (base) | `brew install openssl@3` |
+| Auth | libpam | bsd_auth (base + `-lutil`) | PAM (system) |
+| X11 | `libx11-dev`, `libxdamage-dev`, `libxtst-dev`, `libxfixes-dev`, `libxext-dev` | base X11 (`/usr/X11R6`) | XQuartz (`/opt/X11`) |
+| H.264 | `libx264-dev` | `pkg_add x264` | `brew install x264` |
+| X server | `xvfb` | `xvfb` package (or base) | XQuartz |
+| Audio (optional) | `libpulse-dev` | sndio (base) | not yet |
+| DDX driver (optional) | `xserver-xorg-dev` | Xorg SDK | XQuartz SDK |
 
 ## Run
 
