@@ -670,19 +670,10 @@ run_ddx_mode(int w, int h)
 
 		if (pfd[1].revents & POLLIN) {
 			uint8_t mhdr[DDX_PROTO_HEADER];
-			ssize_t r = rdp_read_full(sv[0], mhdr, sizeof mhdr);
-			if (r <= 0) break;
-			uint32_t mtype = (uint32_t)mhdr[0]
-			    | ((uint32_t)mhdr[1] << 8);
-			uint32_t mlen = (uint32_t)mhdr[4]
-			    | ((uint32_t)mhdr[5] << 8)
-			    | ((uint32_t)mhdr[6] << 16)
-			    | ((uint32_t)mhdr[7] << 24);
+			uint32_t mtype, mlen;
+			int new_fd = -1;
 
-			if (mtype == DDX_MSG_SHM_READY
-			    && mlen >= sizeof(struct ddx_shm_ready)) {
-				int new_fd = -1;
-				struct ddx_shm_ready sr;
+			{
 				struct msghdr msg;
 				struct iovec iov;
 				char cbuf[CMSG_SPACE(sizeof(int))];
@@ -690,8 +681,8 @@ run_ddx_mode(int w, int h)
 				ssize_t rr;
 
 				memset(&msg, 0, sizeof msg);
-				iov.iov_base = &sr;
-				iov.iov_len = sizeof sr;
+				iov.iov_base = mhdr;
+				iov.iov_len = sizeof mhdr;
 				msg.msg_iov = &iov;
 				msg.msg_iovlen = 1;
 				memset(cbuf, 0, sizeof cbuf);
@@ -699,40 +690,54 @@ run_ddx_mode(int w, int h)
 				msg.msg_controllen = sizeof cbuf;
 				do { rr = recvmsg(sv[0], &msg, 0); }
 				while (rr < 0 && errno == EINTR);
+				if (rr < (ssize_t)sizeof mhdr) break;
+				for (cmsg = CMSG_FIRSTHDR(&msg); cmsg;
+				     cmsg = CMSG_NXTHDR(&msg, cmsg))
+					if (cmsg->cmsg_level == SOL_SOCKET
+					    && cmsg->cmsg_type == SCM_RIGHTS)
+						memcpy(&new_fd, CMSG_DATA(cmsg),
+						    sizeof(int));
+			}
+			mtype = (uint32_t)mhdr[0]
+			    | ((uint32_t)mhdr[1] << 8);
+			mlen = (uint32_t)mhdr[4]
+			    | ((uint32_t)mhdr[5] << 8)
+			    | ((uint32_t)mhdr[6] << 16)
+			    | ((uint32_t)mhdr[7] << 24);
+
+			if (mtype == DDX_MSG_SHM_READY
+			    && mlen >= sizeof(struct ddx_shm_ready)
+			    && new_fd >= 0) {
+				struct ddx_shm_ready sr;
+				ssize_t rr;
+				rr = rdp_read_full(sv[0], &sr, sizeof sr);
 				if (rr >= (ssize_t)sizeof sr) {
-					for (cmsg = CMSG_FIRSTHDR(&msg); cmsg;
-					     cmsg = CMSG_NXTHDR(&msg, cmsg))
-						if (cmsg->cmsg_level == SOL_SOCKET
-						    && cmsg->cmsg_type == SCM_RIGHTS)
-							memcpy(&new_fd, CMSG_DATA(cmsg),
-							    sizeof(int));
-					if (new_fd >= 0) {
-						uint32_t new_sz = sr.stride * sr.height;
-						uint8_t *new_fb = mmap(NULL, new_sz,
-						    PROT_READ, MAP_SHARED, new_fd, 0);
-						if (new_fb != MAP_FAILED) {
-							munmap(fb, fb_size);
-							close(shm_fd);
-							fb = new_fb;
-							fb_w = sr.width;
-							fb_h = sr.height;
-							fb_stride = sr.stride;
-							fb_size = new_sz;
-							shm_fd = new_fd;
-							free(row_buf);
-							row_buf = malloc((size_t)fb_w * 3);
-							rdp_info("DDX resize: %ux%u",
-							    (unsigned)fb_w, (unsigned)fb_h);
-							struct rdp_be_hello hello = {
-							    fb_w, fb_h, 24, 0};
-							(void)rdp_be_send(BE_FD,
-							    RDP_BE_HELLO_S2W,
-							    &hello, sizeof hello);
-						} else {
-							close(new_fd);
-						}
+					uint32_t new_sz = sr.stride * sr.height;
+					uint8_t *new_fb = mmap(NULL, new_sz,
+					    PROT_READ, MAP_SHARED, new_fd, 0);
+					if (new_fb != MAP_FAILED) {
+						munmap(fb, fb_size);
+						close(shm_fd);
+						fb = new_fb;
+						fb_w = sr.width;
+						fb_h = sr.height;
+						fb_stride = sr.stride;
+						fb_size = new_sz;
+						shm_fd = new_fd;
+						new_fd = -1;
+						free(row_buf);
+						row_buf = malloc((size_t)fb_w * 3);
+						if (row_buf == NULL) break;
+						rdp_info("DDX resize: %ux%u",
+						    (unsigned)fb_w, (unsigned)fb_h);
+						struct rdp_be_hello hello = {
+						    fb_w, fb_h, 24, 0};
+						(void)rdp_be_send(BE_FD,
+						    RDP_BE_HELLO_S2W,
+						    &hello, sizeof hello);
 					}
 				}
+				if (new_fd >= 0) close(new_fd);
 			} else if (mtype == DDX_MSG_DAMAGE && mlen >= sizeof(struct ddx_damage_hdr)) {
 				struct ddx_damage_hdr dh;
 				if (rdp_read_full(sv[0], &dh, sizeof dh) == sizeof dh) {
