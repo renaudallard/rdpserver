@@ -83,11 +83,23 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "../ddx/ddx_proto.h"
+
+#include <sys/mman.h>
+
 #define BE_FD 3
 #define FRAME_INTERVAL_MS 200
 
 #ifndef RDP_XVFB_PATH
 # define RDP_XVFB_PATH "/usr/bin/Xvfb"
+#endif
+
+#ifndef RDP_XORG_PATH
+# define RDP_XORG_PATH "/usr/lib/xorg/Xorg"
+#endif
+
+#ifndef RDP_XORG_CONF_PATH
+# define RDP_XORG_CONF_PATH "/etc/rdpserver/xorg.conf"
 #endif
 
 static volatile sig_atomic_t want_shutdown;
@@ -383,11 +395,331 @@ inject_mouse(Display *dpy, const struct rdp_be_input_mouse *m)
 	return 0;
 }
 
+static pid_t
+spawn_xorg_ddx(int display_num, int w, int h, int ctrl_fd)
+{
+	pid_t pid;
+	char disp[16], wbuf[16], hbuf[16], fdbuf[16];
+
+	(void)snprintf(disp, sizeof disp, ":%d", display_num);
+	(void)snprintf(wbuf, sizeof wbuf, "%d", w);
+	(void)snprintf(hbuf, sizeof hbuf, "%d", h);
+	(void)snprintf(fdbuf, sizeof fdbuf, "%d", ctrl_fd);
+
+	pid = fork();
+	if (pid != 0) return pid;
+
+	(void)setenv("RDPSERVER_W", wbuf, 1);
+	(void)setenv("RDPSERVER_H", hbuf, 1);
+	(void)setenv("RDPSERVER_CTRL_FD", fdbuf, 1);
+
+	execl(RDP_XORG_PATH, "Xorg",
+	    "-noreset", "-sharevts", "-novtswitch", "-keeptty", "-ac",
+	    "-config", RDP_XORG_CONF_PATH, disp, (char *)NULL);
+	(void)dprintf(2, "exec %s: %s\n", RDP_XORG_PATH, strerror(errno));
+	_exit(127);
+}
+
+static int
+ddx_recv_shm(int ctrl_fd, int *shm_fd_out,
+    uint16_t *w, uint16_t *h, uint32_t *stride)
+{
+	struct msghdr msg;
+	struct iovec iov;
+	uint8_t buf[DDX_PROTO_HEADER + sizeof(struct ddx_shm_ready)];
+	char cbuf[CMSG_SPACE(sizeof(int))];
+	struct cmsghdr *cmsg;
+	struct ddx_shm_ready *sr;
+	ssize_t n;
+	int fd = -1;
+
+	memset(&msg, 0, sizeof msg);
+	iov.iov_base = buf;
+	iov.iov_len = sizeof buf;
+	msg.msg_iov = &iov;
+	msg.msg_iovlen = 1;
+	memset(cbuf, 0, sizeof cbuf);
+	msg.msg_control = cbuf;
+	msg.msg_controllen = sizeof cbuf;
+
+	do { n = recvmsg(ctrl_fd, &msg, 0); }
+	while (n < 0 && errno == EINTR);
+	if (n < (ssize_t)sizeof buf) return -1;
+
+	for (cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL;
+	     cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+		if (cmsg->cmsg_level == SOL_SOCKET
+		    && cmsg->cmsg_type == SCM_RIGHTS
+		    && cmsg->cmsg_len >= CMSG_LEN(sizeof(int)))
+			memcpy(&fd, CMSG_DATA(cmsg), sizeof(int));
+	}
+	if (fd < 0) return -1;
+
+	sr = (struct ddx_shm_ready *)(buf + DDX_PROTO_HEADER);
+	*w = sr->width;
+	*h = sr->height;
+	*stride = sr->stride;
+	*shm_fd_out = fd;
+	return 0;
+}
+
+static int
+ddx_send_input_key(int ctrl_fd, const struct rdp_be_input_key *k)
+{
+	uint8_t buf[DDX_PROTO_HEADER + sizeof(struct ddx_input_key)];
+	struct ddx_input_key *dk = (struct ddx_input_key *)(buf + DDX_PROTO_HEADER);
+	uint32_t plen = sizeof(struct ddx_input_key);
+
+	buf[0] = DDX_MSG_INPUT_KEY & 0xff;
+	buf[1] = buf[2] = buf[3] = 0;
+	buf[4] = plen & 0xff;
+	buf[5] = buf[6] = buf[7] = 0;
+	dk->scancode = k->scancode;
+	dk->down = k->down;
+	dk->extended = k->extended;
+	return rdp_write_full(ctrl_fd, buf, sizeof buf) == sizeof buf ? 0 : -1;
+}
+
+static int
+ddx_send_input_mouse(int ctrl_fd, const struct rdp_be_input_mouse *m)
+{
+	uint8_t buf[DDX_PROTO_HEADER + sizeof(struct ddx_input_mouse)];
+	struct ddx_input_mouse *dm = (struct ddx_input_mouse *)(buf + DDX_PROTO_HEADER);
+	uint32_t plen = sizeof(struct ddx_input_mouse);
+
+	buf[0] = DDX_MSG_INPUT_MOUSE & 0xff;
+	buf[1] = buf[2] = buf[3] = 0;
+	buf[4] = plen & 0xff;
+	buf[5] = buf[6] = buf[7] = 0;
+	dm->x = m->x;
+	dm->y = m->y;
+	dm->buttons = m->buttons;
+	dm->flags = m->flags;
+	return rdp_write_full(ctrl_fd, buf, sizeof buf) == sizeof buf ? 0 : -1;
+}
+
+static int
+ddx_send_frame_region(int be_fd, const uint8_t *fb, uint32_t fb_stride,
+    int16_t x, int16_t y, int16_t rw, int16_t rh, uint8_t *tmp)
+{
+	struct rdp_be_frame_hdr fhdr;
+	uint8_t hdr[RDP_BE_HEADER + sizeof fhdr];
+	uint32_t total;
+	int row;
+
+	if (rw <= 0 || rh <= 0) return 0;
+	total = (uint32_t)sizeof fhdr + (uint32_t)rw * rh * 3;
+
+	hdr[0] = RDP_BE_FRAME;
+	hdr[1] = 0; hdr[2] = 0; hdr[3] = 0;
+	hdr[4] = (uint8_t)(total & 0xff);
+	hdr[5] = (uint8_t)((total >> 8) & 0xff);
+	hdr[6] = (uint8_t)((total >> 16) & 0xff);
+	hdr[7] = (uint8_t)((total >> 24) & 0xff);
+	fhdr.x = (uint16_t)x;
+	fhdr.y = (uint16_t)y;
+	fhdr.w = (uint16_t)rw;
+	fhdr.h = (uint16_t)rh;
+	memcpy(hdr + RDP_BE_HEADER, &fhdr, sizeof fhdr);
+	if (rdp_write_full(be_fd, hdr, sizeof hdr) != sizeof hdr)
+		return -1;
+
+	for (row = 0; row < rh; row++) {
+		const uint8_t *src = fb + (size_t)(y + row) * fb_stride
+		    + (size_t)x * 4;
+		uint8_t *dst = tmp;
+		int col;
+		for (col = 0; col < rw; col++) {
+			dst[col * 3 + 0] = src[col * 4 + 0];
+			dst[col * 3 + 1] = src[col * 4 + 1];
+			dst[col * 3 + 2] = src[col * 4 + 2];
+		}
+		if (rdp_write_full(be_fd, dst, (size_t)rw * 3) != (ssize_t)rw * 3)
+			return -1;
+	}
+	return 0;
+}
+
+static int
+run_ddx_mode(int w, int h)
+{
+	int sv[2];
+	int display_num;
+	pid_t xorg_pid, xterm_pid;
+	int shm_fd = -1;
+	uint8_t *fb = NULL;
+	uint16_t fb_w = 0, fb_h = 0;
+	uint32_t fb_stride = 0, fb_size = 0;
+	uint8_t *row_buf = NULL;
+
+	if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0) {
+		rdp_err("socketpair: %s", strerror(errno));
+		return 1;
+	}
+
+	display_num = find_free_display();
+	if (display_num < 0) {
+		rdp_err("no free X display");
+		return 1;
+	}
+	rdp_info("DDX mode: display :%d (%dx%d)", display_num, w, h);
+
+	xorg_pid = spawn_xorg_ddx(display_num, w, h, sv[1]);
+	if (xorg_pid < 0) {
+		rdp_err("spawn Xorg: %s", strerror(errno));
+		return 1;
+	}
+	(void)close(sv[1]);
+
+	if (wait_for_x_socket(display_num, 8000) != 0) {
+		rdp_err("Xorg didn't come up");
+		(void)kill(xorg_pid, SIGTERM);
+		return 1;
+	}
+
+	if (ddx_recv_shm(sv[0], &shm_fd, &fb_w, &fb_h, &fb_stride) != 0) {
+		rdp_err("failed to receive SHM from DDX");
+		(void)kill(xorg_pid, SIGTERM);
+		return 1;
+	}
+	fb_size = fb_stride * fb_h;
+	fb = mmap(NULL, fb_size, PROT_READ, MAP_SHARED, shm_fd, 0);
+	if (fb == MAP_FAILED) {
+		rdp_err("mmap shm: %s", strerror(errno));
+		(void)close(shm_fd);
+		(void)kill(xorg_pid, SIGTERM);
+		return 1;
+	}
+	rdp_info("DDX shm: %ux%u stride=%u fd=%d",
+	    (unsigned)fb_w, (unsigned)fb_h, fb_stride, shm_fd);
+
+	{
+		struct rdp_be_hello hello = {fb_w, fb_h, 24, 0};
+		if (rdp_be_send(BE_FD, RDP_BE_HELLO_S2W,
+		    &hello, sizeof hello) != 0) {
+			rdp_err("HELLO send failed: %s", strerror(errno));
+			goto out;
+		}
+	}
+
+	{
+		char buf[16];
+		(void)snprintf(buf, sizeof buf, ":%d", display_num);
+		setenv("DISPLAY", buf, 1);
+	}
+	xterm_pid = spawn_xterm();
+
+	row_buf = malloc((size_t)fb_w * 3);
+	if (row_buf == NULL) goto out;
+
+	if (pledge("stdio rpath wpath cpath unix proc sendfd recvfd", NULL) != 0)
+		rdp_warn("pledge session ddx: %s", strerror(errno));
+
+	while (!want_shutdown) {
+		struct pollfd pfd[2];
+		pfd[0].fd = BE_FD;
+		pfd[0].events = POLLIN;
+		pfd[0].revents = 0;
+		pfd[1].fd = sv[0];
+		pfd[1].events = POLLIN;
+		pfd[1].revents = 0;
+
+		(void)poll(pfd, 2, FRAME_INTERVAL_MS);
+
+		if (pfd[0].revents & POLLIN) {
+			uint32_t type;
+			static uint8_t buf[0x10000];
+			ssize_t n = rdp_be_recv(BE_FD, &type, buf, sizeof buf);
+			if (n <= 0) break;
+			if (type == RDP_BE_INPUT_KEY
+			    && n >= (ssize_t)sizeof(struct rdp_be_input_key)) {
+				struct rdp_be_input_key k;
+				memcpy(&k, buf, sizeof k);
+				ddx_send_input_key(sv[0], &k);
+			} else if (type == RDP_BE_INPUT_MOUSE
+			    && n >= (ssize_t)sizeof(struct rdp_be_input_mouse)) {
+				struct rdp_be_input_mouse m;
+				memcpy(&m, buf, sizeof m);
+				ddx_send_input_mouse(sv[0], &m);
+			} else if (type == RDP_BE_RESIZE
+			    && n >= (ssize_t)sizeof(struct rdp_be_resize)) {
+				struct rdp_be_resize rs;
+				uint8_t rbuf[DDX_PROTO_HEADER + sizeof(struct ddx_resize)];
+				struct ddx_resize *dr;
+				memcpy(&rs, buf, sizeof rs);
+				rbuf[0] = DDX_MSG_RESIZE & 0xff;
+				rbuf[1] = rbuf[2] = rbuf[3] = 0;
+				rbuf[4] = sizeof(struct ddx_resize) & 0xff;
+				rbuf[5] = rbuf[6] = rbuf[7] = 0;
+				dr = (struct ddx_resize *)(rbuf + DDX_PROTO_HEADER);
+				dr->width = rs.width;
+				dr->height = rs.height;
+				(void)rdp_write_full(sv[0], rbuf, sizeof rbuf);
+			} else if (type == RDP_BE_BYE) {
+				break;
+			}
+		}
+
+		if (pfd[1].revents & POLLIN) {
+			uint8_t mhdr[DDX_PROTO_HEADER];
+			ssize_t r = rdp_read_full(sv[0], mhdr, sizeof mhdr);
+			if (r <= 0) break;
+			uint32_t mtype = (uint32_t)mhdr[0]
+			    | ((uint32_t)mhdr[1] << 8);
+			uint32_t mlen = (uint32_t)mhdr[4]
+			    | ((uint32_t)mhdr[5] << 8)
+			    | ((uint32_t)mhdr[6] << 16)
+			    | ((uint32_t)mhdr[7] << 24);
+
+			if (mtype == DDX_MSG_DAMAGE && mlen >= sizeof(struct ddx_damage_hdr)) {
+				struct ddx_damage_hdr dh;
+				if (rdp_read_full(sv[0], &dh, sizeof dh) == sizeof dh) {
+					int i;
+					for (i = 0; i < dh.nrects; i++) {
+						struct ddx_damage_rect dr;
+						if (rdp_read_full(sv[0], &dr, sizeof dr) != sizeof dr)
+							break;
+						if (dr.x < 0) dr.x = 0;
+						if (dr.y < 0) dr.y = 0;
+						if (dr.x + dr.w > (int16_t)fb_w)
+							dr.w = (int16_t)fb_w - dr.x;
+						if (dr.y + dr.h > (int16_t)fb_h)
+							dr.h = (int16_t)fb_h - dr.y;
+						(void)ddx_send_frame_region(BE_FD,
+						    fb, fb_stride,
+						    dr.x, dr.y, dr.w, dr.h,
+						    row_buf);
+					}
+				}
+			} else {
+				uint8_t skip[256];
+				while (mlen > 0) {
+					size_t c = mlen > sizeof skip ? sizeof skip : mlen;
+					if (rdp_read_full(sv[0], skip, c) <= 0) break;
+					mlen -= (uint32_t)c;
+				}
+			}
+		}
+	}
+
+out:
+	rdp_info("DDX session shutting down");
+	free(row_buf);
+	if (fb != NULL && fb != MAP_FAILED) munmap(fb, fb_size);
+	if (shm_fd >= 0) (void)close(shm_fd);
+	(void)close(sv[0]);
+	if (xterm_pid > 0) (void)kill(xterm_pid, SIGTERM);
+	(void)kill(xorg_pid, SIGTERM);
+	(void)waitpid(xorg_pid, NULL, 0);
+	return 0;
+}
+
 static void
 usage(const char *prog)
 {
 	(void)fprintf(stderr,
-"usage: %s [-w width] [-h height]\n"
+"usage: %s [-D] [-w width] [-H height]\n"
+"  -D     use native DDX driver instead of Xvfb\n"
 "  -w n   desktop width  (default 1024)\n"
 "  -H n   desktop height (default 768)\n"
 "\n"
@@ -400,7 +732,7 @@ int
 main(int argc, char *argv[])
 {
 	int w = 1024, h = 768;
-	int opt;
+	int opt, use_ddx = 0;
 	int display_num;
 	pid_t xvfb_pid, xterm_pid;
 	Display *dpy;
@@ -409,8 +741,9 @@ main(int argc, char *argv[])
 	struct timespec last_send = {0, 0};
 	struct rdp_log_cfg lc;
 
-	while ((opt = getopt(argc, argv, "w:H:?")) != -1) {
+	while ((opt = getopt(argc, argv, "Dw:H:?")) != -1) {
 		switch (opt) {
+		case 'D': use_ddx = 1; break;
 		case 'w': w = atoi(optarg); break;
 		case 'H': h = atoi(optarg); break;
 		case '?': default: usage(argv[0]); return 1;
@@ -428,6 +761,12 @@ main(int argc, char *argv[])
 	rdp_log_init(&lc);
 
 	install_signals();
+
+	if (use_ddx) {
+		int rc = run_ddx_mode(w, h);
+		rdp_log_close();
+		return rc;
+	}
 
 	display_num = find_free_display();
 	if (display_num < 0) {
