@@ -200,6 +200,8 @@ handle_client_name(struct rdpdr_state *st,
 	if (blen < 12) return -1;
 	unicode = ld32(body);
 	name_len = ld32(body + 8);
+	if (12 + name_len > blen)
+		name_len = (uint32_t)(blen > 12 ? blen - 12 : 0);
 	if (name_len > sizeof st->client_name - 1)
 		name_len = sizeof st->client_name - 1;
 	if (unicode) {
@@ -239,6 +241,7 @@ handle_device_list(struct rdpdr_state *st,
 		memcpy(name, body + off + 8, 8);
 		name[8] = '\0';
 		data_len = ld32(body + off + 16);
+		if (data_len > blen - off - 20) break;
 		off += 20 + data_len;
 
 		rdp_info("rdpdr: device %u: type=%s id=%u name='%s'",
