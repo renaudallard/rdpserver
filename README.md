@@ -77,7 +77,7 @@ text. After auth, a backend RPC shuttles pixel frames from
 | Drive / printer / serial redirection | ✗ | |
 | Session reconnect (auto-reconnect cookie) | ✓ | Save Session Info PDU with ARC cookie, sessmgr SUSPEND/RESUME ops with fd passing.  Sessmgr retains a dup of the backend fd at spawn time and auto-suspends on worker death, so sessions survive worker SIGKILL.  Dead fds are validated at resume and reaped by sweep. |
 | Dynamic resize (RDPEDISP via DRDYNVC) | ✓ | xfreerdp with `/dynamic-resolution`: server accepts Display Control Channel, sends Deactivate-All + re-Demand-Active at new geometry, rdp-session resizes Xvfb via xrandr. Apps survive the resize. |
-| Multi-monitor | ✗ | |
+| Multi-monitor | ✓ | Parses CS_MONITOR from the GCC handshake, computes bounding box across up to 16 monitors.  RDPEDISP handles dynamic monitor layout changes mid-session.  The session runs at the combined resolution. |
 | Native Xorg DDX driver | ✓ | `rdpserverdev_drv.so` renders to a POSIX shm framebuffer inside Xorg, reports dirty regions via the Damage extension over a control socket.  rdp-session mmaps the framebuffer and sends only changed regions to rdpd.  Use `-D` flag to select DDX mode instead of Xvfb. |
 | Wayland backend | ✗ | The backend interface accommodates a future module. |
 
