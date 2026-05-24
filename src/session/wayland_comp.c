@@ -107,6 +107,7 @@ render_surface(struct rdp_wl_comp *c, struct wlr_surface *surface)
 	size_t stride;
 
 	if (surface == NULL || !surface->mapped) return;
+	if (c->fb == NULL) return;
 	cbuf = surface->buffer;
 	if (cbuf == NULL) return;
 
