@@ -137,6 +137,12 @@ int ntlm_verify_ntlmv2(const uint8_t server_challenge[8],
 		const char *password_utf8,
 		uint8_t session_base_key[16]);
 
+/* Same but takes a pre-computed NT hash instead of cleartext. */
+int ntlm_verify_ntlmv2_hash(const uint8_t server_challenge[8],
+		const struct ntlm_authenticate *auth,
+		const uint8_t nt_hash[16],
+		uint8_t session_base_key[16]);
+
 /* Derive the ExportedSessionKey: if NTLMSSP_NEGOTIATE_KEY_EXCH is
  * set, RC4-decrypt the EncryptedRandomSessionKey with the
  * KeyExchangeKey (== SessionBaseKey for NTLMv2 plain).  Otherwise

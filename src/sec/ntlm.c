@@ -297,6 +297,52 @@ ntlm_verify_ntlmv2(const uint8_t server_challenge[8],
 }
 
 int
+ntlm_verify_ntlmv2_hash(const uint8_t server_challenge[8],
+		const struct ntlm_authenticate *auth,
+		const uint8_t nt_hash[16],
+		uint8_t session_base_key[16])
+{
+	uint8_t ntlmv2_hash[16];
+	uint8_t user_up[512], dom_le[512];
+	size_t  user_len, dom_len;
+	const uint8_t *temp;
+	size_t temp_len;
+	uint8_t nt_proof[16];
+	char user_utf8[256], domain_utf8[256];
+	size_t got;
+
+	if (auth->nt_response_len < 16 + 8) return -1;
+	temp = auth->nt_response + 16;
+	temp_len = auth->nt_response_len - 16;
+
+	got = rdp_utf16le_to_utf8(user_utf8, sizeof user_utf8 - 1,
+		auth->user_utf16, auth->user_utf16_len);
+	if (got == (size_t)-1) got = 0;
+	user_utf8[got] = '\0';
+	got = rdp_utf16le_to_utf8(domain_utf8, sizeof domain_utf8 - 1,
+		auth->domain_utf16, auth->domain_utf16_len);
+	if (got == (size_t)-1) got = 0;
+	domain_utf8[got] = '\0';
+
+	to_utf16_upper(user_utf8, user_up, &user_len);
+	to_utf16_plain(domain_utf8, dom_le, &dom_len);
+	if (rdp_hmac_md5_2(nt_hash, 16, user_up, user_len,
+		dom_le, dom_len, ntlmv2_hash) != 0) return -1;
+
+	if (rdp_hmac_md5_2(ntlmv2_hash, 16,
+		server_challenge, 8, temp, temp_len, nt_proof) != 0)
+		return -1;
+
+	if (memcmp(nt_proof, auth->nt_response, 16) != 0)
+		return -1;
+
+	if (rdp_hmac_md5(ntlmv2_hash, 16, nt_proof, 16,
+		session_base_key) != 0)
+		return -1;
+	return 0;
+}
+
+int
 ntlm_derive_exported_key(const struct ntlm_authenticate *auth,
 		const uint8_t session_base_key[16],
 		uint8_t exported_session_key[16])

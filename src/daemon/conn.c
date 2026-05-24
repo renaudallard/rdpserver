@@ -70,6 +70,7 @@
 #include "../backend/proto_api.h"
 #include "../channels/cliprdr.h"
 #include "../channels/drdynvc.h"
+#include "../sec/nla.h"
 #include "../channels/rdpdr.h"
 #include "../channels/rdpsnd.h"
 #include "../channels/rdpgfx.h"
@@ -1346,6 +1347,8 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 	uint16_t user_id = 1007;
 	uint16_t io_channel = RDP_MCS_IO_CHANNEL_ID;
 	uint16_t desktop_w = 0, desktop_h = 0;
+	int use_nla = 0;
+	char nla_user[256] = {0}, nla_pass[256] = {0};
 	struct rdp_tls_ctx *tls = cfg->tls;
 	struct clip_state clip = {0};
 	struct dynvc_state dynvc = {0};
@@ -1369,7 +1372,8 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 		goto done;
 	}
 	if (cr.have_neg_req
-	    && (cr.requested_protocols & RDP_PROTO_SSL) == 0) {
+	    && (cr.requested_protocols & RDP_PROTO_SSL) == 0
+	    && (cr.requested_protocols & RDP_PROTO_HYBRID) == 0) {
 		ssize_t cc;
 		cc = rdp_x224_build_cc(scratch + 4, sizeof scratch - 4, 1, 0,
 			RDP_NEG_FAIL_SSL_REQUIRED_BY_SERVER);
@@ -1379,8 +1383,12 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 		goto done;
 	}
 	{
+		uint32_t selected = RDP_PROTO_SSL;
+		if (cr.have_neg_req
+		    && (cr.requested_protocols & RDP_PROTO_HYBRID))
+			selected = RDP_PROTO_HYBRID;
 		ssize_t cc = rdp_x224_build_cc(scratch + 4, sizeof scratch - 4,
-			0, RDP_PROTO_SSL, 0);
+			0, selected, 0);
 		if (cc < 0) goto done;
 		(void)rdp_tpkt_encode_hdr(scratch, (uint16_t)(4 + cc));
 		if (rdp_write_full(fd, scratch, 4 + (size_t)cc)
@@ -1388,6 +1396,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 			rdp_err("conn[%s]: write CC", peer);
 			goto done;
 		}
+		use_nla = (selected == RDP_PROTO_HYBRID);
 	}
 
 	/* 2. TLS. */
@@ -1397,6 +1406,16 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 		goto done;
 	}
 	rdp_debug("conn[%s]: TLS established", peer);
+
+	if (use_nla) {
+		if (rdp_nla_server(t, nla_user, sizeof nla_user,
+		    nla_pass, sizeof nla_pass) != 0) {
+			rdp_warn("conn[%s]: NLA failed", peer);
+			goto done;
+		}
+		rdp_info("conn[%s]: NLA authenticated '%s'",
+			peer, nla_user);
+	}
 
 	/* 3. MCS Connect Initial. */
 	{
@@ -1475,7 +1494,9 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 			cr2.channel_count = (uint16_t)ci.channel_count;
 			for (uint16_t i = 0; i < cr2.channel_count; i++)
 				cr2.channel_ids[i] = (uint16_t)(1004 + i);
-			cr2.requested_protocols = (uint16_t)RDP_PROTO_SSL;
+			cr2.requested_protocols = use_nla
+			? (uint16_t)RDP_PROTO_HYBRID
+			: (uint16_t)RDP_PROTO_SSL;
 
 			dt_n = rdp_x224_build_dt(scratch + 4, sizeof scratch - 4);
 			cr_n = rdp_mcs_build_connect_response(
@@ -1738,10 +1759,38 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 			"to greeter", peer);
 	}
 
-	/* Auto-login: skip the greeter, go straight to sessmgr AUTH
-	 * using the Client Info username (and a dummy password that
-	 * sessmgr's PAM/bsd_auth will check).  Meant for automated
-	 * testing; production should NOT use -A. */
+	/* NLA-authenticated: use the credentials extracted from CredSSP. */
+	if (use_nla && nla_user[0] != '\0'
+	    && cfg->sessmgr_sock != NULL && cfg->sessmgr_sock[0] != '\0') {
+		struct rdp_sessmgr sm = { -1, {0} };
+		rdp_info("conn[%s]: NLA login as %s", peer, nla_user);
+		if (rdp_sessmgr_open_auth(&sm, cfg->sessmgr_sock,
+			nla_user, nla_pass) == 0) {
+			int be_fd = -1;
+			if (rdp_sessmgr_spawn(&sm, desktop_w, desktop_h,
+			    &be_fd) == 0 && be_fd >= 0) {
+				explicit_bzero(nla_pass, sizeof nla_pass);
+				rdp_sessmgr_close(&sm);
+				rdp_info("conn[%s]: backend fd %d", peer, be_fd);
+				run_proxy(t, be_fd, &clip, &dynvc, &snd,
+					&devr, user_id, io_channel,
+					desktop_w, desktop_h, peer);
+				if (cfg->sessmgr_sock != NULL
+				    && rdp_sessmgr_suspend(cfg->sessmgr_sock,
+					0, be_fd) == 0)
+					rdp_info("conn[%s]: session suspended", peer);
+				else
+					(void)close(be_fd);
+				goto done;
+			}
+			rdp_sessmgr_close(&sm);
+		}
+		explicit_bzero(nla_pass, sizeof nla_pass);
+		rdp_warn("conn[%s]: NLA auth failed via sessmgr", peer);
+		goto done;
+	}
+
+	/* Auto-login: skip the greeter, go straight to sessmgr AUTH. */
 	if (cfg->auto_login
 	    && cfg->sessmgr_sock != NULL && cfg->sessmgr_sock[0] != '\0'
 	    && client_info.username[0] != '\0') {

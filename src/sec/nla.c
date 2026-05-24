@@ -30,21 +30,16 @@
  * nla.c -- CredSSP / NLA server flow.
  *
  * Sequence (TLS already established):
+ *   1. Read NTLMSSP_NEGOTIATE
+ *   2. Send NTLMSSP_CHALLENGE
+ *   3. Read NTLMSSP_AUTHENTICATE + pubKeyAuth
+ *   4. Look up NT hash, verify NTLMv2, derive session key
+ *   5. Send pubKeyAuth response (stub - not channel-bound)
+ *   6. Read authInfo, decrypt with seal key
+ *   7. Parse TSCredentials, extract plaintext user + password
  *
- *   1. Read TSRequest #1 from client:  negoTokens = NTLMSSP_NEGOTIATE
- *   2. Write TSRequest #2 to client:   negoTokens = NTLMSSP_CHALLENGE
- *   3. Read TSRequest #3 from client:  negoTokens = NTLMSSP_AUTHENTICATE
- *                                      + pubKeyAuth (we ignore in v1)
- *   4. Write TSRequest #4 to client:   pubKeyAuth = stub OK
- *   5. Read TSRequest #5 from client:  authInfo = RC4-sealed TSCredentials
- *   6. Decrypt authInfo with the client-to-server seal key
- *   7. Parse TSCredentials -> TSPasswordCreds, decode UTF-16LE -> UTF-8
- *
- * The decoded cleartext is what the caller hands to PAM/bsd_auth.
- *
- * What we DO NOT do in v1: pubKeyAuth verification (channel
- * binding) -- this is a security gap we document.  Production
- * deployments should require it.
+ * NT hashes are read from /etc/rdpserver/nthashes (format:
+ * user:hex_hash, one per line). Create entries with rdp-passwd.
  */
 
 #include "nla.h"
@@ -57,20 +52,18 @@
 #include "../include/rdp_log.h"
 #include "../common/utf16.h"
 
+#include <ctype.h>
 #include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* Bound on a single TSRequest read.  Generous so AV-pair-heavy
- * AUTHENTICATE messages fit. */
 #define NLA_MAX_TSREQ (16 * 1024)
+#define NTHASH_PATH   "/etc/rdpserver/nthashes"
 
 static int
 read_tsrequest(struct rdp_tls *t, uint8_t *buf, size_t cap, size_t *out_len)
 {
-	/* TSRequest is DER-encoded, leading with the SEQUENCE tag (0x30)
-	 * followed by a length.  Read enough to decode the length, then
-	 * the rest of the body. */
 	ssize_t n;
 	size_t  body_len, hdr_len;
 	uint8_t lb;
@@ -100,6 +93,46 @@ read_tsrequest(struct rdp_tls *t, uint8_t *buf, size_t cap, size_t *out_len)
 	return 0;
 }
 
+static int
+hex2byte(char c)
+{
+	if (c >= '0' && c <= '9') return c - '0';
+	if (c >= 'a' && c <= 'f') return 10 + c - 'a';
+	if (c >= 'A' && c <= 'F') return 10 + c - 'A';
+	return -1;
+}
+
+static int
+lookup_nthash(const char *user, uint8_t nthash[16])
+{
+	FILE *fp;
+	char line[512];
+
+	fp = fopen(NTHASH_PATH, "r");
+	if (fp == NULL) return -1;
+	while (fgets(line, sizeof line, fp) != NULL) {
+		char *colon = strchr(line, ':');
+		size_t ulen;
+		int i;
+		if (colon == NULL) continue;
+		ulen = (size_t)(colon - line);
+		if (ulen != strlen(user)) continue;
+		if (strncmp(line, user, ulen) != 0) continue;
+		colon++;
+		while (*colon == ' ') colon++;
+		for (i = 0; i < 16; i++) {
+			int hi = hex2byte(colon[i * 2]);
+			int lo = hex2byte(colon[i * 2 + 1]);
+			if (hi < 0 || lo < 0) { fclose(fp); return -1; }
+			nthash[i] = (uint8_t)((hi << 4) | lo);
+		}
+		fclose(fp);
+		return 0;
+	}
+	fclose(fp);
+	return -1;
+}
+
 int
 rdp_nla_server(struct rdp_tls *t,
 		char *user, size_t user_size,
@@ -107,7 +140,7 @@ rdp_nla_server(struct rdp_tls *t,
 {
 	uint8_t  in_buf[NLA_MAX_TSREQ];
 	uint8_t  out_buf[NLA_MAX_TSREQ];
-	size_t   in_len, out_len;
+	size_t   in_len;
 	struct rdp_tsrequest req, resp;
 	struct ntlm_negotiate neg;
 	struct ntlm_authenticate auth;
@@ -115,11 +148,13 @@ rdp_nla_server(struct rdp_tls *t,
 	uint8_t  session_base_key[16];
 	uint8_t  exported[16];
 	uint8_t  cts_seal[16];
+	uint8_t  nthash[16];
 	char     user_utf8[256];
 	char     domain_utf8[256];
-	struct rdp_tscredentials tc;
-	int rc = -1;
-	ssize_t bn;
+	ssize_t  bn;
+
+	memset(user, 0, user_size);
+	memset(pass, 0, pass_size);
 
 	/* 1. Read NEGOTIATE. */
 	if (read_tsrequest(t, in_buf, sizeof in_buf, &in_len) != 0) {
@@ -174,14 +209,28 @@ rdp_nla_server(struct rdp_tls *t,
 		if (got == (size_t)-1) got = 0;
 		domain_utf8[got] = '\0';
 	}
-	rdp_info("nla: AUTHENTICATE from user='%s' domain='%s'",
-		user_utf8, domain_utf8);
+	rdp_info("nla: user='%s' domain='%s'", user_utf8, domain_utf8);
 
-	/* We don't know the password yet -- it's in the next round's
-	 * authInfo, encrypted with the seal key.  Reply with a stub
-	 * pubKeyAuth to keep the client moving.  Production should
-	 * compute the real pubKeyAuth (TLS server pubkey + 1, signed
-	 * with the seal MAC). */
+	/* 4. Look up NT hash and verify NTLMv2. */
+	if (lookup_nthash(user_utf8, nthash) != 0) {
+		rdp_warn("nla: no NT hash for user '%s' in %s",
+			user_utf8, NTHASH_PATH);
+		return -1;
+	}
+
+	if (ntlm_verify_ntlmv2_hash(server_challenge, &auth,
+		nthash, session_base_key) != 0) {
+		rdp_warn("nla: NTLMv2 verification failed for '%s'",
+			user_utf8);
+		return -1;
+	}
+	rdp_info("nla: NTLMv2 verified for '%s'", user_utf8);
+
+	if (ntlm_derive_exported_key(&auth, session_base_key, exported) != 0)
+		return -1;
+	ntlm_seal_key(1, exported, cts_seal);
+
+	/* 5. Send pubKeyAuth (stub - not channel-bound). */
 	{
 		uint8_t stub_pka[16] = {0};
 		memset(&resp, 0, sizeof resp);
@@ -194,55 +243,58 @@ rdp_nla_server(struct rdp_tls *t,
 		    != (ssize_t)bn) return -1;
 	}
 
-	/* 4. Read TSRequest with authInfo. */
+	/* 6. Read authInfo and decrypt. */
 	if (read_tsrequest(t, in_buf, sizeof in_buf, &in_len) != 0) {
 		rdp_warn("nla: read authInfo failed");
 		return -1;
 	}
 	if (rdp_cssp_parse(in_buf, in_len, &req) != 0
-	    || req.auth_info == NULL) {
+	    || req.auth_info == NULL || req.auth_info_len == 0) {
 		rdp_warn("nla: missing authInfo");
 		return -1;
 	}
 
-	/* We cannot validate the NTLMv2 response without knowing the
-	 * password.  But the client encrypted authInfo with the
-	 * client->server seal key, which is derived from the
-	 * ExportedSessionKey, which is derived from the SessionBaseKey,
-	 * which is the HMAC-MD5 of the NTLMv2 hash over NTProofStr.
-	 * Without the password we can't compute SessionBaseKey, so we
-	 * can't decrypt authInfo.  Decryption-as-validation: try the
-	 * supplied password and check the result parses as
-	 * TSCredentials with a sensible user; if not, reject.
-	 *
-	 * Approach: the AUTHENTICATE message already carries the user
-	 * name.  We accept any password the client encrypts -- our job
-	 * is then to feed it to PAM, which is the actual authority.
-	 *
-	 * However we still need the password bytes.  The client
-	 * derived the seal key the same way; without the password we
-	 * cannot.  So in v1 we require the worker's caller to supply
-	 * a candidate password (it doesn't have one).  Practical
-	 * solution: trust the AUTHENTICATE's NT response and require
-	 * the user to type the password into the client; the
-	 * password reaches us only inside authInfo (sealed) so we
-	 * can't read it.
-	 *
-	 * Pragmatic v1 compromise: we cannot decrypt without the
-	 * password.  We fail the NLA flow and return -1; rdpd falls
-	 * back to TLS-only + greeter.  Production NLA needs hash-
-	 * based PAM (winbind/sssd) or pre-shared credentials -- a
-	 * separate engineering project.
-	 *
-	 * Bail out cleanly so the connection still terminates well. */
-	(void)session_base_key; (void)exported; (void)cts_seal;
-	(void)tc;
-	rdp_warn("nla: decryption of authInfo not supported without a "
-		"hash backend; client should retry with /sec:tls");
+	{
+		uint8_t *decrypted;
+		size_t dec_len = req.auth_info_len;
+		struct rdp_rc4 *rc4;
+		struct rdp_tscredentials tc;
 
-	memset(user, 0, user_size);
-	memset(pass, 0, pass_size);
+		decrypted = malloc(dec_len);
+		if (decrypted == NULL) return -1;
 
-	rc = -1;
-	return rc;
+		rc4 = rdp_rc4_new(cts_seal, 16);
+		if (rc4 == NULL) { free(decrypted); return -1; }
+		rdp_rc4_process(rc4, req.auth_info, decrypted, dec_len);
+		rdp_rc4_free(rc4);
+
+		if (rdp_cssp_parse_tscredentials(decrypted, dec_len, &tc) != 0) {
+			rdp_warn("nla: TSCredentials parse failed");
+			explicit_bzero(decrypted, dec_len);
+			free(decrypted);
+			return -1;
+		}
+
+		{
+			size_t got;
+			got = rdp_utf16le_to_utf8(user, user_size - 1,
+				tc.user_utf16, tc.user_utf16_len);
+			if (got == (size_t)-1) got = 0;
+			user[got] = '\0';
+			got = rdp_utf16le_to_utf8(pass, pass_size - 1,
+				tc.password_utf16, tc.password_utf16_len);
+			if (got == (size_t)-1) got = 0;
+			pass[got] = '\0';
+		}
+
+		explicit_bzero(decrypted, dec_len);
+		free(decrypted);
+	}
+
+	rdp_info("nla: credentials extracted for '%s'", user);
+	explicit_bzero(nthash, sizeof nthash);
+	explicit_bzero(session_base_key, sizeof session_base_key);
+	explicit_bzero(exported, sizeof exported);
+	explicit_bzero(cts_seal, sizeof cts_seal);
+	return 0;
 }
