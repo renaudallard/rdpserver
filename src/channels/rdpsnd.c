@@ -111,14 +111,15 @@ rdp_rdpsnd_build_wave2(struct rdpsnd_state *st,
 		const uint8_t *pcm, size_t pcm_len)
 {
 	struct rdp_buf b;
-	uint16_t body_size = (uint16_t)(12 + pcm_len);
+	size_t body_size = 12 + pcm_len;
 
+	if (body_size > 0xFFFF) return -1;
 	if (cap < 4 + body_size) return -1;
 	rdp_buf_init(&b, out, cap);
 
 	if (rdp_buf_put_u8(&b, SNDC_WAVE2) != 0) return -1;
 	if (rdp_buf_put_u8(&b, 0) != 0) return -1;
-	if (rdp_buf_put_u16le(&b, body_size) != 0) return -1;
+	if (rdp_buf_put_u16le(&b, (uint16_t)body_size) != 0) return -1;
 	if (rdp_buf_put_u16le(&b, st->timestamp) != 0) return -1;
 	if (rdp_buf_put_u16le(&b, 0) != 0) return -1;
 	if (rdp_buf_put_u8(&b, st->block_no) != 0) return -1;
