@@ -227,8 +227,6 @@ rdp_fp_parse_input(const uint8_t *buf, size_t len,
 		case RDP_FP_INPUT_MOUSE:
 		case RDP_FP_INPUT_MOUSEX:
 			if (off + 6 > len) return -1;
-			ev.flags = (uint16_t)((eh & 0x1f) << 8) | buf[off];
-			off += 1;
 			ev.flags = (uint16_t)buf[off]
 				| ((uint16_t)buf[off + 1] << 8);
 			off += 2;
