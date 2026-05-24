@@ -102,15 +102,17 @@ test_app_tag(void)
 	size_t vlen;
 	ssize_t r;
 
-	/* Application 101 (MCS ConnectInitial) -- needs multi-byte tag. */
+	/* Application 101 (MCS ConnectInitial) -- needs multi-byte tag.
+	 * The value body (5 bytes) must fit within the buffer. */
 	rdp_buf_init(&b, s, sizeof s);
 	if (rdp_ber_write_app_tag(&b, RDP_BER_CONSTRUCTED, 101) != 0)
 		FAIL("write app tag 101");
 	if (rdp_ber_write_length(&b, 5) != 0) FAIL("write length");
+	memset(s + rdp_buf_used(&b), 0, 5);
 	if (s[0] != 0x7f || s[1] != 0x65 || s[2] != 0x05)
 		FAIL("app tag bytes %02x %02x %02x", s[0], s[1], s[2]);
 
-	r = rdp_ber_read_app_tag(s, rdp_buf_used(&b),
+	r = rdp_ber_read_app_tag(s, rdp_buf_used(&b) + 5,
 		RDP_BER_CONSTRUCTED, 101, &vlen);
 	if (r != 3 || vlen != 5) FAIL("read app 101: r=%ld vlen=%zu",
 		(long)r, vlen);

@@ -215,8 +215,7 @@ rdp_ber_read_universal_tag(const uint8_t *p, size_t left,
 	if (p[0] != want) return -1;
 	r = rdp_ber_read_length(p + 1, left - 1, value_len_out);
 	if (r < 0) return -1;
-	/* Caller checks value length against its slice; we only verify
-	 * that the tag and length encoding themselves are in-range. */
+	if ((size_t)(r + 1) + *value_len_out > left) return -1;
 	return r + 1;
 }
 
@@ -248,6 +247,7 @@ rdp_ber_read_app_tag(const uint8_t *p, size_t left,
 	}
 	r = rdp_ber_read_length(p + off, left - off, value_len_out);
 	if (r < 0) return -1;
+	if (off + (size_t)r + *value_len_out > left) return -1;
 	return (ssize_t)off + r;
 }
 
