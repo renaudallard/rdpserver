@@ -266,7 +266,7 @@ rdp_mcs_parse_connect_initial(const uint8_t *p, size_t len,
 			break;
 		case RDP_CS_MONITOR: {
 			uint32_t nm, mi;
-			if (blen < 4 + 4) break;
+			if (blen < 4 + 8) break;
 			/* flags(4) + numMonitors(4) + monitors[] */
 			nm = (uint32_t)body[4]
 				| ((uint32_t)body[5] << 8)
