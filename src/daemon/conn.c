@@ -83,6 +83,13 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+
+static uint32_t
+ld32_safe(const uint8_t *p)
+{
+	return (uint32_t)p[0] | ((uint32_t)p[1] << 8)
+		| ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
 #include <string.h>
 #include <strings.h>
 #include <unistd.h>
@@ -673,19 +680,22 @@ maybe_dispatch_clip(struct rdp_tls *t, int be_fd,
 		{
 			uint8_t resp[4096];
 			size_t resp_len = 0;
-			(void)rdp_rdpdr_handle(&dr->dr,
+			struct rdpdr_completion compl_info;
+			int rc;
+			memset(&compl_info, 0, sizeof compl_info);
+			rc = rdp_rdpdr_handle(&dr->dr,
 				payload + 8, payload_len - 8,
-				resp, sizeof resp, &resp_len);
-			/* Send each RDPDR PDU as its own channel message. */
+				resp, sizeof resp, &resp_len,
+				&compl_info);
 			{
 				size_t roff = 0;
 				while (roff + 4 <= resp_len) {
-					uint16_t comp = (uint16_t)resp[roff]
+					uint16_t rcomp = (uint16_t)resp[roff]
 					    | ((uint16_t)resp[roff+1] << 8);
-					uint16_t pid = (uint16_t)resp[roff+2]
+					uint16_t rpid = (uint16_t)resp[roff+2]
 					    | ((uint16_t)resp[roff+3] << 8);
 					size_t plen = rdp_rdpdr_pdu_len(
-					    comp, pid,
+					    rcomp, rpid,
 					    resp + roff, resp_len - roff);
 					if (plen == 0 || roff + plen > resp_len)
 						break;
@@ -694,6 +704,25 @@ maybe_dispatch_clip(struct rdp_tls *t, int be_fd,
 					    resp + roff, plen);
 					roff += plen;
 				}
+			}
+			if (rc == 1 && be_fd >= 0) {
+				struct rdp_be_fs_rsp rsp;
+				rsp.req_id = compl_info.be_req_id;
+				rsp.status = compl_info.io_status;
+				rsp.file_id = 0;
+				rsp.length = (uint32_t)compl_info.data_len;
+				if (compl_info.major_function == IRP_MJ_CREATE
+				    && compl_info.data_len >= 4)
+					rsp.file_id = ld32_safe(
+					    compl_info.data);
+				if (rdp_be_send(be_fd, RDP_BE_FS_RSP,
+				    &rsp, sizeof rsp) == 0
+				    && compl_info.data_len > 0
+				    && compl_info.major_function
+				    != IRP_MJ_CREATE)
+					(void)rdp_write_full(be_fd,
+					    compl_info.data,
+					    compl_info.data_len);
 			}
 		}
 		return 1;
@@ -1197,6 +1226,79 @@ run_proxy(struct rdp_tls *t, int be_fd,
 						if (rdp_read_full(be_fd,
 						    junk, c) <= 0) break;
 						left -= c;
+					}
+				}
+			} else if (type == RDP_BE_FS_REQ
+			    && dr->enabled
+			    && len >= sizeof(struct rdp_be_fs_req)) {
+				struct rdp_be_fs_req freq;
+				char path[512];
+				uint32_t path_len;
+				if (rdp_read_full(be_fd, &freq,
+				    sizeof freq) != sizeof freq) goto out;
+				path_len = len - (uint32_t)sizeof freq;
+				if (path_len > sizeof path - 1)
+					path_len = sizeof path - 1;
+				if (path_len > 0 && rdp_read_full(be_fd,
+				    path, path_len) != (ssize_t)path_len)
+					goto out;
+				path[path_len] = '\0';
+				{
+					uint8_t irp[2048];
+					ssize_t in;
+					uint32_t cid = 0;
+					struct rdpdr_pending *p;
+					switch (freq.op) {
+					case RDP_FS_OPEN:
+						in = rdp_rdpdr_build_irp_create(
+						    &dr->dr, irp, sizeof irp,
+						    freq.device_id, path,
+						    FILE_READ_DATA | FILE_LIST_DIRECTORY,
+						    FILE_OPEN, 0, &cid);
+						break;
+					case RDP_FS_READ:
+						in = rdp_rdpdr_build_irp_read(
+						    &dr->dr, irp, sizeof irp,
+						    freq.device_id, freq.file_id,
+						    freq.length, freq.offset, &cid);
+						break;
+					case RDP_FS_CLOSE:
+						in = rdp_rdpdr_build_irp_close(
+						    &dr->dr, irp, sizeof irp,
+						    freq.device_id, freq.file_id,
+						    &cid);
+						break;
+					case RDP_FS_LIST:
+						in = rdp_rdpdr_build_irp_query_dir(
+						    &dr->dr, irp, sizeof irp,
+						    freq.device_id, freq.file_id,
+						    path_len > 0 ? path : "*",
+						    1, &cid);
+						break;
+					default:
+						in = -1;
+						break;
+					}
+					if (in > 0) {
+						int pi;
+						for (pi = 0; pi < RDPDR_MAX_PENDING; pi++)
+							if (dr->dr.pending[pi].in_use
+							    && dr->dr.pending[pi].completion_id == cid) {
+								dr->dr.pending[pi].be_req_id = freq.req_id;
+								break;
+							}
+						(void)send_clip_pdu(t, user_id,
+						    dr->channel_id,
+						    irp, (size_t)in);
+					} else {
+						struct rdp_be_fs_rsp rsp;
+						rsp.req_id = freq.req_id;
+						rsp.status = STATUS_NOT_IMPLEMENTED;
+						rsp.file_id = 0;
+						rsp.length = 0;
+						(void)rdp_be_send(be_fd,
+						    RDP_BE_FS_RSP,
+						    &rsp, sizeof rsp);
 					}
 				}
 			} else if (type == RDP_BE_BYE) {

@@ -77,6 +77,34 @@
 #define RDP_BE_RESIZE       9u
 #define RDP_BE_AUDIO       10u
 
+/* File system operations (session <-> worker for RDPDR drives).
+ * Request: session sends FS_REQ with an rdp_be_fs_req header.
+ * Response: worker sends FS_RSP with an rdp_be_fs_rsp header + data. */
+#define RDP_BE_FS_REQ      11u
+#define RDP_BE_FS_RSP      12u
+
+#define RDP_FS_OPEN        1u
+#define RDP_FS_READ        2u
+#define RDP_FS_WRITE       3u
+#define RDP_FS_CLOSE       4u
+#define RDP_FS_LIST        5u
+
+struct rdp_be_fs_req {
+	uint32_t req_id;
+	uint32_t op;
+	uint32_t device_id;
+	uint32_t file_id;
+	uint32_t length;
+	uint64_t offset;
+};
+
+struct rdp_be_fs_rsp {
+	uint32_t req_id;
+	uint32_t status;
+	uint32_t file_id;
+	uint32_t length;
+};
+
 #define RDP_BE_CLIP_FMT_TEXT  0x00000001u
 
 /* Hello payload (8 bytes). */

@@ -264,6 +264,150 @@ handle_device_list(struct rdpdr_state *st,
 	return 0;
 }
 
+static struct rdpdr_pending *
+alloc_pending(struct rdpdr_state *st, uint32_t device_id,
+		uint32_t major, uint32_t *cid_out)
+{
+	int i;
+	for (i = 0; i < RDPDR_MAX_PENDING; i++) {
+		if (!st->pending[i].in_use) {
+			st->pending[i].in_use = 1;
+			st->pending[i].completion_id = st->next_completion_id++;
+			st->pending[i].device_id = device_id;
+			st->pending[i].major_function = major;
+			st->pending[i].be_req_id = 0;
+			*cid_out = st->pending[i].completion_id;
+			return &st->pending[i];
+		}
+	}
+	return NULL;
+}
+
+static void
+put_irp_header(uint8_t *out, uint32_t device_id, uint32_t file_id,
+		uint32_t completion_id, uint32_t major, uint32_t minor)
+{
+	st16(out, RDPDR_CTYP_CORE);
+	st16(out + 2, PAKID_CORE_DEVICE_IOREQUEST);
+	st32(out + 4, device_id);
+	st32(out + 8, file_id);
+	st32(out + 12, completion_id);
+	st32(out + 16, major);
+	st32(out + 20, minor);
+}
+
+#define IRP_HDR_SIZE 24
+
+ssize_t
+rdp_rdpdr_build_irp_create(struct rdpdr_state *st,
+		uint8_t *out, size_t cap,
+		uint32_t device_id, const char *path,
+		uint32_t desired_access, uint32_t disposition,
+		uint32_t options, uint32_t *completion_id_out)
+{
+	uint32_t cid;
+	size_t path_len = strlen(path);
+	size_t upath_len = (path_len + 1) * 2;
+	size_t total = IRP_HDR_SIZE + 32 + upath_len;
+	size_t i, off;
+
+	if (cap < total) return -1;
+	if (alloc_pending(st, device_id, IRP_MJ_CREATE, &cid) == NULL)
+		return -1;
+	*completion_id_out = cid;
+
+	memset(out, 0, total);
+	put_irp_header(out, device_id, 0, cid, IRP_MJ_CREATE, 0);
+	off = IRP_HDR_SIZE;
+	st32(out + off, desired_access); off += 4;
+	st32(out + off, 0); off += 4; st32(out + off, 0); off += 4;
+	st32(out + off, 0x07); off += 4;
+	st32(out + off, disposition); off += 4;
+	st32(out + off, options); off += 4;
+	st32(out + off, (uint32_t)upath_len); off += 4;
+	st32(out + off, 0); off += 4;
+	for (i = 0; i < path_len; i++) {
+		out[off + i * 2] = (uint8_t)path[i];
+		out[off + i * 2 + 1] = 0;
+	}
+	return (ssize_t)total;
+}
+
+ssize_t
+rdp_rdpdr_build_irp_read(struct rdpdr_state *st,
+		uint8_t *out, size_t cap,
+		uint32_t device_id, uint32_t file_id,
+		uint32_t length, uint64_t offset,
+		uint32_t *completion_id_out)
+{
+	uint32_t cid;
+	size_t total = IRP_HDR_SIZE + 32;
+
+	if (cap < total) return -1;
+	if (alloc_pending(st, device_id, IRP_MJ_READ, &cid) == NULL)
+		return -1;
+	*completion_id_out = cid;
+
+	memset(out, 0, total);
+	put_irp_header(out, device_id, file_id, cid, IRP_MJ_READ, 0);
+	st32(out + IRP_HDR_SIZE, length);
+	st32(out + IRP_HDR_SIZE + 4, (uint32_t)(offset & 0xFFFFFFFF));
+	st32(out + IRP_HDR_SIZE + 8, (uint32_t)(offset >> 32));
+	return (ssize_t)total;
+}
+
+ssize_t
+rdp_rdpdr_build_irp_close(struct rdpdr_state *st,
+		uint8_t *out, size_t cap,
+		uint32_t device_id, uint32_t file_id,
+		uint32_t *completion_id_out)
+{
+	uint32_t cid;
+	size_t total = IRP_HDR_SIZE + 32;
+
+	if (cap < total) return -1;
+	if (alloc_pending(st, device_id, IRP_MJ_CLOSE, &cid) == NULL)
+		return -1;
+	*completion_id_out = cid;
+
+	memset(out, 0, total);
+	put_irp_header(out, device_id, file_id, cid, IRP_MJ_CLOSE, 0);
+	return (ssize_t)total;
+}
+
+ssize_t
+rdp_rdpdr_build_irp_query_dir(struct rdpdr_state *st,
+		uint8_t *out, size_t cap,
+		uint32_t device_id, uint32_t file_id,
+		const char *pattern, int initial,
+		uint32_t *completion_id_out)
+{
+	uint32_t cid;
+	size_t plen = pattern ? strlen(pattern) : 0;
+	size_t ulen = (plen + 1) * 2;
+	size_t total = IRP_HDR_SIZE + 1 + 4 + ulen + 24;
+	size_t off, i;
+
+	if (cap < total) return -1;
+	if (alloc_pending(st, device_id, IRP_MJ_DIRECTORY_CONTROL, &cid) == NULL)
+		return -1;
+	*completion_id_out = cid;
+
+	memset(out, 0, total);
+	put_irp_header(out, device_id, file_id, cid,
+		IRP_MJ_DIRECTORY_CONTROL, IRP_MN_QUERY_DIRECTORY);
+	off = IRP_HDR_SIZE;
+	st32(out + off, FileBothDirectoryInformation); off += 4;
+	out[off] = initial ? 1 : 0; off += 1;
+	st32(out + off, (uint32_t)ulen); off += 4;
+	memset(out + off, 0, 20); off += 20;
+	for (i = 0; i < plen; i++) {
+		out[off + i * 2] = (uint8_t)pattern[i];
+		out[off + i * 2 + 1] = 0;
+	}
+	return (ssize_t)total;
+}
+
 size_t
 rdp_rdpdr_pdu_len(uint16_t component, uint16_t packet_id,
 		const uint8_t *pdu, size_t avail)
@@ -280,6 +424,10 @@ rdp_rdpdr_pdu_len(uint16_t component, uint16_t packet_id,
 		return 4;
 	case PAKID_CORE_DEVICE_REPLY:
 		return 12;
+	case PAKID_CORE_DEVICE_IOREQUEST:
+		return avail;
+	case PAKID_CORE_DEVICE_IOCOMPLETION:
+		return avail;
 	case PAKID_CORE_SERVER_CAPABILITY: {
 		uint16_t ncaps, i;
 		size_t off = 8;
@@ -300,7 +448,8 @@ rdp_rdpdr_pdu_len(uint16_t component, uint16_t packet_id,
 int
 rdp_rdpdr_handle(struct rdpdr_state *st,
 		const uint8_t *pdu, size_t len,
-		uint8_t *resp_out, size_t resp_cap, size_t *resp_len)
+		uint8_t *resp_out, size_t resp_cap, size_t *resp_len,
+		struct rdpdr_completion *comp)
 {
 	uint16_t component, packet_id;
 
@@ -347,9 +496,40 @@ rdp_rdpdr_handle(struct rdpdr_state *st,
 		case PAKID_CORE_DEVICE_LIST_REMOVE:
 			rdp_debug("rdpdr: device list remove");
 			break;
-		case PAKID_CORE_DEVICE_IOCOMPLETION:
-			rdp_debug("rdpdr: io completion");
+		case PAKID_CORE_DEVICE_IOCOMPLETION: {
+			uint32_t did, cid, ios;
+			int i;
+			if (len < 4 + 12) break;
+			did = ld32(pdu + 4);
+			cid = ld32(pdu + 8);
+			ios = ld32(pdu + 12);
+			for (i = 0; i < RDPDR_MAX_PENDING; i++) {
+				if (st->pending[i].in_use
+				    && st->pending[i].completion_id == cid) {
+					if (comp != NULL) {
+						comp->completion_id = cid;
+						comp->device_id = did;
+						comp->major_function =
+						    st->pending[i].major_function;
+						comp->io_status = ios;
+						comp->be_req_id =
+						    st->pending[i].be_req_id;
+						comp->data = pdu + 16;
+						comp->data_len = len > 16
+						    ? len - 16 : 0;
+					}
+					st->pending[i].in_use = 0;
+					rdp_debug("rdpdr: completion cid=%u "
+					    "status=0x%08x major=%u",
+					    cid, ios,
+					    (unsigned)st->pending[i]
+						.major_function);
+					return 1;
+				}
+			}
+			rdp_warn("rdpdr: unknown completion cid=%u", cid);
 			break;
+		}
 		default:
 			rdp_debug("rdpdr: core packet 0x%04x",
 				(unsigned)packet_id);

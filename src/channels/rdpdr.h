@@ -82,6 +82,61 @@ struct rdpdr_device {
 	char     name[9];
 };
 
+/* IRP Major Function codes */
+#define IRP_MJ_CREATE              0x00000000
+#define IRP_MJ_CLOSE               0x00000002
+#define IRP_MJ_READ                0x00000003
+#define IRP_MJ_WRITE               0x00000004
+#define IRP_MJ_QUERY_INFORMATION   0x00000005
+#define IRP_MJ_SET_INFORMATION     0x00000006
+#define IRP_MJ_DIRECTORY_CONTROL   0x0000000C
+#define IRP_MJ_LOCK_CONTROL        0x00000011
+
+/* IRP Minor Function codes for Directory Control */
+#define IRP_MN_QUERY_DIRECTORY     0x00000001
+#define IRP_MN_NOTIFY_CHANGE_DIRECTORY 0x00000002
+
+/* File Information classes */
+#define FileBasicInformation       0x00000004
+#define FileStandardInformation    0x00000005
+#define FileBothDirectoryInformation 0x00000003
+#define FileEndOfFileInformation   0x00000014
+
+/* NTSTATUS codes */
+#define STATUS_SUCCESS             0x00000000
+#define STATUS_NO_MORE_FILES       0x80000006
+#define STATUS_UNSUCCESSFUL        0xC0000001
+#define STATUS_NOT_IMPLEMENTED     0xC0000002
+#define STATUS_NO_SUCH_FILE        0xC000000F
+#define STATUS_OBJECT_NAME_NOT_FOUND 0xC0000034
+
+/* CreateDisposition values */
+#define FILE_SUPERSEDE             0x00000000
+#define FILE_OPEN                  0x00000001
+#define FILE_CREATE                0x00000002
+#define FILE_OPEN_IF               0x00000003
+#define FILE_OVERWRITE             0x00000004
+#define FILE_OVERWRITE_IF          0x00000005
+
+/* CreateOptions */
+#define FILE_DIRECTORY_FILE        0x00000001
+#define FILE_NON_DIRECTORY_FILE    0x00000040
+
+/* DesiredAccess */
+#define FILE_READ_DATA             0x00000001
+#define FILE_WRITE_DATA            0x00000002
+#define FILE_LIST_DIRECTORY        0x00000001
+
+#define RDPDR_MAX_PENDING 64
+
+struct rdpdr_pending {
+	int       in_use;
+	uint32_t  completion_id;
+	uint32_t  device_id;
+	uint32_t  major_function;
+	uint32_t  be_req_id;
+};
+
 struct rdpdr_state {
 	int      handshake_done;
 	uint32_t client_id;
@@ -90,6 +145,9 @@ struct rdpdr_state {
 	char     client_name[128];
 	uint32_t device_count;
 	struct rdpdr_device devices[RDPDR_MAX_DEVICES];
+	uint32_t next_completion_id;
+	uint32_t next_file_id;
+	struct rdpdr_pending pending[RDPDR_MAX_PENDING];
 };
 
 /* Build the Server Announce Request PDU. */
@@ -113,11 +171,51 @@ ssize_t rdp_rdpdr_build_device_reply(uint8_t *out, size_t cap,
 size_t rdp_rdpdr_pdu_len(uint16_t component, uint16_t packet_id,
 		const uint8_t *pdu, size_t avail);
 
+/* Build an IRP Create (open file) request. path is UTF-16LE. */
+ssize_t rdp_rdpdr_build_irp_create(struct rdpdr_state *st,
+		uint8_t *out, size_t cap,
+		uint32_t device_id, const char *path,
+		uint32_t desired_access, uint32_t disposition,
+		uint32_t options, uint32_t *completion_id_out);
+
+/* Build an IRP Read request. */
+ssize_t rdp_rdpdr_build_irp_read(struct rdpdr_state *st,
+		uint8_t *out, size_t cap,
+		uint32_t device_id, uint32_t file_id,
+		uint32_t length, uint64_t offset,
+		uint32_t *completion_id_out);
+
+/* Build an IRP Close request. */
+ssize_t rdp_rdpdr_build_irp_close(struct rdpdr_state *st,
+		uint8_t *out, size_t cap,
+		uint32_t device_id, uint32_t file_id,
+		uint32_t *completion_id_out);
+
+/* Build an IRP QueryDirectory request. */
+ssize_t rdp_rdpdr_build_irp_query_dir(struct rdpdr_state *st,
+		uint8_t *out, size_t cap,
+		uint32_t device_id, uint32_t file_id,
+		const char *pattern, int initial,
+		uint32_t *completion_id_out);
+
+/* IO completion callback info. */
+struct rdpdr_completion {
+	uint32_t completion_id;
+	uint32_t device_id;
+	uint32_t major_function;
+	uint32_t io_status;
+	uint32_t be_req_id;
+	const uint8_t *data;
+	size_t   data_len;
+};
+
 /* Handle an inbound RDPDR PDU. Returns:
  *   0 = handled, may have response in resp_out
+ *   1 = IO completion available in *comp
  *  <0 = error */
 int rdp_rdpdr_handle(struct rdpdr_state *st,
 		const uint8_t *pdu, size_t len,
-		uint8_t *resp_out, size_t resp_cap, size_t *resp_len);
+		uint8_t *resp_out, size_t resp_cap, size_t *resp_len,
+		struct rdpdr_completion *comp);
 
 #endif
