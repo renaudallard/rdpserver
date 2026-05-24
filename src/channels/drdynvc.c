@@ -127,6 +127,8 @@ rdp_drdynvc_handle(struct drdynvc_state *st,
 		/* Client-initiated Create Request. */
 		{
 			const char *name = (const char *)pdu + 1 + id_len;
+			size_t name_avail = len - 1 - id_len;
+			if (memchr(name, 0, name_avail) == NULL) return -1;
 			rdp_debug("drdynvc: Create chan=%u name='%s'",
 				(unsigned)chan_id, name);
 			if (strstr(name, "DisplayControl") != NULL) {
