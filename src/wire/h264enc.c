@@ -114,6 +114,7 @@ bgr_to_yuv420(struct rdp_h264 *e, const uint8_t *bgr, int w, int h)
 	    || e->width != w || e->height != h) {
 		free(e->pic_in.img.plane[0]);
 		e->pic_in.img.plane[0] = malloc(ysz + uvsz * 2);
+		if (e->pic_in.img.plane[0] == NULL) return;
 	}
 	Y = e->pic_in.img.plane[0];
 	U = Y + ysz;
