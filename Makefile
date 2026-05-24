@@ -60,7 +60,7 @@ SESSMGR_CLIENT_OBJ = src/sessionmgr/client.o
 SESSMGR_DAEMON_OBJ = src/sessionmgr/sessionmgr.o $(SESSMGR_AUTH_OBJ)
 
 # Static virtual channels.
-CHANNELS_OBJS = src/channels/cliprdr.o src/channels/drdynvc.o
+CHANNELS_OBJS = src/channels/cliprdr.o src/channels/drdynvc.o src/channels/rdpsnd.o
 CHANNELS_LIB  = src/channels/libchannels.a
 
 # Backend RPC: shared between rdpd worker and rdp-session.
