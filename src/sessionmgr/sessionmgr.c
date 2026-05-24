@@ -50,6 +50,7 @@
 
 #include "auth.h"
 #include "protocol.h"
+#include "../common/rand.h"
 
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -60,6 +61,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <grp.h>
+#include <poll.h>
 #include <pwd.h>
 #include <signal.h>
 #include <stdio.h>
@@ -299,7 +301,7 @@ handle_auth(int cfd, const uint8_t *req, size_t req_len,
 
 static int
 handle_spawn(int cfd, const uint8_t *req, size_t req_len,
-		const char *auth_user)
+		const char *auth_user, int *retained_fd)
 {
 	uint16_t w, h;
 	struct passwd *pw;
@@ -325,6 +327,11 @@ handle_spawn(int cfd, const uint8_t *req, size_t req_len,
 		rdp_err("spawn_session %s: %s", auth_user, strerror(errno));
 		return reply(cfd, RDP_SESSMGR_FAIL, -1);
 	}
+
+	if (*retained_fd >= 0)
+		(void)close(*retained_fd);
+	*retained_fd = dup(fd);
+
 	if (reply(cfd, RDP_SESSMGR_OK, fd) != 0) {
 		(void)close(fd);
 		return -1;
@@ -344,6 +351,17 @@ struct suspended_session {
 static struct suspended_session
 	suspended[RDP_SESSMGR_SUSPEND_MAX];
 
+static int
+fd_alive(int fd)
+{
+	struct pollfd pfd;
+	pfd.fd = fd;
+	pfd.events = 0;
+	pfd.revents = 0;
+	if (poll(&pfd, 1, 0) < 0) return 0;
+	return !(pfd.revents & (POLLHUP | POLLERR | POLLNVAL));
+}
+
 static void
 sweep_expired(void)
 {
@@ -352,9 +370,12 @@ sweep_expired(void)
 	for (i = 0; i < RDP_SESSMGR_SUSPEND_MAX; i++) {
 		if (!suspended[i].in_use) continue;
 		if (now - suspended[i].suspended_at
-		    > RDP_SESSMGR_SUSPEND_TIMEOUT) {
-			rdp_info("sweep: logonId %u timed out",
-				(unsigned)suspended[i].logon_id);
+		    > RDP_SESSMGR_SUSPEND_TIMEOUT
+		    || !fd_alive(suspended[i].be_fd)) {
+			rdp_info("sweep: logonId %u %s",
+				(unsigned)suspended[i].logon_id,
+				!fd_alive(suspended[i].be_fd)
+				    ? "dead" : "timed out");
 			(void)close(suspended[i].be_fd);
 			suspended[i].in_use = 0;
 		}
@@ -428,6 +449,12 @@ handle_resume(int cfd, const uint8_t *req, size_t req_len)
 		    && suspended[i].logon_id == logon_id) {
 			int fd = suspended[i].be_fd;
 			suspended[i].in_use = 0;
+			if (!fd_alive(fd)) {
+				rdp_warn("RESUME: logonId %u fd dead",
+					(unsigned)logon_id);
+				(void)close(fd);
+				return reply(cfd, RDP_SESSMGR_FAIL, -1);
+			}
 			rdp_info("RESUME: logonId %u from slot %d",
 				(unsigned)logon_id, i);
 			if (reply(cfd, RDP_SESSMGR_OK, fd) != 0) {
@@ -443,9 +470,34 @@ handle_resume(int cfd, const uint8_t *req, size_t req_len)
 }
 
 static void
+auto_suspend(int be_fd)
+{
+	int i, slot = -1;
+	uint32_t logon_id;
+
+	sweep_expired();
+	for (i = 0; i < RDP_SESSMGR_SUSPEND_MAX; i++) {
+		if (!suspended[i].in_use) { slot = i; break; }
+	}
+	if (slot < 0) {
+		rdp_warn("auto-suspend: no free slot");
+		(void)close(be_fd);
+		return;
+	}
+	rdp_rand_bytes((uint8_t *)&logon_id, sizeof logon_id);
+	suspended[slot].in_use = 1;
+	suspended[slot].logon_id = logon_id;
+	suspended[slot].be_fd = be_fd;
+	suspended[slot].suspended_at = time(NULL);
+	rdp_info("auto-suspend: logonId %u in slot %d (worker died)",
+		(unsigned)logon_id, slot);
+}
+
+static void
 handle_client(int cfd, const char *service)
 {
 	char auth_user[RDP_SESSMGR_USER_MAX + 1] = {0};
+	int retained_fd = -1;
 
 	for (;;) {
 		uint8_t buf[RDP_SESSMGR_FRAME_MAX];
@@ -459,9 +511,14 @@ handle_client(int cfd, const char *service)
 			explicit_bzero(buf, (size_t)n);
 			break;
 		case RDP_SESSMGR_OP_SPAWN:
-			(void)handle_spawn(cfd, buf, (size_t)n, auth_user);
+			(void)handle_spawn(cfd, buf, (size_t)n, auth_user,
+				&retained_fd);
 			break;
 		case RDP_SESSMGR_OP_SUSPEND:
+			if (retained_fd >= 0) {
+				(void)close(retained_fd);
+				retained_fd = -1;
+			}
 			(void)handle_suspend(cfd);
 			break;
 		case RDP_SESSMGR_OP_RESUME:
@@ -471,6 +528,18 @@ handle_client(int cfd, const char *service)
 			(void)reply(cfd, RDP_SESSMGR_ENOSYS, -1);
 			break;
 		}
+	}
+
+	if (retained_fd >= 0) {
+		struct pollfd pfd;
+		pfd.fd = retained_fd;
+		pfd.events = 0;
+		pfd.revents = 0;
+		if (poll(&pfd, 1, 0) >= 0 && !(pfd.revents & (POLLHUP | POLLERR)))
+			auto_suspend(retained_fd);
+		else
+			(void)close(retained_fd);
+		retained_fd = -1;
 	}
 	explicit_bzero(auth_user, sizeof auth_user);
 }
