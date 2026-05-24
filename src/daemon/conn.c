@@ -1177,8 +1177,14 @@ run_proxy(struct rdp_tls *t, int be_fd,
 				}
 			} else if (type == RDP_BE_HELLO_S2W) {
 				uint8_t junk[64];
-				if (len > 0)
-					(void)rdp_read_full(be_fd, junk, len);
+				size_t left = len;
+				while (left > 0) {
+					size_t c = left > sizeof junk
+					    ? sizeof junk : left;
+					if (rdp_read_full(be_fd, junk, c) <= 0)
+						break;
+					left -= c;
+				}
 			} else if (type == RDP_BE_CLIP_OFFER
 			    || type == RDP_BE_CLIP_REQUEST
 			    || type == RDP_BE_CLIP_DATA) {
@@ -1906,6 +1912,7 @@ send_disconnect:
 	}
 
 done:
+	explicit_bzero(nla_pass, sizeof nla_pass);
 	if (t != NULL) rdp_tls_close(t);
 	(void)close(fd);
 	rdp_debug("conn[%s]: done", peer);
