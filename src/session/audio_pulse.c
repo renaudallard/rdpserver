@@ -100,7 +100,14 @@ ssize_t
 rdp_audio_read(struct rdp_audio *a, void *buf, size_t len)
 {
 	int err;
+	pa_usec_t latency;
+	size_t avail;
+
 	if (a == NULL || a->pa == NULL) return -1;
+	latency = pa_simple_get_latency(a->pa, &err);
+	if (latency == (pa_usec_t)-1) return 0;
+	avail = (size_t)(latency * 176400 / 1000000);
+	if (avail < len) return 0;
 	if (pa_simple_read(a->pa, buf, len, &err) < 0) {
 		rdp_warn("pulse read: %s", pa_strerror(err));
 		return -1;
