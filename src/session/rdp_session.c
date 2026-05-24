@@ -436,9 +436,7 @@ main(int argc, char *argv[])
 	}
 	rdp_info("using display :%d (geometry %dx%d)", display_num, w, h);
 
-	/* Start Xvfb at a large initial size so xrandr can resize DOWN
-	 * to any client-requested geometry without restarting. */
-	xvfb_pid = spawn_xvfb(display_num, 3840, 2160);
+	xvfb_pid = spawn_xvfb(display_num, w, h);
 	if (xvfb_pid < 0) {
 		rdp_err("spawn Xvfb: %s", strerror(errno));
 		return 1;
