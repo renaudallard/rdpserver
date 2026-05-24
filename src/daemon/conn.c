@@ -1263,6 +1263,28 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 		}
 		desktop_w = ci.desktop_width ? ci.desktop_width : 1024;
 		desktop_h = ci.desktop_height ? ci.desktop_height : 768;
+
+		if (ci.monitor_count > 1) {
+			int32_t min_x = 0, min_y = 0;
+			int32_t max_x = 0, max_y = 0;
+			uint32_t mi;
+			for (mi = 0; mi < ci.monitor_count; mi++) {
+				if (mi == 0 || ci.monitors[mi].left < min_x)
+					min_x = ci.monitors[mi].left;
+				if (mi == 0 || ci.monitors[mi].top < min_y)
+					min_y = ci.monitors[mi].top;
+				if (mi == 0 || ci.monitors[mi].right > max_x)
+					max_x = ci.monitors[mi].right;
+				if (mi == 0 || ci.monitors[mi].bottom > max_y)
+					max_y = ci.monitors[mi].bottom;
+			}
+			desktop_w = (uint16_t)(max_x - min_x + 1);
+			desktop_h = (uint16_t)(max_y - min_y + 1);
+			rdp_info("conn[%s]: %u monitors, bounding box %ux%u",
+				peer, ci.monitor_count,
+				(unsigned)desktop_w, (unsigned)desktop_h);
+		}
+
 		rdp_info("conn[%s]: connect from %s, %ux%u, %u channels",
 			peer, ci.client_hostname[0] ? ci.client_hostname : "?",
 			desktop_w, desktop_h, ci.channel_count);

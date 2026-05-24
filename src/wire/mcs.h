@@ -131,6 +131,14 @@ struct rdp_mcs_connect_initial {
 	/* CS_CLUSTER. */
 	uint32_t cluster_flags;
 	uint32_t redirected_session_id;
+
+	/* CS_MONITOR: client monitor layout. */
+#define RDP_MCS_MAX_MONITORS 16
+	uint32_t monitor_count;
+	struct {
+		int32_t  left, top, right, bottom;
+		uint32_t flags;
+	} monitors[RDP_MCS_MAX_MONITORS];
 };
 
 /* Build a MCS Connect Response into out (cap bytes), assigning the

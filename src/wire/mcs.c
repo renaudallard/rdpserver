@@ -264,6 +264,50 @@ rdp_mcs_parse_connect_initial(const uint8_t *p, size_t len,
 					| ((uint32_t)body[7] << 24);
 			}
 			break;
+		case RDP_CS_MONITOR: {
+			uint32_t nm, mi;
+			if (blen < 4 + 4) break;
+			/* flags(4) + numMonitors(4) + monitors[] */
+			nm = (uint32_t)body[4]
+				| ((uint32_t)body[5] << 8)
+				| ((uint32_t)body[6] << 16)
+				| ((uint32_t)body[7] << 24);
+			if (nm > RDP_MCS_MAX_MONITORS)
+				nm = RDP_MCS_MAX_MONITORS;
+			out->monitor_count = nm;
+			for (mi = 0; mi < nm; mi++) {
+				size_t mo = 8 + mi * 20;
+				if (mo + 20 > (size_t)(blen - 4))
+					break;
+				out->monitors[mi].left =
+					(int32_t)((uint32_t)body[mo]
+					| ((uint32_t)body[mo+1] << 8)
+					| ((uint32_t)body[mo+2] << 16)
+					| ((uint32_t)body[mo+3] << 24));
+				out->monitors[mi].top =
+					(int32_t)((uint32_t)body[mo+4]
+					| ((uint32_t)body[mo+5] << 8)
+					| ((uint32_t)body[mo+6] << 16)
+					| ((uint32_t)body[mo+7] << 24));
+				out->monitors[mi].right =
+					(int32_t)((uint32_t)body[mo+8]
+					| ((uint32_t)body[mo+9] << 8)
+					| ((uint32_t)body[mo+10] << 16)
+					| ((uint32_t)body[mo+11] << 24));
+				out->monitors[mi].bottom =
+					(int32_t)((uint32_t)body[mo+12]
+					| ((uint32_t)body[mo+13] << 8)
+					| ((uint32_t)body[mo+14] << 16)
+					| ((uint32_t)body[mo+15] << 24));
+				out->monitors[mi].flags =
+					(uint32_t)body[mo+16]
+					| ((uint32_t)body[mo+17] << 8)
+					| ((uint32_t)body[mo+18] << 16)
+					| ((uint32_t)body[mo+19] << 24);
+			}
+			out->monitor_count = mi;
+			break;
+		}
 		default:
 			/* Unknown block; ignore. */
 			break;

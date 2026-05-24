@@ -188,19 +188,45 @@ rdp_drdynvc_handle(struct drdynvc_state *st,
 
 		/* MS-RDPEDISP Display Update: type(4) length(4)
 		 * pad(4) numMonitors(4) then monitor array.
-		 * Each monitor: 10 x u32. */
+		 * Each monitor: flags(4) left(4) top(4) w(4) h(4)
+		 * physW(4) physH(4) orient(4) dsfX(4) dsfY(4) = 40 bytes */
 		if (data_len < 16 + 40) return 0;
 		{
 			uint32_t nm = ld32(data + 12);
-			if (nm >= 1 && data_len >= 16 + 40) {
-				uint32_t w = ld32(data + 16 + 12);
-				uint32_t h = ld32(data + 16 + 16);
-				if (w >= 200 && w <= 8192
-				    && h >= 200 && h <= 8192) {
-					*new_w = (uint16_t)w;
-					*new_h = (uint16_t)h;
-					rdp_info("drdynvc: resize %ux%u",
-						(unsigned)w, (unsigned)h);
+			uint32_t mi;
+			int32_t min_x = 0, min_y = 0;
+			int32_t max_x = 0, max_y = 0;
+			if (nm < 1 || nm > 16) return 0;
+			if (data_len < 16 + nm * 40) return 0;
+			for (mi = 0; mi < nm; mi++) {
+				const uint8_t *m = data + 16 + mi * 40;
+				int32_t ml = (int32_t)ld32(m + 4);
+				int32_t mt = (int32_t)ld32(m + 8);
+				uint32_t mw = ld32(m + 12);
+				uint32_t mh = ld32(m + 16);
+				int32_t mr = ml + (int32_t)mw;
+				int32_t mb = mt + (int32_t)mh;
+				if (mi == 0) {
+					min_x = ml; min_y = mt;
+					max_x = mr; max_y = mb;
+				} else {
+					if (ml < min_x) min_x = ml;
+					if (mt < min_y) min_y = mt;
+					if (mr > max_x) max_x = mr;
+					if (mb > max_y) max_y = mb;
+				}
+			}
+			{
+				uint32_t tw = (uint32_t)(max_x - min_x);
+				uint32_t th = (uint32_t)(max_y - min_y);
+				if (tw >= 200 && tw <= 8192
+				    && th >= 200 && th <= 8192) {
+					*new_w = (uint16_t)tw;
+					*new_h = (uint16_t)th;
+					rdp_info("drdynvc: resize %ux%u "
+						"(%u monitors)",
+						(unsigned)tw, (unsigned)th,
+						(unsigned)nm);
 					return 1;
 				}
 			}
