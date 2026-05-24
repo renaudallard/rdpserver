@@ -347,8 +347,9 @@ ctrl_handle_input(struct rdpserver_dev *dev)
 			uint8_t skip[256];
 			while (len > 0) {
 				size_t chunk = len > sizeof skip ? sizeof skip : len;
-				if (read(dev->ctrl_fd, skip, chunk) <= 0) break;
-				len -= (uint32_t)chunk;
+				ssize_t got = read(dev->ctrl_fd, skip, chunk);
+				if (got <= 0) break;
+				len -= (uint32_t)got;
 			}
 		}
 	}
