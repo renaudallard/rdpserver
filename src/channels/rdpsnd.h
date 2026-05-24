@@ -64,8 +64,10 @@
 #define WAVE_FORMAT_PCM         0x0001
 
 struct rdpsnd_state {
-	int negotiated;   /* 1 after client responds with its formats */
+	int negotiated;
 	int client_format_count;
+	uint8_t block_no;
+	uint16_t timestamp;
 };
 
 /* Build the Server Audio Formats and Version PDU.  Advertises a
@@ -76,5 +78,14 @@ ssize_t rdp_rdpsnd_build_formats(uint8_t *out, size_t cap);
  * Confirm, Wave Confirm).  Returns 0 on success. */
 int rdp_rdpsnd_handle(struct rdpsnd_state *st,
 		const uint8_t *pdu, size_t len);
+
+/* Build a Training PDU (server sends this, client confirms). */
+ssize_t rdp_rdpsnd_build_training(uint8_t *out, size_t cap);
+
+/* Build a SNDC_WAVE2 PDU carrying PCM data.  format_no is the index
+ * into the negotiated format list (0 for our single PCM format). */
+ssize_t rdp_rdpsnd_build_wave2(struct rdpsnd_state *st,
+		uint8_t *out, size_t cap,
+		const uint8_t *pcm, size_t pcm_len);
 
 #endif /* RDP_RDPSND_H */

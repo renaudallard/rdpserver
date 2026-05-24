@@ -70,7 +70,7 @@ BACKEND_OBJS = src/backend/proto.o
 BACKEND_LIB  = src/backend/libbackend.a
 
 # Per-user session helper (X11).
-SESSION_OBJS = src/session/rdp_session.o src/session/clip_x11.o
+SESSION_OBJS = src/session/rdp_session.o src/session/clip_x11.o $(AUDIO_OBJ)
 SESSION_PROG = src/session/rdp-session
 
 # Daemon objects.
@@ -144,7 +144,7 @@ src/session/clip_x11.o: src/session/clip_x11.c
 
 $(SESSION_PROG): $(SESSION_OBJS) $(BACKEND_LIB) $(COMMON_LIB)
 	$(CC) $(LDFLAGS) -o $@ $(SESSION_OBJS) $(BACKEND_LIB) $(COMMON_LIB) \
-		$(X11_LIBS)
+		$(X11_LIBS) $(AUDIO_LIBS)
 
 .c.o:
 	$(CC) $(CFLAGS) -c -o $@ $<

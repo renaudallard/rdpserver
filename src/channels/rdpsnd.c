@@ -90,6 +90,49 @@ rdp_rdpsnd_build_formats(uint8_t *out, size_t cap)
 	return (ssize_t)rdp_buf_used(&b);
 }
 
+ssize_t
+rdp_rdpsnd_build_training(uint8_t *out, size_t cap)
+{
+	struct rdp_buf b;
+
+	if (cap < 8) return -1;
+	rdp_buf_init(&b, out, cap);
+	if (rdp_buf_put_u8(&b, SNDC_TRAINING) != 0) return -1;
+	if (rdp_buf_put_u8(&b, 0) != 0) return -1;
+	if (rdp_buf_put_u16le(&b, 4) != 0) return -1;
+	if (rdp_buf_put_u16le(&b, 0) != 0) return -1;
+	if (rdp_buf_put_u16le(&b, 0) != 0) return -1;
+	return (ssize_t)rdp_buf_used(&b);
+}
+
+ssize_t
+rdp_rdpsnd_build_wave2(struct rdpsnd_state *st,
+		uint8_t *out, size_t cap,
+		const uint8_t *pcm, size_t pcm_len)
+{
+	struct rdp_buf b;
+	uint16_t body_size = (uint16_t)(12 + pcm_len);
+
+	if (cap < 4 + body_size) return -1;
+	rdp_buf_init(&b, out, cap);
+
+	if (rdp_buf_put_u8(&b, SNDC_WAVE2) != 0) return -1;
+	if (rdp_buf_put_u8(&b, 0) != 0) return -1;
+	if (rdp_buf_put_u16le(&b, body_size) != 0) return -1;
+	if (rdp_buf_put_u16le(&b, st->timestamp) != 0) return -1;
+	if (rdp_buf_put_u16le(&b, 0) != 0) return -1;
+	if (rdp_buf_put_u8(&b, st->block_no) != 0) return -1;
+	st->block_no++;
+	if (rdp_buf_put_u8(&b, 0) != 0) return -1;
+	if (rdp_buf_put_u8(&b, 0) != 0) return -1;
+	if (rdp_buf_put_u8(&b, 0) != 0) return -1;
+	if (rdp_buf_put_u32le(&b, (uint32_t)st->timestamp) != 0) return -1;
+	if (rdp_buf_put(&b, pcm, pcm_len) != 0) return -1;
+
+	st->timestamp += (uint16_t)(pcm_len / 4 * 1000 / 44100);
+	return (ssize_t)rdp_buf_used(&b);
+}
+
 int
 rdp_rdpsnd_handle(struct rdpsnd_state *st,
 		const uint8_t *pdu, size_t len)

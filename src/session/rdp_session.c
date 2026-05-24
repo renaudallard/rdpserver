@@ -64,6 +64,7 @@
 #include <X11/extensions/XTest.h>
 
 #include "clip_x11.h"
+#include "audio.h"
 
 #include <sys/ipc.h>
 #include <sys/shm.h>
@@ -910,6 +911,13 @@ main(int argc, char *argv[])
 	if (pledge("stdio rpath wpath cpath unix proc", NULL) != 0)
 		rdp_warn("pledge session: %s", strerror(errno));
 
+	struct rdp_audio *audio = rdp_audio_open();
+	uint8_t *audio_buf = NULL;
+	if (audio != NULL) {
+		audio_buf = malloc(17640);
+		rdp_info("audio capture active");
+	}
+
 	while (!want_shutdown) {
 		struct pollfd pfd[2];
 		int xfd = ConnectionNumber(dpy);
@@ -997,9 +1005,17 @@ main(int argc, char *argv[])
 			}
 			last_send = now;
 		}
+		if (audio != NULL && audio_buf != NULL) {
+			ssize_t ar = rdp_audio_read(audio, audio_buf, 17640);
+			if (ar > 0)
+				(void)rdp_be_send(BE_FD, RDP_BE_AUDIO,
+				    audio_buf, (size_t)ar);
+		}
 	}
 
 	rdp_info("rdp-session shutting down");
+	rdp_audio_close(audio);
+	free(audio_buf);
 	if (clip_ok) rdp_clip_close(&clip);
 	free(frame_buf);
 	capture_close(&cap);

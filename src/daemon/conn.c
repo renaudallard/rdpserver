@@ -1116,6 +1116,41 @@ run_proxy(struct rdp_tls *t, int be_fd,
 				}
 				(void)clip_handle_be(t, cs, type, pl, len);
 				free(pl);
+			} else if (type == RDP_BE_AUDIO) {
+				if (ss->enabled && ss->snd.negotiated
+				    && len > 0 && len <= 65536) {
+					uint8_t *pcm = malloc(len);
+					if (pcm != NULL
+					    && rdp_read_full(be_fd, pcm, len)
+					    == (ssize_t)len) {
+						uint8_t *wpdu = malloc(len + 20);
+						if (wpdu != NULL) {
+							ssize_t wn;
+							wn = rdp_rdpsnd_build_wave2(
+							    &ss->snd, wpdu,
+							    len + 20,
+							    pcm, len);
+							if (wn > 0)
+								(void)send_clip_pdu(t,
+								    user_id,
+								    ss->channel_id,
+								    wpdu,
+								    (size_t)wn);
+							free(wpdu);
+						}
+					}
+					free(pcm);
+				} else if (len > 0) {
+					uint8_t junk[1024];
+					size_t left = len;
+					while (left > 0) {
+						size_t c = left > sizeof junk
+						    ? sizeof junk : left;
+						if (rdp_read_full(be_fd,
+						    junk, c) <= 0) break;
+						left -= c;
+					}
+				}
 			} else if (type == RDP_BE_BYE) {
 				break;
 			} else {

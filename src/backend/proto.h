@@ -75,6 +75,7 @@
 #define RDP_BE_CLIP_REQUEST 7u
 #define RDP_BE_CLIP_DATA    8u
 #define RDP_BE_RESIZE       9u
+#define RDP_BE_AUDIO       10u
 
 #define RDP_BE_CLIP_FMT_TEXT  0x00000001u
 

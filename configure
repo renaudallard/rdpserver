@@ -193,6 +193,33 @@ if [ "$HAVE_X264" = 1 ]; then
 	echo "configure: libx264 available"
 fi
 
+# Audio capture: PulseAudio (Linux) or sndio (OpenBSD).
+HAVE_PULSEAUDIO=0
+HAVE_SNDIO=0
+AUDIO_CFLAGS=
+AUDIO_LIBS=
+AUDIO_OBJ=
+
+probe "for libpulse-simple" '#include <pulse/simple.h>
+int main(void) { pa_simple *p = 0; (void)p; return 0; }' \
+	"" "-lpulse-simple -lpulse" && HAVE_PULSEAUDIO=1
+if [ "$HAVE_PULSEAUDIO" = 1 ]; then
+	AUDIO_LIBS="-lpulse-simple -lpulse"
+	AUDIO_OBJ="src/session/audio_pulse.o"
+	echo "configure: PulseAudio available"
+fi
+
+if [ "$HAVE_PULSEAUDIO" = 0 ]; then
+	probe "for sndio" '#include <sndio.h>
+int main(void) { struct sio_hdl *h = sio_open(SIO_DEVANY, SIO_REC, 0); (void)h; return 0; }' \
+		"" "-lsndio" && HAVE_SNDIO=1
+	if [ "$HAVE_SNDIO" = 1 ]; then
+		AUDIO_LIBS="-lsndio"
+		AUDIO_OBJ="src/session/audio_sndio.o"
+		echo "configure: sndio available"
+	fi
+fi
+
 # Xorg DDX video driver module (optional).
 HAVE_XORG_DDX=0
 XORG_CFLAGS=
@@ -500,6 +527,8 @@ cat > src/include/config.h <<EOF
 #define HAVE_KQUEUE           $HAVE_KQUEUE
 #define HAVE_X11              $HAVE_X11
 #define HAVE_X264             $HAVE_X264
+#define HAVE_PULSEAUDIO       $HAVE_PULSEAUDIO
+#define HAVE_SNDIO            $HAVE_SNDIO
 #define HAVE_XORG_DDX         $HAVE_XORG_DDX
 
 #define RDP_XVFB_PATH         "$XVFB_PATH"
@@ -543,6 +572,11 @@ XVFB_PATH   = $XVFB_PATH
 HAVE_X264   = $HAVE_X264
 X264_CFLAGS = $X264_CFLAGS
 X264_LIBS   = $X264_LIBS
+
+HAVE_PULSEAUDIO = $HAVE_PULSEAUDIO
+HAVE_SNDIO      = $HAVE_SNDIO
+AUDIO_LIBS      = $AUDIO_LIBS
+AUDIO_OBJ       = $AUDIO_OBJ
 
 HAVE_XORG_DDX  = $HAVE_XORG_DDX
 XORG_CFLAGS    = $XORG_CFLAGS
