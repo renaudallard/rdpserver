@@ -1754,11 +1754,9 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 			/* On disconnect: try to SUSPEND the session so it
 			 * survives for the next reconnect. */
 			if (rdp_sessmgr_suspend(cfg->sessmgr_sock,
-				logon_id, be_fd) == 0) {
+				logon_id, be_fd) == 0)
 				rdp_info("conn[%s]: session suspended", peer);
-			} else {
-				(void)close(be_fd);
-			}
+			(void)close(be_fd);
 			goto send_disconnect;
 		}
 		rdp_debug("conn[%s]: reconnect failed; falling through "
@@ -1785,8 +1783,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 				    && rdp_sessmgr_suspend(cfg->sessmgr_sock,
 					0, be_fd) == 0)
 					rdp_info("conn[%s]: session suspended", peer);
-				else
-					(void)close(be_fd);
+				(void)close(be_fd);
 				goto done;
 			}
 			rdp_sessmgr_close(&sm);
@@ -1889,13 +1886,11 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 			if (cfg->sessmgr_sock != NULL
 			    && cfg->sessmgr_sock[0] != '\0'
 			    && rdp_sessmgr_suspend(cfg->sessmgr_sock,
-				logon_id, be_fd) == 0) {
+				logon_id, be_fd) == 0)
 				rdp_info("conn[%s]: session suspended "
 					"(logonId=%u)", peer,
 					(unsigned)logon_id);
-			} else {
-				(void)close(be_fd);
-			}
+			(void)close(be_fd);
 		}
 	}
 
