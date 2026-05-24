@@ -317,11 +317,11 @@ ntlm_verify_ntlmv2_hash(const uint8_t server_challenge[8],
 
 	got = rdp_utf16le_to_utf8(user_utf8, sizeof user_utf8 - 1,
 		auth->user_utf16, auth->user_utf16_len);
-	if (got == (size_t)-1) got = 0;
+	if (got == (size_t)-1 || got >= sizeof user_utf8) got = 0;
 	user_utf8[got] = '\0';
 	got = rdp_utf16le_to_utf8(domain_utf8, sizeof domain_utf8 - 1,
 		auth->domain_utf16, auth->domain_utf16_len);
-	if (got == (size_t)-1) got = 0;
+	if (got == (size_t)-1 || got >= sizeof domain_utf8) got = 0;
 	domain_utf8[got] = '\0';
 
 	to_utf16_upper(user_utf8, user_up, &user_len);

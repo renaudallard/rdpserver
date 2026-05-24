@@ -202,11 +202,11 @@ rdp_nla_server(struct rdp_tls *t,
 		size_t got;
 		got = rdp_utf16le_to_utf8(user_utf8, sizeof user_utf8 - 1,
 			auth.user_utf16, auth.user_utf16_len);
-		if (got == (size_t)-1) got = 0;
+		if (got == (size_t)-1 || got >= sizeof user_utf8) got = 0;
 		user_utf8[got] = '\0';
 		got = rdp_utf16le_to_utf8(domain_utf8, sizeof domain_utf8 - 1,
 			auth.domain_utf16, auth.domain_utf16_len);
-		if (got == (size_t)-1) got = 0;
+		if (got == (size_t)-1 || got >= sizeof domain_utf8) got = 0;
 		domain_utf8[got] = '\0';
 	}
 	rdp_info("nla: user='%s' domain='%s'", user_utf8, domain_utf8);
@@ -279,11 +279,11 @@ rdp_nla_server(struct rdp_tls *t,
 			size_t got;
 			got = rdp_utf16le_to_utf8(user, user_size - 1,
 				tc.user_utf16, tc.user_utf16_len);
-			if (got == (size_t)-1) got = 0;
+			if (got == (size_t)-1 || got >= user_size) got = 0;
 			user[got] = '\0';
 			got = rdp_utf16le_to_utf8(pass, pass_size - 1,
 				tc.password_utf16, tc.password_utf16_len);
-			if (got == (size_t)-1) got = 0;
+			if (got == (size_t)-1 || got >= pass_size) got = 0;
 			pass[got] = '\0';
 		}
 
