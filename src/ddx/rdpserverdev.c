@@ -36,18 +36,28 @@
  */
 
 #include "rdpserverdev.h"
+#include "ddx_proto.h"
 
 #include <xf86.h>
 #include <xf86str.h>
 #include <xf86Crtc.h>
+#include <xf86Xinput.h>
 #include <mipointer.h>
 #include <micmap.h>
 #include <mi.h>
 #include <fb.h>
 #include <damage.h>
 #include <damagestr.h>
+#include <input.h>
+#include <inputstr.h>
 
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/uio.h>
+
+#include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -159,6 +169,190 @@ free_framebuffer(struct rdpserver_dev *dev)
 	}
 }
 
+static ssize_t
+ctrl_write_full(int fd, const void *buf, size_t len)
+{
+	const uint8_t *p = buf;
+	size_t off = 0;
+	while (off < len) {
+		ssize_t r = write(fd, p + off, len - off);
+		if (r < 0) {
+			if (errno == EINTR) continue;
+			return -1;
+		}
+		off += (size_t)r;
+	}
+	return (ssize_t)off;
+}
+
+static int
+ctrl_send_msg(int fd, uint32_t type, const void *payload, uint32_t len)
+{
+	uint8_t hdr[DDX_PROTO_HEADER];
+	hdr[0] = (uint8_t)(type & 0xff);
+	hdr[1] = (uint8_t)((type >> 8) & 0xff);
+	hdr[2] = (uint8_t)((type >> 16) & 0xff);
+	hdr[3] = (uint8_t)((type >> 24) & 0xff);
+	hdr[4] = (uint8_t)(len & 0xff);
+	hdr[5] = (uint8_t)((len >> 8) & 0xff);
+	hdr[6] = (uint8_t)((len >> 16) & 0xff);
+	hdr[7] = (uint8_t)((len >> 24) & 0xff);
+	if (ctrl_write_full(fd, hdr, sizeof hdr) < 0) return -1;
+	if (len > 0 && ctrl_write_full(fd, payload, len) < 0) return -1;
+	return 0;
+}
+
+static int
+ctrl_send_shm_ready(int ctrl_fd, int shm_fd,
+    uint16_t w, uint16_t h, uint32_t stride, uint32_t sz)
+{
+	struct ddx_shm_ready sr;
+	struct msghdr msg;
+	struct iovec iov[2];
+	uint8_t hdr[DDX_PROTO_HEADER];
+	char cbuf[CMSG_SPACE(sizeof(int))];
+	struct cmsghdr *cmsg;
+	uint32_t plen = (uint32_t)sizeof sr;
+
+	sr.width = w;
+	sr.height = h;
+	sr.stride = stride;
+	sr.size = sz;
+
+	hdr[0] = DDX_MSG_SHM_READY & 0xff;
+	hdr[1] = hdr[2] = hdr[3] = 0;
+	hdr[4] = plen & 0xff;
+	hdr[5] = (plen >> 8) & 0xff;
+	hdr[6] = hdr[7] = 0;
+
+	memset(&msg, 0, sizeof msg);
+	iov[0].iov_base = hdr;
+	iov[0].iov_len = sizeof hdr;
+	iov[1].iov_base = &sr;
+	iov[1].iov_len = sizeof sr;
+	msg.msg_iov = iov;
+	msg.msg_iovlen = 2;
+	memset(cbuf, 0, sizeof cbuf);
+	msg.msg_control = cbuf;
+	msg.msg_controllen = sizeof cbuf;
+	cmsg = CMSG_FIRSTHDR(&msg);
+	cmsg->cmsg_level = SOL_SOCKET;
+	cmsg->cmsg_type = SCM_RIGHTS;
+	cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+	memcpy(CMSG_DATA(cmsg), &shm_fd, sizeof(int));
+
+	{
+		ssize_t r;
+		do { r = sendmsg(ctrl_fd, &msg, 0); }
+		while (r < 0 && errno == EINTR);
+		if (r < 0) return -1;
+	}
+	return 0;
+}
+
+static int
+ctrl_send_damage(int ctrl_fd, RegionPtr region)
+{
+	int nrects = RegionNumRects(region);
+	BoxPtr boxes = RegionRects(region);
+	uint8_t buf[DDX_PROTO_HEADER + sizeof(struct ddx_damage_hdr)
+	    + 256 * sizeof(struct ddx_damage_rect)];
+	struct ddx_damage_hdr *dh;
+	struct ddx_damage_rect *dr;
+	uint32_t plen;
+	int i, send_n;
+
+	if (nrects <= 0) return 0;
+	send_n = nrects > 256 ? 256 : nrects;
+	plen = (uint32_t)(sizeof(struct ddx_damage_hdr)
+	    + (size_t)send_n * sizeof(struct ddx_damage_rect));
+
+	buf[0] = DDX_MSG_DAMAGE & 0xff;
+	buf[1] = buf[2] = buf[3] = 0;
+	buf[4] = plen & 0xff;
+	buf[5] = (plen >> 8) & 0xff;
+	buf[6] = (plen >> 16) & 0xff;
+	buf[7] = 0;
+
+	dh = (struct ddx_damage_hdr *)(buf + DDX_PROTO_HEADER);
+	dh->nrects = (uint16_t)send_n;
+	dh->reserved = 0;
+	dr = (struct ddx_damage_rect *)(dh + 1);
+	for (i = 0; i < send_n; i++) {
+		dr[i].x = (int16_t)boxes[i].x1;
+		dr[i].y = (int16_t)boxes[i].y1;
+		dr[i].w = (int16_t)(boxes[i].x2 - boxes[i].x1);
+		dr[i].h = (int16_t)(boxes[i].y2 - boxes[i].y1);
+	}
+	return ctrl_write_full(ctrl_fd, buf,
+	    DDX_PROTO_HEADER + plen) < 0 ? -1 : 0;
+}
+
+static void
+ctrl_handle_input(struct rdpserver_dev *dev)
+{
+	uint8_t hdr[DDX_PROTO_HEADER];
+	uint32_t type, len;
+	struct pollfd pfd;
+	(void)dev;
+
+	for (;;) {
+		pfd.fd = dev->ctrl_fd;
+		pfd.events = POLLIN;
+		pfd.revents = 0;
+		if (poll(&pfd, 1, 0) <= 0) break;
+		if (!(pfd.revents & POLLIN)) break;
+
+		ssize_t r = read(dev->ctrl_fd, hdr, sizeof hdr);
+		if (r <= 0) break;
+		if (r < (ssize_t)sizeof hdr) break;
+
+		type = (uint32_t)hdr[0] | ((uint32_t)hdr[1] << 8)
+		    | ((uint32_t)hdr[2] << 16) | ((uint32_t)hdr[3] << 24);
+		len = (uint32_t)hdr[4] | ((uint32_t)hdr[5] << 8)
+		    | ((uint32_t)hdr[6] << 16) | ((uint32_t)hdr[7] << 24);
+
+		if (type == DDX_MSG_INPUT_KEY && len >= sizeof(struct ddx_input_key)) {
+			struct ddx_input_key k;
+			if (read(dev->ctrl_fd, &k, sizeof k) == sizeof k) {
+				int keycode = k.scancode + 8;
+				xf86PostKeyboardEvent(inputInfo.keyboard,
+				    keycode, k.down);
+			}
+		} else if (type == DDX_MSG_INPUT_MOUSE && len >= sizeof(struct ddx_input_mouse)) {
+			struct ddx_input_mouse m;
+			if (read(dev->ctrl_fd, &m, sizeof m) == sizeof m) {
+				int buttons = 0;
+				xf86PostMotionEvent(inputInfo.pointer, TRUE,
+				    0, 2, m.x, m.y);
+				if (m.flags & 1) {
+					if (m.buttons & 1)
+						buttons |= 1;
+					if (m.buttons & 2)
+						buttons |= 4;
+					if (m.buttons & 4)
+						buttons |= 2;
+					xf86PostButtonEvent(inputInfo.pointer,
+					    TRUE, buttons ? buttons : 1,
+					    (m.buttons != 0), 0, 0);
+				}
+			}
+		} else if (type == DDX_MSG_RESIZE && len >= sizeof(struct ddx_resize)) {
+			struct ddx_resize rs;
+			if (read(dev->ctrl_fd, &rs, sizeof rs) == sizeof rs) {
+				/* TODO: implement resize */
+			}
+		} else {
+			uint8_t skip[256];
+			while (len > 0) {
+				size_t chunk = len > sizeof skip ? sizeof skip : len;
+				if (read(dev->ctrl_fd, skip, chunk) <= 0) break;
+				len -= (uint32_t)chunk;
+			}
+		}
+	}
+}
+
 static Bool
 rdpserver_CreateScreenResources(ScreenPtr pScreen)
 {
@@ -181,6 +375,14 @@ rdpserver_CreateScreenResources(ScreenPtr pScreen)
 		dev->damage_registered = TRUE;
 		xf86DrvMsg(pScrn->scrnIndex, X_INFO,
 		    "damage tracking registered\n");
+	}
+
+	if (dev->ctrl_fd >= 0) {
+		if (ctrl_send_shm_ready(dev->ctrl_fd, dev->shm_fd,
+		    (uint16_t)dev->width, (uint16_t)dev->height,
+		    (uint32_t)dev->stride, (uint32_t)dev->shm_size) == 0)
+			xf86DrvMsg(pScrn->scrnIndex, X_INFO,
+			    "sent SHM_READY to rdp-session\n");
 	}
 	return TRUE;
 }
@@ -210,19 +412,20 @@ rdpserver_BlockHandler(ScreenPtr pScreen, void *timeout)
 
 	if (dev->damage != NULL && dev->damage_registered) {
 		RegionPtr region = DamageRegion(dev->damage);
-		if (RegionNotEmpty(region)) {
-			/* TODO: send damage rects to rdp-session via ctrl_fd */
-			DamageEmpty(dev->damage);
-		}
+		if (RegionNotEmpty(region) && dev->ctrl_fd >= 0)
+			ctrl_send_damage(dev->ctrl_fd, region);
+		DamageEmpty(dev->damage);
 	}
 }
 
 static void
 rdpserver_WakeupHandler(ScreenPtr pScreen, int result)
 {
-	(void)pScreen;
+	struct rdpserver_dev *dev = rdpserver_dev_from_screen(pScreen);
 	(void)result;
-	/* TODO: read input/resize from ctrl_fd */
+
+	if (dev->ctrl_fd >= 0)
+		ctrl_handle_input(dev);
 }
 
 static Bool
@@ -242,6 +445,16 @@ rdpserver_ScreenInit(ScreenPtr pScreen, int argc, char **argv)
 		return FALSE;
 	dev->shm_fd = -1;
 	dev->ctrl_fd = -1;
+
+	{
+		const char *env_ctrl = getenv("RDPSERVER_CTRL_FD");
+		if (env_ctrl != NULL) {
+			dev->ctrl_fd = atoi(env_ctrl);
+			int fl = fcntl(dev->ctrl_fd, F_GETFL);
+			if (fl >= 0)
+				fcntl(dev->ctrl_fd, F_SETFL, fl | O_NONBLOCK);
+		}
+	}
 
 	if (!dixRegisterPrivateKey(&rdpserver_screen_key, PRIVATE_SCREEN, 0))
 		return FALSE;
@@ -334,23 +547,9 @@ output_get_modes(xf86OutputPtr output)
 	ScrnInfoPtr pScrn = output->scrn;
 	DisplayModePtr mode;
 
-	mode = xnfcalloc(1, sizeof(DisplayModeRec));
-	mode->HDisplay = pScrn->virtualX;
-	mode->VDisplay = pScrn->virtualY;
-	mode->VRefresh = 60;
-	mode->Clock = mode->HDisplay * mode->VDisplay * 60 / 1000;
-	mode->HSyncStart = mode->HDisplay + 16;
-	mode->HSyncEnd = mode->HSyncStart + 64;
-	mode->HTotal = mode->HSyncEnd + 16;
-	mode->VSyncStart = mode->VDisplay + 1;
-	mode->VSyncEnd = mode->VSyncStart + 3;
-	mode->VTotal = mode->VSyncEnd + 1;
-	mode->Flags = 0;
-	mode->type = M_T_DRIVER | M_T_PREFERRED;
-	mode->status = MODE_OK;
-	mode->next = NULL;
-	mode->prev = NULL;
-	xf86SetModeDefaultName(mode);
+	mode = xf86CVTMode(pScrn->virtualX, pScrn->virtualY, 60, FALSE, FALSE);
+	if (mode != NULL)
+		mode->type = M_T_DRIVER | M_T_PREFERRED;
 	return mode;
 }
 
@@ -376,7 +575,7 @@ static const xf86CrtcConfigFuncsRec config_funcs = {
 static Bool
 rdpserver_PreInit(ScrnInfoPtr pScrn, int flags)
 {
-	const char *env_w, *env_h;
+	const char *env_w, *env_h, *env_ctrl;
 	xf86CrtcPtr crtc;
 	xf86OutputPtr output;
 
@@ -385,6 +584,11 @@ rdpserver_PreInit(ScrnInfoPtr pScrn, int flags)
 
 	if (pScrn->confScreen != NULL)
 		pScrn->monitor = pScrn->confScreen->monitor;
+
+	env_ctrl = getenv("RDPSERVER_CTRL_FD");
+	if (env_ctrl != NULL)
+		xf86DrvMsg(pScrn->scrnIndex, X_INFO,
+		    "control socket fd=%s\n", env_ctrl);
 
 	if (!xf86SetDepthBpp(pScrn, 24, 0, 32, Support32bppFb))
 		return FALSE;

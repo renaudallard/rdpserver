@@ -12,8 +12,8 @@ EndSection
 
 Section "Monitor"
 	Identifier	"Monitor0"
-	HorizSync	30-80
-	VertRefresh	56-76
+	HorizSync	15-200
+	VertRefresh	20-200
 EndSection
 
 Section "Screen"
