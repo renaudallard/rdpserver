@@ -73,7 +73,7 @@ text. After auth, a backend RPC shuttles pixel frames from
 | Clean disconnect, Shutdown Request, TCP keepalive | ✓ | |
 | NLA / CredSSP / NTLMv2 | partial | Wire framework only; needs a hash backend (winbind, sssd) to validate without a cleartext side-channel.  The daemon doesn't advertise PROTOCOL_HYBRID; `xfreerdp /sec:nla` is rejected cleanly. |
 | RDPGFX / H.264 (AVC420) | ✓ | Server opens the GraphicsPipeline DRDYNVC channel, exchanges RDPGFX caps (v8.1), creates a surface, and streams frames as AVC420 WireToSurface1 PDUs encoded via libx264 (ultrafast/zerolatency, CRF 32).  Large frames are split across ZGFX segments and channel PDU fragments.  Verified end-to-end with xfreerdp 3.x on Linux and OpenBSD. |
-| Audio output (RDPSND / MS-RDPEA) | ✓ negotiation | Format negotiation (PCM 16-bit stereo 44.1 kHz) on the `rdpsnd` static channel.  xfreerdp sees "audio formats supported."  Actual PCM streaming from PulseAudio/sndio capture is the next step. |
+| Audio output (RDPSND / MS-RDPEA) | ✓ | PCM 16-bit stereo 44.1 kHz streamed via SNDC_WAVE2 PDUs.  PulseAudio on Linux (auto-creates a per-session null sink), sndio on OpenBSD.  Audio from apps playing in the session is captured and forwarded to the RDP client in real time. |
 | Drive / printer / serial redirection | ✗ | |
 | Session reconnect (auto-reconnect cookie) | ✓ infra | Save Session Info PDU with ARC cookie, Client Info ARC parser, sessmgr SUSPEND/RESUME ops, conn.c reconnect path. Works on clean disconnect; SIGKILL resilience needs sessmgr-retained fd (next item). |
 | Dynamic resize (RDPEDISP via DRDYNVC) | ✓ | xfreerdp with `/dynamic-resolution`: server accepts Display Control Channel, sends Deactivate-All + re-Demand-Active at new geometry, rdp-session resizes Xvfb via xrandr. Apps survive the resize. |
@@ -126,6 +126,7 @@ bmake (OpenBSD).
 | X11 | `libx11-dev`, `libxdamage-dev`, `libxtst-dev`, `libxfixes-dev`, `libxext-dev` | base X11 (`/usr/X11R6`) |
 | H.264 | `libx264-dev` | `pkg_add x264` |
 | X server | `xvfb` | `xvfb` package (or base) |
+| Audio (optional) | `libpulse-dev` | sndio (base) |
 | DDX driver (optional) | `xserver-xorg-dev` | Xorg SDK |
 | Optional clipboard helper for tests | `xclip` | `pkg_add xclip` |
 
