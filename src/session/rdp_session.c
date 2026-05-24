@@ -54,6 +54,7 @@
 
 #include "../include/compat.h"
 #include "../include/rdp_log.h"
+#include "../common/io.h"
 #include "../backend/proto.h"
 #include "../backend/proto_api.h"
 
@@ -348,7 +349,7 @@ send_frame(int fd, int w, int h, const uint8_t *pixels)
 		memcpy(buf, hdr, RDP_BE_HEADER + sizeof fhdr);
 		memcpy(buf + RDP_BE_HEADER + sizeof fhdr,
 			pixels, (size_t)w * h * 3);
-		rc = (write(fd, buf, RDP_BE_HEADER + total)
+		rc = (rdp_write_full(fd, buf, RDP_BE_HEADER + total)
 			== (ssize_t)(RDP_BE_HEADER + total)) ? 0 : -1;
 		free(buf);
 		return rc;
@@ -495,8 +496,9 @@ main(int argc, char *argv[])
 	/* Greet the worker with our mode. */
 	{
 		struct rdp_be_hello hello = { (uint16_t)w, (uint16_t)h, 24, 0 };
-		(void)rdp_be_send(BE_FD, RDP_BE_HELLO_S2W,
-			&hello, sizeof hello);
+		if (rdp_be_send(BE_FD, RDP_BE_HELLO_S2W,
+			&hello, sizeof hello) != 0)
+			rdp_err("HELLO send failed: %s", strerror(errno));
 	}
 
 	xterm_pid = spawn_xterm();

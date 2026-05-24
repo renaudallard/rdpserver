@@ -155,8 +155,12 @@ rdp_sessmgr_spawn(struct rdp_sessmgr *s, uint16_t w, uint16_t h, int *fd_out)
 	req[3] = (uint8_t)((w >> 8) & 0xff);
 	req[4] = (uint8_t)(h & 0xff);
 	req[5] = (uint8_t)((h >> 8) & 0xff);
-	if (send(s->fd, req, sizeof req, 0) != (ssize_t)sizeof req)
-		return -1;
+	{
+		ssize_t sn;
+		do { sn = send(s->fd, req, sizeof req, 0); }
+		while (sn < 0 && errno == EINTR);
+		if (sn != (ssize_t)sizeof req) return -1;
+	}
 
 	memset(&msg, 0, sizeof msg);
 	iov.iov_base = resp;
@@ -165,7 +169,7 @@ rdp_sessmgr_spawn(struct rdp_sessmgr *s, uint16_t w, uint16_t h, int *fd_out)
 	msg.msg_iovlen = 1;
 	msg.msg_control = cbuf;
 	msg.msg_controllen = sizeof cbuf;
-	n = recvmsg(s->fd, &msg, 0);
+	do { n = recvmsg(s->fd, &msg, 0); } while (n < 0 && errno == EINTR);
 	if (n < 4) return -1;
 	if (resp[0] != RDP_SESSMGR_OK) {
 		rdp_warn("sessmgr SPAWN: status=%u", (unsigned)resp[0]);
