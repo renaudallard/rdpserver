@@ -78,7 +78,8 @@ text. After auth, a backend RPC shuttles pixel frames from
 | RemoteFX / RDPGFX / H.264 | ✗ | Clients negotiate down to legacy bitmap. |
 | Audio (MS-RDPEA), drive / printer / serial redirection | ✗ | |
 | Session reconnect (auto-reconnect cookie) | ✓ infra | Save Session Info PDU with ARC cookie, Client Info ARC parser, sessmgr SUSPEND/RESUME ops, conn.c reconnect path. Works on clean disconnect; SIGKILL resilience needs sessmgr-retained fd (next item). |
-| Multi-monitor, dynamic resize | ✗ | |
+| Dynamic resize (RDPEDISP via DRDYNVC) | ✓ | xfreerdp with `/dynamic-resolution`: server accepts Display Control Channel, sends Deactivate-All + re-Demand-Active at new geometry, rdp-session resizes Xvfb via xrandr. Apps survive the resize. |
+| Multi-monitor | ✗ | |
 | Native Xorg DDX (xrdpdev-style), Wayland backend | ✗ | The backend interface accommodates a future native module. |
 
 ## Supported clients
