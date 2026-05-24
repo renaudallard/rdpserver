@@ -151,12 +151,13 @@ main(int argc, char *argv[])
 	const char *port = RDP_DEFAULT_PORT;
 	const char *host = NULL;
 	const char *sessmgr_sock = NULL;
-	int debug = 0, foreground = 0;
+	int debug = 0, foreground = 0, auto_login = 0;
 	int opt, listen_fd;
 	struct rdp_log_cfg lc;
 
-	while ((opt = getopt(argc, argv, "dfp:h:S:H?")) != -1) {
+	while ((opt = getopt(argc, argv, "Adfp:h:S:H?")) != -1) {
 		switch (opt) {
+		case 'A': auto_login = 1; break;
 		case 'd': debug = 1; break;
 		case 'f': foreground = 1; break;
 		case 'p': port = optarg; break;
@@ -235,7 +236,7 @@ main(int argc, char *argv[])
 			continue;
 		}
 		if (pid == 0) {
-			struct rdp_conn_cfg ccfg = { tls, sessmgr_sock };
+			struct rdp_conn_cfg ccfg = { tls, sessmgr_sock, auto_login };
 			(void)close(listen_fd);
 			/* Worker only needs: TLS read/write on the TCP fd,
 			 * the AF_UNIX socket to sessmgr, and writing tmp/

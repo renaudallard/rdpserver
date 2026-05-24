@@ -48,6 +48,7 @@ struct rdp_tls_ctx;
 struct rdp_conn_cfg {
 	struct rdp_tls_ctx *tls;
 	const char         *sessmgr_sock;  /* AF_UNIX path; NULL = stub auth */
+	int                 auto_login;    /* skip greeter; use Client Info creds */
 };
 
 void rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer);
