@@ -78,7 +78,8 @@ text. After auth, a backend RPC shuttles pixel frames from
 | Session reconnect (auto-reconnect cookie) | ✓ infra | Save Session Info PDU with ARC cookie, Client Info ARC parser, sessmgr SUSPEND/RESUME ops, conn.c reconnect path. Works on clean disconnect; SIGKILL resilience needs sessmgr-retained fd (next item). |
 | Dynamic resize (RDPEDISP via DRDYNVC) | ✓ | xfreerdp with `/dynamic-resolution`: server accepts Display Control Channel, sends Deactivate-All + re-Demand-Active at new geometry, rdp-session resizes Xvfb via xrandr. Apps survive the resize. |
 | Multi-monitor | ✗ | |
-| Native Xorg DDX (xrdpdev-style), Wayland backend | ✗ | The backend interface accommodates a future native module. |
+| Native Xorg DDX driver | ✓ | `rdpserverdev_drv.so` renders to a POSIX shm framebuffer inside Xorg, reports dirty regions via the Damage extension over a control socket.  rdp-session mmaps the framebuffer and sends only changed regions to rdpd.  Use `-D` flag to select DDX mode instead of Xvfb. |
+| Wayland backend | ✗ | The backend interface accommodates a future module. |
 
 ## Supported clients
 
@@ -125,6 +126,7 @@ bmake (OpenBSD).
 | X11 | `libx11-dev`, `libxdamage-dev`, `libxtst-dev`, `libxfixes-dev`, `libxext-dev` | base X11 (`/usr/X11R6`) |
 | H.264 | `libx264-dev` | `pkg_add x264` |
 | X server | `xvfb` | `xvfb` package (or base) |
+| DDX driver (optional) | `xserver-xorg-dev` | Xorg SDK |
 | Optional clipboard helper for tests | `xclip` | `pkg_add xclip` |
 
 ## Run
@@ -158,6 +160,7 @@ src/wire/         RDP wire protocol: tpkt, x224, mcs, sec header,
 src/sec/          TLS (OpenSSL/LibreSSL); NLA framework (cssp, ntlm,
                   nla_crypto, nla)
 src/channels/     CLIPRDR, DRDYNVC, RDPSND, RDPGFX
+src/ddx/          native Xorg DDX video driver module
 src/greeter/      embedded font, paint primitives, keymap, dialog
                   state machine
 src/daemon/       rdpd main + per-connection state machine
