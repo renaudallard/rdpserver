@@ -1,8 +1,5 @@
-<h1 align="center">rdpserver</h1>
-
 <p align="center">
-  <b>A native Remote Desktop Protocol server for Linux and BSD</b><br/>
-  <em>Windows-style login over RDP &middot; no VNC in the stack &middot; greenfield C</em>
+  <img src="rdpserver-logo-dark.svg" alt="rdpserver" width="440"/>
 </p>
 
 <p align="center">
