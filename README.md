@@ -12,7 +12,7 @@
   <img src="https://img.shields.io/badge/language-C-blue.svg?style=flat-square" alt="C"/>
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20OpenBSD-success.svg?style=flat-square" alt="Linux | OpenBSD"/>
   <img src="https://img.shields.io/badge/status-alpha-orange.svg?style=flat-square" alt="alpha"/>
-  <img src="https://img.shields.io/badge/deps-OpenSSL%20%2B%20libX11-informational.svg?style=flat-square" alt="OpenSSL + libX11"/>
+  <img src="https://img.shields.io/badge/deps-OpenSSL%20%2B%20libX11%20%2B%20libx264-informational.svg?style=flat-square" alt="OpenSSL + libX11 + libx264"/>
 </p>
 
 ---
@@ -59,7 +59,7 @@ text. After auth, a backend RPC shuttles pixel frames from
 - **Bidirectional clipboard** — MS-RDPECLIP static virtual channel, text formats (CF_UNICODETEXT).  Copy in the remote `xterm` and paste in your local clipboard; copy locally and paste in `xterm`.  `XFixesSelectSelectionInput` watches the X CLIPBOARD selection and the worker bridges to the RDP channel via the backend RPC.
 - **Clean disconnect** — properly framed MCS Disconnect Provider Ultimatum (X.224 DT + TPKT, no Send-Data nesting), Shutdown Request answered with Shutdown Denied so clients send a graceful MCS Disconnect, `SO_KEEPALIVE` + `TCP_KEEPIDLE/INTVL/CNT` on accepted sockets so half-open TCP is detected within ~2 minutes.
 - **Hardened build** — `-Werror -Wall -Wextra -Wshadow -Wstrict-prototypes -Wpointer-arith -Wcast-qual -Wundef -Wformat=2 -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIE -pie -Wl,-z,relro,-z,now,-z,noexecstack` by default.  `./configure --enable-sanitizers` swaps in `-fsanitize=address,undefined`.  An in-tree fuzzer (`make fuzz`) drives 9 parsers with random bytes; 2.1 million iterations across three seeds under ASan + UBSan, zero crashes, zero UB.
-- **OpenBSD `pledge(2)`** — `rdpd` worker pledges `stdio inet unix`; `rdp-sessionmgr` pledges `stdio rpath wpath cpath unix proc exec id getpw dpath fattr`; `rdp-session` pledges `stdio rpath wpath cpath unix proc`.  On non-OpenBSD the calls compile to a no-op via the `compat.h` shim.  Linux seccomp-bpf and FreeBSD capsicum are detected at configure time; wiring them is the next hardening item.
+- **OpenBSD `pledge(2)`** — `rdpd` worker pledges `stdio inet unix`; `rdp-sessionmgr` pledges `stdio rpath wpath cpath unix sendfd recvfd proc exec id getpw dpath fattr`; `rdp-session` pledges `stdio rpath wpath cpath unix proc`.  On non-OpenBSD the calls compile to a no-op via the `compat.h` shim.  Linux seccomp-bpf and FreeBSD capsicum are detected at configure time; wiring them is the next hardening item.
 - **One configure script, two OSes** — hand-rolled POSIX `sh` (no autotools, no CMake).  Probes for libtls or OpenSSL, PAM or bsd_auth, getrandom or arc4random, epoll or kqueue, pledge / unveil / capsicum / seccomp, X11 dev libs, `Xvfb` path.  Builds clean under both bmake and GNU make.
 
 ## What works today vs not yet
@@ -75,7 +75,7 @@ text. After auth, a backend RPC shuttles pixel frames from
 | CLIPRDR clipboard, bidirectional, text formats | ✓ | |
 | Clean disconnect, Shutdown Request, TCP keepalive | ✓ | |
 | NLA / CredSSP / NTLMv2 | partial | Wire framework only; needs a hash backend (winbind, sssd) to validate without a cleartext side-channel.  The daemon doesn't advertise PROTOCOL_HYBRID; `xfreerdp /sec:nla` is rejected cleanly. |
-| RDPGFX / H.264 (AVC420) | ✓ skeleton | RDPGFX caps exchange via DRDYNVC GraphicsPipeline sub-channel, surface create/map/reset, H.264 encoding via libx264 (ultrafast/zerolatency).  When xfreerdp negotiates GFX, frames are encoded as AVC420 WireToSurface1 PDUs instead of legacy bitmap tiles.  Early-stage; may not render correctly on all clients yet. |
+| RDPGFX / H.264 (AVC420) | ✓ | Server opens the GraphicsPipeline DRDYNVC channel, exchanges RDPGFX caps (v8.1), creates a surface, and streams frames as AVC420 WireToSurface1 PDUs encoded via libx264 (ultrafast/zerolatency, CRF 32).  Large frames are split across ZGFX segments and channel PDU fragments.  Verified end-to-end with xfreerdp 3.x on Linux and OpenBSD. |
 | Audio output (RDPSND / MS-RDPEA) | ✓ negotiation | Format negotiation (PCM 16-bit stereo 44.1 kHz) on the `rdpsnd` static channel.  xfreerdp sees "audio formats supported."  Actual PCM streaming from PulseAudio/sndio capture is the next step. |
 | Drive / printer / serial redirection | ✗ | |
 | Session reconnect (auto-reconnect cookie) | ✓ infra | Save Session Info PDU with ARC cookie, Client Info ARC parser, sessmgr SUSPEND/RESUME ops, conn.c reconnect path. Works on clean disconnect; SIGKILL resilience needs sessmgr-retained fd (next item). |
@@ -126,6 +126,7 @@ bmake (OpenBSD).
 | TLS | OpenSSL 1.1+/3.x | LibreSSL (base) |
 | Auth | libpam | bsd_auth (base + `-lutil`) |
 | X11 | `libx11-dev`, `libxdamage-dev`, `libxtst-dev`, `libxfixes-dev`, `libxext-dev` | base X11 (`/usr/X11R6`) |
+| H.264 | `libx264-dev` | `pkg_add x264` |
 | X server | `xvfb` | `xvfb` package (or base) |
 | Optional clipboard helper for tests | `xclip` | `pkg_add xclip` |
 
@@ -159,7 +160,7 @@ src/wire/         RDP wire protocol: tpkt, x224, mcs, sec header,
                   license, capset, share-control PDUs, fast-path
 src/sec/          TLS (OpenSSL/LibreSSL); NLA framework (cssp, ntlm,
                   nla_crypto, nla)
-src/channels/     CLIPRDR (MS-RDPECLIP)
+src/channels/     CLIPRDR, DRDYNVC, RDPSND, RDPGFX
 src/greeter/      embedded font, paint primitives, keymap, dialog
                   state machine
 src/daemon/       rdpd main + per-connection state machine
