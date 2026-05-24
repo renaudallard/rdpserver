@@ -440,6 +440,8 @@ handle_suspend(int cfd)
 	return reply(cfd, RDP_SESSMGR_OK, -1);
 }
 
+static int resume_fail_count;
+
 static int
 handle_resume(int cfd, const uint8_t *req, size_t req_len)
 {
@@ -447,6 +449,10 @@ handle_resume(int cfd, const uint8_t *req, size_t req_len)
 	int i;
 
 	if (req_len < 8) return reply(cfd, RDP_SESSMGR_FAIL, -1);
+	if (resume_fail_count > 5) {
+		usleep(500000);
+		resume_fail_count = 0;
+	}
 	logon_id = (uint32_t)req[4] | ((uint32_t)req[5] << 8)
 		| ((uint32_t)req[6] << 16) | ((uint32_t)req[7] << 24);
 	sweep_expired();
@@ -472,6 +478,7 @@ handle_resume(int cfd, const uint8_t *req, size_t req_len)
 		}
 	}
 	rdp_debug("RESUME: logonId %u not found", (unsigned)logon_id);
+	resume_fail_count++;
 	return reply(cfd, RDP_SESSMGR_FAIL, -1);
 }
 
@@ -507,9 +514,13 @@ handle_client(int cfd, const char *service)
 
 	for (;;) {
 		uint8_t buf[RDP_SESSMGR_FRAME_MAX];
-		ssize_t n = recv(cfd, buf, sizeof buf, 0);
+		ssize_t n;
+		struct pollfd pfd;
+		pfd.fd = cfd;
+		pfd.events = POLLIN;
+		if (poll(&pfd, 1, 30000) <= 0) break;
+		n = recv(cfd, buf, sizeof buf, 0);
 		if (n <= 0) break;
-		if (n < 1) break;
 		switch (buf[0]) {
 		case RDP_SESSMGR_OP_AUTH:
 			(void)handle_auth(cfd, buf, (size_t)n, service,
