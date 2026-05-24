@@ -70,6 +70,7 @@
 #include "../backend/proto_api.h"
 #include "../channels/cliprdr.h"
 #include "../channels/drdynvc.h"
+#include "../channels/rdpdr.h"
 #include "../channels/rdpsnd.h"
 #include "../channels/rdpgfx.h"
 #include "../wire/h264enc.h"
@@ -568,13 +569,19 @@ struct snd_state {
 	struct rdpsnd_state snd;
 };
 
+struct dr_state {
+	int      enabled;
+	uint16_t channel_id;
+	struct rdpdr_state dr;
+};
+
 /* Try to recognise a channel-bearing TPKT/MCS SDR and dispatch.
  * Returns 1 if handled, 0 if not, -1 on disconnect, 2 if a resize
  * is requested (new_w/new_h set). */
 static int
 maybe_dispatch_clip(struct rdp_tls *t, int be_fd,
 		struct clip_state *cs, struct dynvc_state *dv,
-		struct snd_state *ss,
+		struct snd_state *ss, struct dr_state *dr,
 		const uint8_t *frame, size_t frame_len, const char *peer,
 		uint16_t *new_w, uint16_t *new_h)
 {
@@ -657,6 +664,38 @@ maybe_dispatch_clip(struct rdp_tls *t, int be_fd,
 		if (payload_len < 8) return 1;
 		(void)rdp_rdpsnd_handle(&ss->snd, payload + 8,
 			payload_len - 8);
+		return 1;
+	}
+
+	/* RDPDR channel: device redirection. */
+	if (dr->enabled && cid == dr->channel_id) {
+		if (payload_len < 8) return 1;
+		{
+			uint8_t resp[4096];
+			size_t resp_len = 0;
+			(void)rdp_rdpdr_handle(&dr->dr,
+				payload + 8, payload_len - 8,
+				resp, sizeof resp, &resp_len);
+			/* Send each RDPDR PDU as its own channel message. */
+			{
+				size_t roff = 0;
+				while (roff + 4 <= resp_len) {
+					uint16_t comp = (uint16_t)resp[roff]
+					    | ((uint16_t)resp[roff+1] << 8);
+					uint16_t pid = (uint16_t)resp[roff+2]
+					    | ((uint16_t)resp[roff+3] << 8);
+					size_t plen = rdp_rdpdr_pdu_len(
+					    comp, pid,
+					    resp + roff, resp_len - roff);
+					if (plen == 0 || roff + plen > resp_len)
+						break;
+					(void)send_clip_pdu(t, uid,
+					    dr->channel_id,
+					    resp + roff, plen);
+					roff += plen;
+				}
+			}
+		}
 		return 1;
 	}
 
@@ -887,7 +926,7 @@ send_gfx_pdu(struct rdp_tls *t, uint16_t user_id,
 static void
 run_proxy(struct rdp_tls *t, int be_fd,
 		struct clip_state *cs, struct dynvc_state *dv,
-		struct snd_state *ss,
+		struct snd_state *ss, struct dr_state *dr,
 		uint16_t user_id, uint16_t io_channel,
 		uint16_t desktop_w, uint16_t desktop_h,
 		const char *peer)
@@ -932,6 +971,15 @@ run_proxy(struct rdp_tls *t, int be_fd,
 		rdp_debug("conn[%s]: rdpsnd formats sent (chan=%u)",
 			peer, ss->channel_id);
 	}
+	if (dr->enabled) {
+		uint8_t ann[16];
+		ssize_t an = rdp_rdpdr_build_announce(ann, sizeof ann);
+		if (an > 0)
+			(void)send_clip_pdu(t, user_id, dr->channel_id,
+				ann, (size_t)an);
+		rdp_debug("conn[%s]: rdpdr announce sent (chan=%u)",
+			peer, dr->channel_id);
+	}
 
 	for (;;) {
 		struct pollfd pfd[2];
@@ -956,7 +1004,7 @@ run_proxy(struct rdp_tls *t, int be_fd,
 			if (kind == 1) {
 				uint16_t rw = 0, rh = 0;
 				int r = maybe_dispatch_clip(t, be_fd,
-					cs, dv, ss,
+					cs, dv, ss, dr,
 					pdu, (size_t)n, peer,
 					&rw, &rh);
 				if (r < 0) break;
@@ -1200,6 +1248,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 	struct clip_state clip = {0};
 	struct dynvc_state dynvc = {0};
 	struct snd_state snd = {0};
+	struct dr_state devr = {0};
 	struct rdp_client_info client_info;
 	uint32_t logon_id = 0;
 	uint8_t  arc_random[16] = {0};
@@ -1307,6 +1356,10 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 			if (strncasecmp(name, "RDPSND", 6) == 0) {
 				snd.enabled    = 1;
 				snd.channel_id = (uint16_t)(1004 + i);
+			}
+			if (strncasecmp(name, "RDPDR", 5) == 0) {
+				devr.enabled    = 1;
+				devr.channel_id = (uint16_t)(1004 + i);
 			}
 		}
 
@@ -1566,7 +1619,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 					(void)send_send_data(t, user_id,
 						io_channel, ssi, (size_t)sn);
 			}
-			run_proxy(t, be_fd, &clip, &dynvc, &snd,
+			run_proxy(t, be_fd, &clip, &dynvc, &snd, &devr,
 				user_id, io_channel,
 				desktop_w, desktop_h, peer);
 			/* On disconnect: try to SUSPEND the session so it
@@ -1606,7 +1659,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 				rdp_info("conn[%s]: backend fd %d",
 					peer, be_fd);
 				run_proxy(t, be_fd, &clip, &dynvc, &snd,
-					user_id, io_channel,
+					&devr, user_id, io_channel,
 					desktop_w, desktop_h, peer);
 				(void)close(be_fd);
 				goto send_disconnect;
@@ -1670,7 +1723,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 			rdp_info("conn[%s]: backend fd %d (cliprdr=%s)",
 				peer, be_fd,
 				clip.enabled ? "enabled" : "off");
-			run_proxy(t, be_fd, &clip, &dynvc, &snd,
+			run_proxy(t, be_fd, &clip, &dynvc, &snd, &devr,
 				user_id, io_channel,
 				desktop_w, desktop_h, peer);
 
