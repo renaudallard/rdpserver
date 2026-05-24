@@ -69,6 +69,7 @@
 #include "../backend/proto.h"
 #include "../backend/proto_api.h"
 #include "../channels/cliprdr.h"
+#include "../channels/drdynvc.h"
 #include "../common/utf16.h"
 
 #include <sys/socket.h>
@@ -538,11 +539,20 @@ read_one_rdp_pdu(struct rdp_tls *t, uint8_t *buf, size_t cap, int *kind)
 	return (ssize_t)total;
 }
 
-/* Try to recognise a CLIPRDR-bearing TPKT/MCS SDR and dispatch.
- * Returns 1 if handled, 0 if not, -1 on disconnect. */
+struct dynvc_state {
+	int      enabled;
+	uint16_t channel_id;
+	struct drdynvc_state dv;
+};
+
+/* Try to recognise a channel-bearing TPKT/MCS SDR and dispatch.
+ * Returns 1 if handled, 0 if not, -1 on disconnect, 2 if a resize
+ * is requested (new_w/new_h set). */
 static int
-maybe_dispatch_clip(struct rdp_tls *t, int be_fd, struct clip_state *cs,
-		const uint8_t *frame, size_t frame_len, const char *peer)
+maybe_dispatch_clip(struct rdp_tls *t, int be_fd,
+		struct clip_state *cs, struct dynvc_state *dv,
+		const uint8_t *frame, size_t frame_len, const char *peer,
+		uint16_t *new_w, uint16_t *new_h)
 {
 	const uint8_t *mcs_p;
 	size_t mcs_len;
@@ -572,6 +582,26 @@ maybe_dispatch_clip(struct rdp_tls *t, int be_fd, struct clip_state *cs,
 		if (payload_len < 8) return 1;
 		(void)clip_handle_pdu(t, be_fd, cs, payload + 8,
 			payload_len - 8);
+		return 1;
+	}
+
+	/* DRDYNVC channel: dynamic virtual channels (resize etc.). */
+	if (dv->enabled && cid == dv->channel_id) {
+		/* Strip CHANNEL_PDU_HEADER (8 bytes). */
+		if (payload_len < 8) return 1;
+		{
+			uint8_t resp[64];
+			size_t resp_len = 0;
+			int rc = rdp_drdynvc_handle(&dv->dv,
+				payload + 8, payload_len - 8,
+				resp, sizeof resp, &resp_len,
+				new_w, new_h);
+			if (resp_len > 0) {
+				(void)send_clip_pdu(t, cs->user_id,
+					dv->channel_id, resp, resp_len);
+			}
+			if (rc > 0) return 2; /* resize */
+		}
 		return 1;
 	}
 
@@ -607,11 +637,100 @@ maybe_dispatch_clip(struct rdp_tls *t, int be_fd, struct clip_state *cs,
 	return 0;
 }
 
+/* Run Deactivate-All + re-Demand-Active + finalization at a new
+ * desktop size.  Returns 0 on success. */
+static int
+do_reactivate(struct rdp_tls *t, int be_fd, uint16_t user_id,
+		uint16_t io_channel, uint16_t new_w, uint16_t new_h,
+		const char *peer)
+{
+	uint8_t pdu[2200];
+	ssize_t n;
+
+	rdp_info("conn[%s]: reactivate %ux%u", peer, new_w, new_h);
+
+	/* 1. Deactivate-All */
+	n = rdp_pdu_build_deactivate_all(pdu, sizeof pdu, user_id,
+		RDP_CONN_SHARE_ID);
+	if (n < 0) return -1;
+	if (send_send_data(t, user_id, io_channel, pdu, (size_t)n) != 0)
+		return -1;
+
+	/* 2. New Demand Active */
+	{
+		uint8_t caps[2048];
+		ssize_t cn = rdp_capset_build_demand_active(caps, sizeof caps,
+			RDP_CONN_SHARE_ID, new_w, new_h);
+		if (cn < 0) return -1;
+		{
+			ssize_t hdr_n = rdp_pdu_build_share_control(pdu,
+				sizeof pdu, RDP_PDU_TYPE_DEMAND_ACTIVE,
+				user_id, (uint16_t)(cn + 6));
+			if (hdr_n < 0) return -1;
+			memcpy(pdu + hdr_n, caps, (size_t)cn);
+			if (send_send_data(t, user_id, io_channel,
+				pdu, (size_t)hdr_n + (size_t)cn) != 0)
+				return -1;
+		}
+	}
+
+	/* 3. Read Confirm Active */
+	{
+		uint8_t buf[0x4000];
+		int kind = 0;
+		ssize_t r = read_one_rdp_pdu(t, buf, sizeof buf, &kind);
+		if (r <= 0 || kind != 1) return -1;
+		/* Accept whatever Confirm Active the client sends. */
+	}
+
+	/* 4. Re-run finalization */
+	n = rdp_pdu_build_synchronize(pdu, sizeof pdu, user_id,
+		RDP_CONN_SHARE_ID, 1002);
+	if (n < 0 ||
+		send_send_data(t, user_id, io_channel, pdu, (size_t)n) != 0)
+		return -1;
+	n = rdp_pdu_build_control(pdu, sizeof pdu, user_id,
+		RDP_CONN_SHARE_ID, RDP_CTRL_COOPERATE, 0, 0);
+	if (n < 0 ||
+		send_send_data(t, user_id, io_channel, pdu, (size_t)n) != 0)
+		return -1;
+	n = rdp_pdu_build_control(pdu, sizeof pdu, user_id,
+		RDP_CONN_SHARE_ID, RDP_CTRL_GRANTED_CONTROL, 1002, 1002);
+	if (n < 0 ||
+		send_send_data(t, user_id, io_channel, pdu, (size_t)n) != 0)
+		return -1;
+	n = rdp_pdu_build_font_map(pdu, sizeof pdu, user_id,
+		RDP_CONN_SHARE_ID);
+	if (n < 0 ||
+		send_send_data(t, user_id, io_channel, pdu, (size_t)n) != 0)
+		return -1;
+
+	/* 5. Tell the backend to resize. */
+	{
+		struct rdp_be_resize rs = { new_w, new_h, {0, 0} };
+		(void)rdp_be_send(be_fd, RDP_BE_RESIZE, &rs, sizeof rs);
+	}
+
+	/* 6. Send Synchronize + Pointer Default. */
+	{
+		uint8_t fp[64];
+		ssize_t fn;
+		fn = rdp_fp_build_synchronize(fp, sizeof fp);
+		if (fn > 0) (void)rdp_tls_write_full(t, fp, (size_t)fn);
+		fn = rdp_fp_build_pointer_default(fp, sizeof fp);
+		if (fn > 0) (void)rdp_tls_write_full(t, fp, (size_t)fn);
+	}
+	return 0;
+}
+
 /* Post-login proxy loop: shovel fast-path input from TLS to backend,
  * shovel FRAME messages from backend to fast-path bitmap updates,
- * and dispatch CLIPRDR PDUs in both directions. */
+ * and dispatch CLIPRDR + DRDYNVC PDUs in both directions. */
 static void
-run_proxy(struct rdp_tls *t, int be_fd, struct clip_state *cs,
+run_proxy(struct rdp_tls *t, int be_fd,
+		struct clip_state *cs, struct dynvc_state *dv,
+		uint16_t user_id, uint16_t io_channel,
+		uint16_t desktop_w, uint16_t desktop_h,
 		const char *peer)
 {
 	struct proxy_input_ctx ictx = { be_fd, 0, 0 };
@@ -624,6 +743,15 @@ run_proxy(struct rdp_tls *t, int be_fd, struct clip_state *cs,
 		else
 			rdp_debug("conn[%s]: cliprdr ready (chan=%u)",
 				peer, cs->channel_id);
+	}
+	if (dv->enabled) {
+		uint8_t dvcaps[8];
+		ssize_t cn = rdp_drdynvc_build_caps(dvcaps, sizeof dvcaps);
+		if (cn > 0)
+			(void)send_clip_pdu(t, user_id, dv->channel_id,
+				dvcaps, (size_t)cn);
+		rdp_debug("conn[%s]: drdynvc caps sent (chan=%u)",
+			peer, dv->channel_id);
 	}
 
 	for (;;) {
@@ -647,9 +775,18 @@ run_proxy(struct rdp_tls *t, int be_fd, struct clip_state *cs,
 			ssize_t n = read_one_rdp_pdu(t, pdu, sizeof pdu, &kind);
 			if (n <= 0) break;
 			if (kind == 1) {
-				int r = maybe_dispatch_clip(t, be_fd, cs,
-					pdu, (size_t)n, peer);
+				uint16_t rw = 0, rh = 0;
+				int r = maybe_dispatch_clip(t, be_fd,
+					cs, dv, pdu, (size_t)n, peer,
+					&rw, &rh);
 				if (r < 0) break;
+				if (r == 2 && rw > 0 && rh > 0) {
+					if (do_reactivate(t, be_fd, user_id,
+						io_channel, rw, rh, peer) != 0)
+						break;
+					desktop_w = rw;
+					desktop_h = rh;
+				}
 				/* Untouched TPKTs (Shutdown, etc.) silently
 				 * ignored.  MCS Disconnect already handled. */
 			} else {
@@ -753,10 +890,12 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 	uint16_t desktop_w = 0, desktop_h = 0;
 	struct rdp_tls_ctx *tls = cfg->tls;
 	struct clip_state clip = {0};
+	struct dynvc_state dynvc = {0};
 	struct rdp_client_info client_info;
 	uint32_t logon_id = 0;
 	uint8_t  arc_random[16] = {0};
 	clip.user_id = user_id;
+	dynvc.dv.disp_channel_id = -1;
 	memset(&client_info, 0, sizeof client_info);
 
 	rdp_debug("conn[%s]: starting", peer);
@@ -828,6 +967,10 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 			if (strncasecmp(name, "CLIPRDR", 7) == 0) {
 				clip.enabled    = 1;
 				clip.channel_id = (uint16_t)(1004 + i);
+			}
+			if (strncasecmp(name, "DRDYNVC", 7) == 0) {
+				dynvc.enabled    = 1;
+				dynvc.channel_id = (uint16_t)(1004 + i);
 			}
 		}
 
@@ -1088,7 +1231,9 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 					(void)send_send_data(t, user_id,
 						io_channel, ssi, (size_t)sn);
 			}
-			run_proxy(t, be_fd, &clip, peer);
+			run_proxy(t, be_fd, &clip, &dynvc, user_id,
+				io_channel, desktop_w, desktop_h,
+				peer);
 			/* On disconnect: try to SUSPEND the session so it
 			 * survives for the next reconnect. */
 			if (rdp_sessmgr_suspend(cfg->sessmgr_sock,
@@ -1156,7 +1301,9 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 			rdp_info("conn[%s]: backend fd %d (cliprdr=%s)",
 				peer, be_fd,
 				clip.enabled ? "enabled" : "off");
-			run_proxy(t, be_fd, &clip, peer);
+			run_proxy(t, be_fd, &clip, &dynvc, user_id,
+				io_channel, desktop_w, desktop_h,
+				peer);
 
 			/* On disconnect: try to SUSPEND so a reconnecting
 			 * client can resume without re-authenticating. */

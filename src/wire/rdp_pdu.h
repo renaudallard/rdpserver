@@ -142,6 +142,12 @@ ssize_t rdp_pdu_build_font_map(uint8_t *out, size_t cap,
 int rdp_pdu_extract_confirm_active(const uint8_t *p, size_t len,
 		const uint8_t **caps_out, size_t *caps_len_out);
 
+/* Build a Deactivate-All PDU.  Causes the client to drop back to
+ * the capability-exchange state; the server must re-send Demand
+ * Active at the new geometry. */
+ssize_t rdp_pdu_build_deactivate_all(uint8_t *out, size_t cap,
+		uint16_t pdu_source, uint32_t share_id);
+
 /* Build a Server Save Session Info PDU carrying the auto-reconnect
  * cookie (ARC_SC_PRIVATE_PACKET).  Returns total share-data PDU
  * bytes. */

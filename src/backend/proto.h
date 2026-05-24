@@ -74,6 +74,7 @@
 #define RDP_BE_CLIP_OFFER   6u
 #define RDP_BE_CLIP_REQUEST 7u
 #define RDP_BE_CLIP_DATA    8u
+#define RDP_BE_RESIZE       9u
 
 #define RDP_BE_CLIP_FMT_TEXT  0x00000001u
 
@@ -124,6 +125,13 @@ struct rdp_be_clip_request {
 struct rdp_be_clip_data_hdr {
 	uint32_t format;
 	uint32_t status;
+};
+
+/* RESIZE payload (worker -> session): new desktop dimensions. */
+struct rdp_be_resize {
+	uint16_t width;
+	uint16_t height;
+	uint16_t pad[2];
 };
 
 #endif /* RDP_BACKEND_PROTO_H */

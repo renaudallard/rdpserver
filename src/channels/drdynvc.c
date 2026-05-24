@@ -1,0 +1,184 @@
+/*
+ * Copyright (c) 2026 Renaud Allard <renaud@allard.it>
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ *
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in
+ *    the documentation and/or other materials provided with the
+ *    distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+ * COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+ * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+ * ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGES.
+ */
+/*
+ * drdynvc.c -- DRDYNVC + RDPEDISP minimal implementation.
+ */
+
+#include "drdynvc.h"
+
+#include "../include/rdp_log.h"
+
+#include <string.h>
+
+ssize_t
+rdp_drdynvc_build_caps(uint8_t *out, size_t cap)
+{
+	if (cap < 4) return -1;
+	out[0] = (DRDYNVC_CMD_CAPS << 4);  /* Cmd=5, Sp=0, cbId=0 */
+	out[1] = 0;                         /* pad */
+	out[2] = 1;                         /* version LE low */
+	out[3] = 0;                         /* version LE high */
+	return 4;
+}
+
+static int
+read_channel_id(const uint8_t *p, size_t len, uint8_t cbId,
+		uint32_t *id_out, size_t *consumed)
+{
+	switch (cbId) {
+	case 0:
+		if (len < 1) return -1;
+		*id_out = p[0];
+		*consumed = 1;
+		return 0;
+	case 1:
+		if (len < 2) return -1;
+		*id_out = (uint32_t)p[0] | ((uint32_t)p[1] << 8);
+		*consumed = 2;
+		return 0;
+	case 2:
+		if (len < 4) return -1;
+		*id_out = (uint32_t)p[0] | ((uint32_t)p[1] << 8)
+			| ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+		*consumed = 4;
+		return 0;
+	}
+	return -1;
+}
+
+static uint32_t
+ld32(const uint8_t *p)
+{
+	return (uint32_t)p[0] | ((uint32_t)p[1] << 8)
+		| ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+int
+rdp_drdynvc_handle(struct drdynvc_state *st,
+		const uint8_t *pdu, size_t len,
+		uint8_t *resp_out, size_t resp_cap, size_t *resp_len,
+		uint16_t *new_w, uint16_t *new_h)
+{
+	uint8_t hdr, cmd, cbId;
+	*resp_len = 0;
+
+	if (len < 1) return -1;
+	hdr = pdu[0];
+	cmd = (uint8_t)((hdr >> 4) & 0x0f);
+	cbId = (uint8_t)(hdr & 0x03);
+
+	switch (cmd) {
+	case DRDYNVC_CMD_CAPS:
+		st->caps_exchanged = 1;
+		rdp_debug("drdynvc: client caps received");
+		return 0;
+
+	case DRDYNVC_CMD_CREATE: {
+		uint32_t chan_id;
+		size_t id_len;
+		const char *name;
+		if (read_channel_id(pdu + 1, len - 1, cbId,
+			&chan_id, &id_len) != 0) return -1;
+		name = (const char *)pdu + 1 + id_len;
+		rdp_debug("drdynvc: Create chan=%u name='%s'",
+			(unsigned)chan_id, name);
+		if (strstr(name, "DisplayControl") != NULL) {
+			st->disp_channel_id = (int)chan_id;
+			rdp_info("drdynvc: DisplayControl on chan %u",
+				(unsigned)chan_id);
+		}
+		/* Build Create Response: same header + channelId +
+		 * CreationStatus u32 = 0 (success). */
+		if (resp_cap >= 1 + id_len + 4) {
+			resp_out[0] = hdr;
+			memcpy(resp_out + 1, pdu + 1, id_len);
+			memset(resp_out + 1 + id_len, 0, 4);
+			*resp_len = 1 + id_len + 4;
+		}
+		return 0;
+	}
+
+	case DRDYNVC_CMD_DATA:
+	case DRDYNVC_CMD_DATA_FIRST: {
+		uint32_t chan_id;
+		size_t id_len;
+		const uint8_t *data;
+		size_t data_len;
+
+		if (read_channel_id(pdu + 1, len - 1, cbId,
+			&chan_id, &id_len) != 0) return -1;
+		data = pdu + 1 + id_len;
+		data_len = len - 1 - id_len;
+
+		/* Data First carries a length prefix before the data. */
+		if (cmd == DRDYNVC_CMD_DATA_FIRST) {
+			/* Length field uses the Sp bits (bits 2-3 of hdr)
+			 * to indicate its size: 0=1byte, 1=2byte, 2=4byte */
+			uint8_t lenSz = (uint8_t)((hdr >> 2) & 0x03);
+			size_t skip = 0;
+			switch (lenSz) {
+			case 0: skip = 1; break;
+			case 1: skip = 2; break;
+			case 2: skip = 4; break;
+			}
+			if (data_len < skip) return -1;
+			data += skip;
+			data_len -= skip;
+		}
+
+		if ((int)chan_id != st->disp_channel_id)
+			return 0;
+
+		/* MS-RDPEDISP Display Update: type(4) length(4)
+		 * pad(4) numMonitors(4) then monitor array.
+		 * Each monitor: 10 x u32. */
+		if (data_len < 16 + 40) return 0;
+		{
+			uint32_t nm = ld32(data + 12);
+			if (nm >= 1 && data_len >= 16 + 40) {
+				uint32_t w = ld32(data + 16 + 12);
+				uint32_t h = ld32(data + 16 + 16);
+				if (w >= 200 && w <= 8192
+				    && h >= 200 && h <= 8192) {
+					*new_w = (uint16_t)w;
+					*new_h = (uint16_t)h;
+					rdp_info("drdynvc: resize %ux%u",
+						(unsigned)w, (unsigned)h);
+					return 1;
+				}
+			}
+		}
+		return 0;
+	}
+
+	case DRDYNVC_CMD_CLOSE:
+		return 0;
+	}
+	return 0;
+}

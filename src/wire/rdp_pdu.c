@@ -187,6 +187,27 @@ rdp_pdu_extract_confirm_active(const uint8_t *p, size_t len,
 }
 
 ssize_t
+rdp_pdu_build_deactivate_all(uint8_t *out, size_t cap,
+		uint16_t pdu_source, uint32_t share_id)
+{
+	/* Deactivate-All: share-control header (pduType=6) + shareId(4)
+	 * + lengthSourceDescriptor(2) + sourceDescriptor. */
+	uint16_t total = 6 + 4 + 2 + 4;
+	struct rdp_buf b;
+
+	if (cap < total) return -1;
+	rdp_buf_init(&b, out, cap);
+	if (rdp_pdu_build_share_control(out, cap,
+		RDP_PDU_TYPE_DEACTIVATE_ALL, pdu_source, total) < 0)
+		return -1;
+	(void)rdp_buf_skip(&b, 6);
+	if (rdp_buf_put_u32le(&b, share_id) != 0) return -1;
+	if (rdp_buf_put_u16le(&b, 4) != 0) return -1;
+	if (rdp_buf_put(&b, "RDP", 4) != 0) return -1;
+	return (ssize_t)rdp_buf_used(&b);
+}
+
+ssize_t
 rdp_pdu_build_save_session_info_arc(uint8_t *out, size_t cap,
 		uint16_t pdu_source, uint32_t share_id,
 		uint32_t logon_id, const uint8_t arc_random[16])

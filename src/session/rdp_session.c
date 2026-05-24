@@ -435,7 +435,9 @@ main(int argc, char *argv[])
 	}
 	rdp_info("using display :%d (geometry %dx%d)", display_num, w, h);
 
-	xvfb_pid = spawn_xvfb(display_num, w, h);
+	/* Start Xvfb at a large initial size so xrandr can resize DOWN
+	 * to any client-requested geometry without restarting. */
+	xvfb_pid = spawn_xvfb(display_num, 3840, 2160);
 	if (xvfb_pid < 0) {
 		rdp_err("spawn Xvfb: %s", strerror(errno));
 		return 1;
@@ -457,6 +459,18 @@ main(int argc, char *argv[])
 		rdp_err("XOpenDisplay");
 		(void)kill(xvfb_pid, SIGTERM);
 		return 1;
+	}
+
+	/* Resize the Xvfb desktop from 3840x2160 down to the client's
+	 * requested size via RANDR. */
+	{
+		char cmd[256];
+		(void)snprintf(cmd, sizeof cmd,
+			"xrandr --newmode \"%dx%d\" 0 %d %d %d %d %d %d %d %d 2>/dev/null; "
+			"xrandr --addmode screen %dx%d 2>/dev/null; "
+			"xrandr --output screen --mode %dx%d 2>/dev/null",
+			w, h, w, w, w, w, h, h, h, h, w, h, w, h);
+		(void)system(cmd);
 	}
 
 	if (capture_init(&cap, dpy, w, h) != 0) {
@@ -534,6 +548,33 @@ main(int argc, char *argv[])
 				if (clip_ok)
 					rdp_clip_handle_be_msg(&clip, type,
 						buf, (size_t)n);
+			} else if (type == RDP_BE_RESIZE
+			    && n >= (ssize_t)sizeof(struct rdp_be_resize)) {
+				struct rdp_be_resize rs;
+				memcpy(&rs, buf, sizeof rs);
+				if (rs.width >= 200 && rs.height >= 200
+				    && rs.width <= 3840 && rs.height <= 2160) {
+					char cmd[256];
+					rdp_info("resize: %ux%u -> %ux%u",
+						(unsigned)w, (unsigned)h,
+						(unsigned)rs.width,
+						(unsigned)rs.height);
+					w = rs.width;
+					h = rs.height;
+					(void)snprintf(cmd, sizeof cmd,
+						"xrandr --newmode \"%dx%d\" 0 "
+						"%d %d %d %d %d %d %d %d 2>/dev/null; "
+						"xrandr --addmode screen %dx%d 2>/dev/null; "
+						"xrandr --output screen --mode %dx%d 2>/dev/null",
+						w, h, w, w, w, w, h, h, h, h,
+						w, h, w, h);
+					(void)system(cmd);
+					capture_close(&cap);
+					(void)capture_init(&cap, dpy, w, h);
+					free(frame_buf);
+					frame_buf = malloc((size_t)w * h * 3);
+					if (frame_buf == NULL) break;
+				}
 			} else if (type == RDP_BE_BYE) {
 				break;
 			}
