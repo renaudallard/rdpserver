@@ -71,6 +71,8 @@
 #include "../channels/cliprdr.h"
 #include "../channels/drdynvc.h"
 #include "../channels/rdpsnd.h"
+#include "../channels/rdpgfx.h"
+#include "../wire/h264enc.h"
 #include "../common/utf16.h"
 
 #include <sys/socket.h>
@@ -593,22 +595,37 @@ maybe_dispatch_clip(struct rdp_tls *t, int be_fd,
 		return 1;
 	}
 
-	/* DRDYNVC channel: dynamic virtual channels (resize etc.). */
+	/* DRDYNVC channel: dynamic virtual channels (resize, GFX). */
 	if (dv->enabled && cid == dv->channel_id) {
-		/* Strip CHANNEL_PDU_HEADER (8 bytes). */
 		if (payload_len < 8) return 1;
 		{
 			uint8_t resp[64];
 			size_t resp_len = 0;
+			const uint8_t *gfx_data = NULL;
+			size_t gfx_len = 0;
 			int rc = rdp_drdynvc_handle(&dv->dv,
 				payload + 8, payload_len - 8,
 				resp, sizeof resp, &resp_len,
-				new_w, new_h);
+				new_w, new_h,
+				&gfx_data, &gfx_len);
 			if (resp_len > 0) {
 				(void)send_clip_pdu(t, cs->user_id,
 					dv->channel_id, resp, resp_len);
 			}
-			if (rc > 0) return 2; /* resize */
+			if (rc == 2) return 2;
+			if (rc == 3 && gfx_data != NULL && gfx_len > 0) {
+				/* RDPGFX data arrived. Check for CAPS_ADVERTISE. */
+				uint16_t cmdId = (uint16_t)gfx_data[0]
+					| ((uint16_t)gfx_data[1] << 8);
+				if (cmdId == RDPGFX_CMDID_CAPSADVERTISE) {
+					(void)rdp_rdpgfx_parse_caps_advertise(
+						gfx_data, gfx_len);
+					return 4; /* signal: GFX caps received */
+				}
+				if (cmdId == RDPGFX_CMDID_FRAMEACKNOWLEDGE) {
+					rdp_debug("rdpgfx: frame ack");
+				}
+			}
 		}
 		return 1;
 	}
@@ -742,6 +759,46 @@ do_reactivate(struct rdp_tls *t, int be_fd, uint16_t user_id,
 /* Post-login proxy loop: shovel fast-path input from TLS to backend,
  * shovel FRAME messages from backend to fast-path bitmap updates,
  * and dispatch CLIPRDR + DRDYNVC PDUs in both directions. */
+/* Helper: send a DRDYNVC Data PDU containing `data[0..len)` on the
+ * given DRDYNVC sub-channel `dv_chan`.  Wraps in DRDYNVC framing +
+ * CHANNEL_PDU_HEADER + MCS SDI. */
+static int
+send_drdynvc_data(struct rdp_tls *t, uint16_t user_id,
+		uint16_t drdynvc_mcs_chan, int dv_chan,
+		const uint8_t *data, size_t len)
+{
+	uint8_t *buf;
+	size_t hdr_off;
+	uint8_t cb;
+
+	/* DRDYNVC Data header: cmd=3 in high nibble + cbId in low 2 bits. */
+	if (dv_chan <= 0xff) cb = 0;
+	else if (dv_chan <= 0xffff) cb = 1;
+	else cb = 2;
+
+	hdr_off = 1 + (cb == 0 ? 1 : (cb == 1 ? 2 : 4));
+	buf = malloc(hdr_off + len);
+	if (buf == NULL) return -1;
+	buf[0] = (uint8_t)((DRDYNVC_CMD_DATA << 4) | cb);
+	if (cb == 0) buf[1] = (uint8_t)dv_chan;
+	else if (cb == 1) {
+		buf[1] = (uint8_t)(dv_chan & 0xff);
+		buf[2] = (uint8_t)((dv_chan >> 8) & 0xff);
+	} else {
+		buf[1] = (uint8_t)(dv_chan & 0xff);
+		buf[2] = (uint8_t)((dv_chan >> 8) & 0xff);
+		buf[3] = (uint8_t)((dv_chan >> 16) & 0xff);
+		buf[4] = (uint8_t)((dv_chan >> 24) & 0xff);
+	}
+	memcpy(buf + hdr_off, data, len);
+	{
+		int rc = send_clip_pdu(t, user_id, drdynvc_mcs_chan,
+			buf, hdr_off + len);
+		free(buf);
+		return rc;
+	}
+}
+
 static void
 run_proxy(struct rdp_tls *t, int be_fd,
 		struct clip_state *cs, struct dynvc_state *dv,
@@ -753,6 +810,12 @@ run_proxy(struct rdp_tls *t, int be_fd,
 	struct proxy_input_ctx ictx = { be_fd, 0, 0 };
 	uint8_t *frame_buf = NULL;
 	size_t   frame_cap = 0;
+	struct rdpgfx_state gfx = {0};
+	struct rdp_h264 *h264 = NULL;
+	gfx.surface_id = 1;
+	gfx.frame_id = 0;
+	gfx.desktop_w = desktop_w;
+	gfx.desktop_h = desktop_h;
 
 	if (cs->enabled) {
 		if (clip_send_monitor_ready_and_caps(t, cs) != 0)
@@ -813,6 +876,60 @@ run_proxy(struct rdp_tls *t, int be_fd,
 						break;
 					desktop_w = rw;
 					desktop_h = rh;
+					gfx.desktop_w = rw;
+					gfx.desktop_h = rh;
+					if (h264)
+						(void)rdp_h264_resize(h264,
+							rw, rh);
+				}
+				if (r == 4 && !gfx.active
+				    && dv->dv.gfx_channel_id >= 0) {
+					/* GFX caps received; init the pipeline. */
+					uint8_t gbuf[512];
+					ssize_t gn;
+					gn = rdp_rdpgfx_build_caps_confirm(
+						gbuf, sizeof gbuf);
+					if (gn > 0)
+						(void)send_drdynvc_data(t,
+							user_id,
+							dv->channel_id,
+							dv->dv.gfx_channel_id,
+							gbuf, (size_t)gn);
+					gn = rdp_rdpgfx_build_reset(
+						gbuf, sizeof gbuf,
+						desktop_w, desktop_h);
+					if (gn > 0)
+						(void)send_drdynvc_data(t,
+							user_id,
+							dv->channel_id,
+							dv->dv.gfx_channel_id,
+							gbuf, (size_t)gn);
+					gn = rdp_rdpgfx_build_create_surface(
+						gbuf, sizeof gbuf,
+						gfx.surface_id,
+						desktop_w, desktop_h);
+					if (gn > 0)
+						(void)send_drdynvc_data(t,
+							user_id,
+							dv->channel_id,
+							dv->dv.gfx_channel_id,
+							gbuf, (size_t)gn);
+					gn = rdp_rdpgfx_build_map_surface(
+						gbuf, sizeof gbuf,
+						gfx.surface_id);
+					if (gn > 0)
+						(void)send_drdynvc_data(t,
+							user_id,
+							dv->channel_id,
+							dv->dv.gfx_channel_id,
+							gbuf, (size_t)gn);
+					h264 = rdp_h264_open(desktop_w,
+						desktop_h);
+					if (h264 != NULL) {
+						gfx.active = 1;
+						rdp_info("conn[%s]: GFX+H.264 active",
+							peer);
+					}
 				}
 				/* Untouched TPKTs (Shutdown, etc.) silently
 				 * ignored.  MCS Disconnect already handled. */
@@ -849,9 +966,47 @@ run_proxy(struct rdp_tls *t, int be_fd,
 				if (rdp_read_full(be_fd, frame_buf, pix_bytes)
 				    != (ssize_t)pix_bytes)
 					break;
-				if (push_frame_tiled(t, fhdr.x, fhdr.y,
-					fhdr.w, fhdr.h, frame_buf) != 0)
-					break;
+				if (gfx.active && h264 != NULL
+				    && dv->dv.gfx_channel_id >= 0) {
+					const uint8_t *h264_out;
+					size_t h264_len;
+					int keyframe;
+					if (rdp_h264_encode(h264,
+						frame_buf, fhdr.w, fhdr.h,
+						&h264_out, &h264_len,
+						&keyframe) == 0
+					    && h264_out != NULL
+					    && h264_len > 0) {
+						uint8_t *gpdu;
+						size_t gpdu_cap = h264_len
+							+ 256;
+						gpdu = malloc(gpdu_cap);
+						if (gpdu != NULL) {
+							ssize_t gn;
+							gfx.frame_id++;
+							gn = rdp_rdpgfx_build_avc420_frame(
+								gpdu, gpdu_cap,
+								gfx.surface_id,
+								gfx.frame_id,
+								fhdr.w, fhdr.h,
+								h264_out,
+								h264_len);
+							if (gn > 0)
+								(void)send_drdynvc_data(
+									t, user_id,
+									dv->channel_id,
+									dv->dv.gfx_channel_id,
+									gpdu,
+									(size_t)gn);
+							free(gpdu);
+						}
+					}
+				} else {
+					if (push_frame_tiled(t, fhdr.x,
+						fhdr.y, fhdr.w, fhdr.h,
+						frame_buf) != 0)
+						break;
+				}
 			} else if (type == RDP_BE_HELLO_S2W) {
 				uint8_t junk[64];
 				if (len > 0)
@@ -887,6 +1042,7 @@ run_proxy(struct rdp_tls *t, int be_fd,
 		}
 	}
 out:
+	if (h264 != NULL) rdp_h264_close(h264);
 	free(frame_buf);
 }
 
@@ -924,6 +1080,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 	uint8_t  arc_random[16] = {0};
 	clip.user_id = user_id;
 	dynvc.dv.disp_channel_id = -1;
+	dynvc.dv.gfx_channel_id = -1;
 	memset(&client_info, 0, sizeof client_info);
 
 	rdp_debug("conn[%s]: starting", peer);
@@ -1096,7 +1253,6 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 			size_t payload_len;
 			uint32_t sec_flags;
 			ssize_t sh;
-			struct rdp_client_info info;
 			const uint8_t *pw;
 			size_t pw_len;
 

@@ -75,7 +75,7 @@ text. After auth, a backend RPC shuttles pixel frames from
 | CLIPRDR clipboard, bidirectional, text formats | ✓ | |
 | Clean disconnect, Shutdown Request, TCP keepalive | ✓ | |
 | NLA / CredSSP / NTLMv2 | partial | Wire framework only; needs a hash backend (winbind, sssd) to validate without a cleartext side-channel.  The daemon doesn't advertise PROTOCOL_HYBRID; `xfreerdp /sec:nla` is rejected cleanly. |
-| RemoteFX / RDPGFX / H.264 | ✗ | Clients negotiate down to legacy bitmap. |
+| RDPGFX / H.264 (AVC420) | ✓ skeleton | RDPGFX caps exchange via DRDYNVC GraphicsPipeline sub-channel, surface create/map/reset, H.264 encoding via libx264 (ultrafast/zerolatency).  When xfreerdp negotiates GFX, frames are encoded as AVC420 WireToSurface1 PDUs instead of legacy bitmap tiles.  Early-stage; may not render correctly on all clients yet. |
 | Audio output (RDPSND / MS-RDPEA) | ✓ negotiation | Format negotiation (PCM 16-bit stereo 44.1 kHz) on the `rdpsnd` static channel.  xfreerdp sees "audio formats supported."  Actual PCM streaming from PulseAudio/sndio capture is the next step. |
 | Drive / printer / serial redirection | ✗ | |
 | Session reconnect (auto-reconnect cookie) | ✓ infra | Save Session Info PDU with ARC cookie, Client Info ARC parser, sessmgr SUSPEND/RESUME ops, conn.c reconnect path. Works on clean disconnect; SIGKILL resilience needs sessmgr-retained fd (next item). |

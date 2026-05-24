@@ -58,6 +58,7 @@
 struct drdynvc_state {
 	int      caps_exchanged;
 	int      disp_channel_id;  /* -1 if not yet created */
+	int      gfx_channel_id;  /* -1 if not yet created */
 };
 
 /* Build DRDYNVC Capabilities Request (version 1). */
@@ -70,9 +71,15 @@ ssize_t rdp_drdynvc_build_caps(uint8_t *out, size_t cap);
  * `resp_out` (capacity `resp_cap`) receives any response PDU to send
  * back (e.g., Create Response); `resp_len` is set to its length
  * (0 if none). */
+/* Returns:
+ *   0 = handled, no action needed
+ *   1 = resize requested (new_w/new_h set)
+ *   3 = GFX data arrived (gfx_data/gfx_len set)
+ *  <0 = error */
 int rdp_drdynvc_handle(struct drdynvc_state *st,
 		const uint8_t *pdu, size_t len,
 		uint8_t *resp_out, size_t resp_cap, size_t *resp_len,
-		uint16_t *new_w, uint16_t *new_h);
+		uint16_t *new_w, uint16_t *new_h,
+		const uint8_t **gfx_data, size_t *gfx_len);
 
 #endif /* RDP_DRDYNVC_H */

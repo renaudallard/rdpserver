@@ -30,7 +30,8 @@ WIRE_OBJS = \
 	src/wire/capset.o \
 	src/wire/rdp_pdu.o \
 	src/wire/fastpath.o \
-	src/wire/input.o
+	src/wire/input.o \
+	src/wire/h264enc.o
 
 WIRE_LIB = src/wire/libwire.a
 
@@ -60,7 +61,8 @@ SESSMGR_CLIENT_OBJ = src/sessionmgr/client.o
 SESSMGR_DAEMON_OBJ = src/sessionmgr/sessionmgr.o $(SESSMGR_AUTH_OBJ)
 
 # Static virtual channels.
-CHANNELS_OBJS = src/channels/cliprdr.o src/channels/drdynvc.o src/channels/rdpsnd.o
+CHANNELS_OBJS = src/channels/cliprdr.o src/channels/drdynvc.o src/channels/rdpsnd.o \
+	src/channels/rdpgfx.o
 CHANNELS_LIB  = src/channels/libchannels.a
 
 # Backend RPC: shared between rdpd worker and rdp-session.
@@ -105,10 +107,13 @@ $(SEC_LIB): $(SEC_OBJS)
 $(GREETER_LIB): $(GREETER_OBJS)
 	ar rcs $@ $(GREETER_OBJS)
 
+src/wire/h264enc.o: src/wire/h264enc.c
+	$(CC) $(CFLAGS) $(X264_CFLAGS) -c -o $@ src/wire/h264enc.c
+
 src/daemon/rdpd: $(RDPD_OBJS) $(GREETER_LIB) $(WIRE_LIB) $(SEC_LIB) $(COMMON_LIB)
 	$(CC) $(LDFLAGS) -o $@ $(RDPD_OBJS) \
 		$(GREETER_LIB) $(WIRE_LIB) $(SEC_LIB) $(COMMON_LIB) \
-		$(TLS_LIBS)
+		$(TLS_LIBS) $(X264_LIBS)
 
 src/sessionmgr/rdp-sessionmgr: $(SESSMGR_DAEMON_OBJ) $(COMMON_LIB)
 	$(CC) $(LDFLAGS) -o $@ $(SESSMGR_DAEMON_OBJ) $(COMMON_LIB) \

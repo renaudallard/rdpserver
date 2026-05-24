@@ -83,10 +83,13 @@ int
 rdp_drdynvc_handle(struct drdynvc_state *st,
 		const uint8_t *pdu, size_t len,
 		uint8_t *resp_out, size_t resp_cap, size_t *resp_len,
-		uint16_t *new_w, uint16_t *new_h)
+		uint16_t *new_w, uint16_t *new_h,
+		const uint8_t **gfx_data, size_t *gfx_len)
 {
 	uint8_t hdr, cmd, cbId;
 	*resp_len = 0;
+	if (gfx_data) *gfx_data = NULL;
+	if (gfx_len) *gfx_len = 0;
 
 	if (len < 1) return -1;
 	hdr = pdu[0];
@@ -111,6 +114,11 @@ rdp_drdynvc_handle(struct drdynvc_state *st,
 		if (strstr(name, "DisplayControl") != NULL) {
 			st->disp_channel_id = (int)chan_id;
 			rdp_info("drdynvc: DisplayControl on chan %u",
+				(unsigned)chan_id);
+		}
+		if (strstr(name, "GraphicsPipeline") != NULL) {
+			st->gfx_channel_id = (int)chan_id;
+			rdp_info("drdynvc: GraphicsPipeline on chan %u",
 				(unsigned)chan_id);
 		}
 		/* Build Create Response: same header + channelId +
@@ -152,6 +160,12 @@ rdp_drdynvc_handle(struct drdynvc_state *st,
 			data_len -= skip;
 		}
 
+		if ((int)chan_id == st->gfx_channel_id
+		    && gfx_data != NULL && gfx_len != NULL) {
+			*gfx_data = data;
+			*gfx_len = data_len;
+			return 3;
+		}
 		if ((int)chan_id != st->disp_channel_id)
 			return 0;
 
