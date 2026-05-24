@@ -59,10 +59,15 @@ struct drdynvc_state {
 	int      caps_exchanged;
 	int      disp_channel_id;  /* -1 if not yet created */
 	int      gfx_channel_id;  /* -1 if not yet created */
+	int      gfx_create_pending; /* waiting for Create Response */
 };
 
 /* Build DRDYNVC Capabilities Request (version 1). */
 ssize_t rdp_drdynvc_build_caps(uint8_t *out, size_t cap);
+
+/* Build DRDYNVC Create Request for the GFX channel. */
+ssize_t rdp_drdynvc_build_create_gfx(struct drdynvc_state *st,
+		uint8_t *out, size_t cap);
 
 /* Process an inbound DRDYNVC PDU.  Returns:
  *   0 = handled, no resize

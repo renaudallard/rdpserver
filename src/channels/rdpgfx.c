@@ -64,15 +64,14 @@ ssize_t
 rdp_rdpgfx_build_caps_confirm(uint8_t *out, size_t cap)
 {
 	struct rdp_buf b;
-	/* CapsConfirm body: capsSet { version u32, dataLen u32, flags u32 } */
-	uint32_t pduLen = RDPGFX_HEADER_SIZE + 12;
-	if (cap < pduLen) return -1;
+	uint32_t bodyLen = 12;
+	if (cap < RDPGFX_HEADER_SIZE + bodyLen) return -1;
 	rdp_buf_init(&b, out, cap);
-	if (put_gfx_header(&b, RDPGFX_CMDID_CAPSCONFIRM, pduLen) != 0)
-		return -1;
+	if (put_gfx_header(&b, RDPGFX_CMDID_CAPSCONFIRM,
+		RDPGFX_HEADER_SIZE + bodyLen) != 0) return -1;
 	if (rdp_buf_put_u32le(&b, RDPGFX_CAPVERSION_81) != 0) return -1;
-	if (rdp_buf_put_u32le(&b, 4) != 0) return -1;   /* dataLen */
-	if (rdp_buf_put_u32le(&b, 0) != 0) return -1;   /* flags=0 */
+	if (rdp_buf_put_u32le(&b, 4) != 0) return -1;
+	if (rdp_buf_put_u32le(&b, 0) != 0) return -1;
 	return (ssize_t)rdp_buf_used(&b);
 }
 
@@ -81,25 +80,21 @@ rdp_rdpgfx_build_reset(uint8_t *out, size_t cap,
 		uint16_t w, uint16_t h)
 {
 	struct rdp_buf b;
-	/* ResetGraphics: width u32, height u32, monitorCount u32,
-	 * then one RDPGFX_MONITOR_DEF (left u32, top u32, right u32,
-	 * bottom u32, flags u32, pad u32[5]).
-	 * Total body = 12 + 40 = 52. */
-	uint32_t pduLen = RDPGFX_HEADER_SIZE + 340;
-	uint8_t body[340];
-	memset(body, 0, sizeof body);
+	/* FreeRDP expects total PDU (header+body) = 340 bytes.
+	 * Body = 12 (w+h+count) + 20 (1 monitor) + 300 (pad) = 332. */
+	uint32_t pduLen = 340;
+	uint8_t body[332];
 
+	memset(body, 0, sizeof body);
 	if (cap < pduLen) return -1;
 	rdp_buf_init(&b, out, cap);
 	if (put_gfx_header(&b, RDPGFX_CMDID_RESETGRAPHICS, pduLen) != 0)
 		return -1;
-	/* width, height, monitorCount */
 	body[0] = w & 0xff; body[1] = (w >> 8) & 0xff;
 	body[4] = h & 0xff; body[5] = (h >> 8) & 0xff;
-	body[8] = 1; /* monitorCount */
-	/* monitor[0]: left=0, top=0, right=w, bottom=h */
-	body[20] = w & 0xff; body[21] = (w >> 8) & 0xff;
-	body[24] = h & 0xff; body[25] = (h >> 8) & 0xff;
+	body[8] = 1;
+	body[20] = (w - 1) & 0xff; body[21] = ((w - 1) >> 8) & 0xff;
+	body[24] = (h - 1) & 0xff; body[25] = ((h - 1) >> 8) & 0xff;
 	if (rdp_buf_put(&b, body, sizeof body) != 0) return -1;
 	return (ssize_t)rdp_buf_used(&b);
 }
@@ -146,10 +141,11 @@ rdp_rdpgfx_build_avc420_frame(uint8_t *out, size_t cap,
 {
 	struct rdp_buf b;
 	size_t off = 0;
-	/* StartFrame (8+8) + WireToSurface1 (8+13+meta+data) + EndFrame (8+4) */
-	/* Meta: numRegionRects=1, rect(8), qualDesc(2) = 10+4 = 14 */
+	/* StartFrame(8+8) + WireToSurface1(8+body) + EndFrame(8+4) */
 	size_t start_len = RDPGFX_HEADER_SIZE + 8;
-	size_t wire_body = 13 + 4 + 8 + 2 + h264_len;
+	/* wire body: surfaceId(2)+codecId(2)+pixelFormat(1)+destRect(8)
+	 * +bitmapDataLength(4)+numRegionRects(4)+rect(8)+qual(2)+data */
+	size_t wire_body = 17 + 4 + 8 + 2 + h264_len;
 	size_t wire_len  = RDPGFX_HEADER_SIZE + wire_body;
 	size_t end_len   = RDPGFX_HEADER_SIZE + 4;
 	size_t total     = start_len + wire_len + end_len;

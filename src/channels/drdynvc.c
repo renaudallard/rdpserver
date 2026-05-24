@@ -105,29 +105,46 @@ rdp_drdynvc_handle(struct drdynvc_state *st,
 	case DRDYNVC_CMD_CREATE: {
 		uint32_t chan_id;
 		size_t id_len;
-		const char *name;
 		if (read_channel_id(pdu + 1, len - 1, cbId,
 			&chan_id, &id_len) != 0) return -1;
-		name = (const char *)pdu + 1 + id_len;
-		rdp_debug("drdynvc: Create chan=%u name='%s'",
-			(unsigned)chan_id, name);
-		if (strstr(name, "DisplayControl") != NULL) {
-			st->disp_channel_id = (int)chan_id;
-			rdp_info("drdynvc: DisplayControl on chan %u",
-				(unsigned)chan_id);
+		/* Create Response to our server-initiated request. */
+		if (st->gfx_create_pending
+		    && (int)chan_id == st->gfx_channel_id) {
+			size_t remain = len - 1 - id_len;
+			int32_t status = 0;
+			if (remain >= 4)
+				status = (int32_t)ld32(pdu + 1 + id_len);
+			st->gfx_create_pending = 0;
+			if (status == 0) {
+				rdp_info("drdynvc: GFX channel created ok");
+			} else {
+				rdp_warn("drdynvc: GFX create failed (%d)",
+					(int)status);
+				st->gfx_channel_id = -1;
+			}
+			return 0;
 		}
-		if (strstr(name, "GraphicsPipeline") != NULL) {
-			st->gfx_channel_id = (int)chan_id;
-			rdp_info("drdynvc: GraphicsPipeline on chan %u",
-				(unsigned)chan_id);
-		}
-		/* Build Create Response: same header + channelId +
-		 * CreationStatus u32 = 0 (success). */
-		if (resp_cap >= 1 + id_len + 4) {
-			resp_out[0] = hdr;
-			memcpy(resp_out + 1, pdu + 1, id_len);
-			memset(resp_out + 1 + id_len, 0, 4);
-			*resp_len = 1 + id_len + 4;
+		/* Client-initiated Create Request. */
+		{
+			const char *name = (const char *)pdu + 1 + id_len;
+			rdp_debug("drdynvc: Create chan=%u name='%s'",
+				(unsigned)chan_id, name);
+			if (strstr(name, "DisplayControl") != NULL) {
+				st->disp_channel_id = (int)chan_id;
+				rdp_info("drdynvc: DisplayControl on chan %u",
+					(unsigned)chan_id);
+			}
+			if (strstr(name, "GraphicsPipeline") != NULL) {
+				st->gfx_channel_id = (int)chan_id;
+				rdp_info("drdynvc: GraphicsPipeline on chan %u",
+					(unsigned)chan_id);
+			}
+			if (resp_cap >= 1 + id_len + 4) {
+				resp_out[0] = hdr;
+				memcpy(resp_out + 1, pdu + 1, id_len);
+				memset(resp_out + 1 + id_len, 0, 4);
+				*resp_len = 1 + id_len + 4;
+			}
 		}
 		return 0;
 	}
@@ -195,4 +212,23 @@ rdp_drdynvc_handle(struct drdynvc_state *st,
 		return 0;
 	}
 	return 0;
+}
+
+#define GFX_CHANNEL_NAME "Microsoft::Windows::RDS::Graphics"
+#define GFX_SERVER_CHAN_ID 1
+
+ssize_t
+rdp_drdynvc_build_create_gfx(struct drdynvc_state *st,
+		uint8_t *out, size_t cap)
+{
+	size_t name_len = sizeof(GFX_CHANNEL_NAME);
+	size_t total = 1 + 1 + name_len;
+
+	if (cap < total) return -1;
+	out[0] = (uint8_t)((DRDYNVC_CMD_CREATE << 4) | 0);
+	out[1] = GFX_SERVER_CHAN_ID;
+	memcpy(out + 2, GFX_CHANNEL_NAME, name_len);
+	st->gfx_channel_id = GFX_SERVER_CHAN_ID;
+	st->gfx_create_pending = 1;
+	return (ssize_t)total;
 }

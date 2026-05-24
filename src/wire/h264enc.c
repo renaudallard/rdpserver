@@ -64,7 +64,7 @@ init_encoder(struct rdp_h264 *e, int w, int h)
 	e->param.i_keyint_min = 30;
 	e->param.i_bframe = 0;
 	e->param.rc.i_rc_method = X264_RC_CRF;
-	e->param.rc.f_rf_constant = 28.0f;
+	e->param.rc.f_rf_constant = 32.0f;
 	e->param.i_log_level = X264_LOG_NONE;
 
 	e->enc = x264_encoder_open(&e->param);

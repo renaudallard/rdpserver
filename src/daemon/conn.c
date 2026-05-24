@@ -197,42 +197,56 @@ struct clip_state {
 /* Send a CLIPRDR PDU: wrap `payload[0..len)` in a CHANNEL_PDU_HEADER
  * (FIRST | LAST) and ship via MCS Send Data Indication on the
  * CLIPRDR channel. */
+#define VC_CHUNK_SIZE 16000
+
 static int
 send_clip_pdu(struct rdp_tls *t,
 		uint16_t user_id, uint16_t channel_id,
 		const uint8_t *payload, size_t len)
 {
-	uint8_t buf[0x4000];
-	uint8_t inner[0x3000];
-	uint8_t chan_hdr[8];
-	ssize_t dt_n, mcs_n;
-	uint32_t flags;
+	uint8_t buf[VC_CHUNK_SIZE + 128];
+	uint8_t inner[VC_CHUNK_SIZE + 8];
+	size_t off = 0;
 
-	if (8 + len > sizeof inner) return -1;
-	chan_hdr[0] = (uint8_t)(len & 0xff);
-	chan_hdr[1] = (uint8_t)((len >> 8) & 0xff);
-	chan_hdr[2] = (uint8_t)((len >> 16) & 0xff);
-	chan_hdr[3] = (uint8_t)((len >> 24) & 0xff);
-	flags = CHANNEL_FLAG_FIRST | CHANNEL_FLAG_LAST;
-	chan_hdr[4] = (uint8_t)(flags & 0xff);
-	chan_hdr[5] = (uint8_t)((flags >> 8) & 0xff);
-	chan_hdr[6] = (uint8_t)((flags >> 16) & 0xff);
-	chan_hdr[7] = (uint8_t)((flags >> 24) & 0xff);
-	memcpy(inner, chan_hdr, 8);
-	memcpy(inner + 8, payload, len);
+	while (off < len) {
+		uint8_t chan_hdr[8];
+		uint32_t flags = 0;
+		size_t chunk = len - off;
+		ssize_t dt_n, mcs_n;
 
-	dt_n = rdp_x224_build_dt(buf + 4, sizeof buf - 4);
-	if (dt_n < 0) return -1;
-	mcs_n = rdp_mcs_build_send_data_indication(buf + 4 + dt_n,
-		sizeof buf - 4 - dt_n, user_id, channel_id,
-		inner, 8 + len);
-	if (mcs_n < 0) return -1;
-	{
-		size_t total = 4 + (size_t)dt_n + (size_t)mcs_n;
-		if (rdp_tpkt_encode_hdr(buf, (uint16_t)total) < 0) return -1;
-		return rdp_tls_write_full(t, buf, total) == (ssize_t)total
-			? 0 : -1;
+		if (chunk > VC_CHUNK_SIZE)
+			chunk = VC_CHUNK_SIZE;
+		if (off == 0) flags |= CHANNEL_FLAG_FIRST;
+		if (off + chunk >= len) flags |= CHANNEL_FLAG_LAST;
+
+		chan_hdr[0] = (uint8_t)(len & 0xff);
+		chan_hdr[1] = (uint8_t)((len >> 8) & 0xff);
+		chan_hdr[2] = (uint8_t)((len >> 16) & 0xff);
+		chan_hdr[3] = (uint8_t)((len >> 24) & 0xff);
+		chan_hdr[4] = (uint8_t)(flags & 0xff);
+		chan_hdr[5] = (uint8_t)((flags >> 8) & 0xff);
+		chan_hdr[6] = (uint8_t)((flags >> 16) & 0xff);
+		chan_hdr[7] = (uint8_t)((flags >> 24) & 0xff);
+		memcpy(inner, chan_hdr, 8);
+		memcpy(inner + 8, payload + off, chunk);
+
+		dt_n = rdp_x224_build_dt(buf + 4, sizeof buf - 4);
+		if (dt_n < 0) return -1;
+		mcs_n = rdp_mcs_build_send_data_indication(buf + 4 + dt_n,
+			sizeof buf - 4 - dt_n, user_id, channel_id,
+			inner, 8 + chunk);
+		if (mcs_n < 0) return -1;
+		{
+			size_t total = 4 + (size_t)dt_n + (size_t)mcs_n;
+			if (rdp_tpkt_encode_hdr(buf, (uint16_t)total) < 0)
+				return -1;
+			if (rdp_tls_write_full(t, buf, total)
+			    != (ssize_t)total)
+				return -1;
+		}
+		off += chunk;
 	}
+	return 0;
 }
 
 static int
@@ -614,13 +628,21 @@ maybe_dispatch_clip(struct rdp_tls *t, int be_fd,
 			}
 			if (rc == 2) return 2;
 			if (rc == 3 && gfx_data != NULL && gfx_len > 0) {
-				/* RDPGFX data arrived. Check for CAPS_ADVERTISE. */
-				uint16_t cmdId = (uint16_t)gfx_data[0]
-					| ((uint16_t)gfx_data[1] << 8);
+				const uint8_t *gp = gfx_data;
+				size_t gl = gfx_len;
+				uint16_t cmdId;
+				/* Strip ZGFX envelope (0xE0 single + 0x00 uncompressed) */
+				if (gl >= 2 && gp[0] == 0xE0) {
+					gp += 2;
+					gl -= 2;
+				}
+				if (gl < 2) return 1;
+				cmdId = (uint16_t)gp[0]
+					| ((uint16_t)gp[1] << 8);
 				if (cmdId == RDPGFX_CMDID_CAPSADVERTISE) {
 					(void)rdp_rdpgfx_parse_caps_advertise(
-						gfx_data, gfx_len);
-					return 4; /* signal: GFX caps received */
+						gp, gl);
+					return 4;
 				}
 				if (cmdId == RDPGFX_CMDID_FRAMEACKNOWLEDGE) {
 					rdp_debug("rdpgfx: frame ack");
@@ -799,6 +821,69 @@ send_drdynvc_data(struct rdp_tls *t, uint16_t user_id,
 	}
 }
 
+#define ZGFX_SEG_MAX 65535
+
+static int
+send_gfx_pdu(struct rdp_tls *t, uint16_t user_id,
+		uint16_t drdynvc_mcs_chan, int dv_chan,
+		const uint8_t *data, size_t len)
+{
+	uint8_t *wrapped;
+	int rc;
+
+	if (len <= ZGFX_SEG_MAX) {
+		size_t total = 2 + len;
+		wrapped = malloc(total);
+		if (wrapped == NULL) return -1;
+		wrapped[0] = 0xE0;
+		wrapped[1] = 0x00;
+		memcpy(wrapped + 2, data, len);
+		rc = send_drdynvc_data(t, user_id, drdynvc_mcs_chan, dv_chan,
+			wrapped, total);
+		free(wrapped);
+		return rc;
+	}
+
+	{
+		uint16_t seg_count = (uint16_t)((len + ZGFX_SEG_MAX - 1)
+			/ ZGFX_SEG_MAX);
+		size_t hdr_sz = 1 + 2 + 4 + (size_t)seg_count * 4;
+		size_t total = hdr_sz + (size_t)seg_count + len;
+		size_t off = 0, woff;
+		uint16_t i;
+
+		wrapped = malloc(total);
+		if (wrapped == NULL) return -1;
+		woff = 0;
+		wrapped[woff++] = 0xE1;
+		wrapped[woff++] = (uint8_t)(seg_count & 0xff);
+		wrapped[woff++] = (uint8_t)((seg_count >> 8) & 0xff);
+		wrapped[woff++] = (uint8_t)(len & 0xff);
+		wrapped[woff++] = (uint8_t)((len >> 8) & 0xff);
+		wrapped[woff++] = (uint8_t)((len >> 16) & 0xff);
+		wrapped[woff++] = (uint8_t)((len >> 24) & 0xff);
+		for (i = 0; i < seg_count; i++) {
+			size_t chunk = len - off;
+			uint32_t ss;
+			if (chunk > ZGFX_SEG_MAX)
+				chunk = ZGFX_SEG_MAX;
+			ss = (uint32_t)(1 + chunk);
+			wrapped[woff++] = (uint8_t)(ss & 0xff);
+			wrapped[woff++] = (uint8_t)((ss >> 8) & 0xff);
+			wrapped[woff++] = (uint8_t)((ss >> 16) & 0xff);
+			wrapped[woff++] = (uint8_t)((ss >> 24) & 0xff);
+			wrapped[woff++] = 0x00;
+			memcpy(wrapped + woff, data + off, chunk);
+			woff += chunk;
+			off += chunk;
+		}
+		rc = send_drdynvc_data(t, user_id, drdynvc_mcs_chan, dv_chan,
+			wrapped, woff);
+		free(wrapped);
+		return rc;
+	}
+}
+
 static void
 run_proxy(struct rdp_tls *t, int be_fd,
 		struct clip_state *cs, struct dynvc_state *dv,
@@ -825,13 +910,18 @@ run_proxy(struct rdp_tls *t, int be_fd,
 				peer, cs->channel_id);
 	}
 	if (dv->enabled) {
-		uint8_t dvcaps[8];
+		uint8_t dvcaps[64];
 		ssize_t cn = rdp_drdynvc_build_caps(dvcaps, sizeof dvcaps);
 		if (cn > 0)
 			(void)send_clip_pdu(t, user_id, dv->channel_id,
 				dvcaps, (size_t)cn);
 		rdp_debug("conn[%s]: drdynvc caps sent (chan=%u)",
 			peer, dv->channel_id);
+		cn = rdp_drdynvc_build_create_gfx(&dv->dv,
+			dvcaps, sizeof dvcaps);
+		if (cn > 0)
+			(void)send_clip_pdu(t, user_id, dv->channel_id,
+				dvcaps, (size_t)cn);
 	}
 	if (ss->enabled) {
 		uint8_t fmts[128];
@@ -890,7 +980,7 @@ run_proxy(struct rdp_tls *t, int be_fd,
 					gn = rdp_rdpgfx_build_caps_confirm(
 						gbuf, sizeof gbuf);
 					if (gn > 0)
-						(void)send_drdynvc_data(t,
+						(void)send_gfx_pdu(t,
 							user_id,
 							dv->channel_id,
 							dv->dv.gfx_channel_id,
@@ -899,7 +989,7 @@ run_proxy(struct rdp_tls *t, int be_fd,
 						gbuf, sizeof gbuf,
 						desktop_w, desktop_h);
 					if (gn > 0)
-						(void)send_drdynvc_data(t,
+						(void)send_gfx_pdu(t,
 							user_id,
 							dv->channel_id,
 							dv->dv.gfx_channel_id,
@@ -909,7 +999,7 @@ run_proxy(struct rdp_tls *t, int be_fd,
 						gfx.surface_id,
 						desktop_w, desktop_h);
 					if (gn > 0)
-						(void)send_drdynvc_data(t,
+						(void)send_gfx_pdu(t,
 							user_id,
 							dv->channel_id,
 							dv->dv.gfx_channel_id,
@@ -918,7 +1008,7 @@ run_proxy(struct rdp_tls *t, int be_fd,
 						gbuf, sizeof gbuf,
 						gfx.surface_id);
 					if (gn > 0)
-						(void)send_drdynvc_data(t,
+						(void)send_gfx_pdu(t,
 							user_id,
 							dv->channel_id,
 							dv->dv.gfx_channel_id,
@@ -992,7 +1082,7 @@ run_proxy(struct rdp_tls *t, int be_fd,
 								h264_out,
 								h264_len);
 							if (gn > 0)
-								(void)send_drdynvc_data(
+								(void)send_gfx_pdu(
 									t, user_id,
 									dv->channel_id,
 									dv->dv.gfx_channel_id,
@@ -1434,6 +1524,40 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 		}
 		rdp_debug("conn[%s]: reconnect failed; falling through "
 			"to greeter", peer);
+	}
+
+	/* Auto-login: skip the greeter, go straight to sessmgr AUTH
+	 * using the Client Info username (and a dummy password that
+	 * sessmgr's PAM/bsd_auth will check).  Meant for automated
+	 * testing; production should NOT use -A. */
+	if (cfg->auto_login
+	    && cfg->sessmgr_sock != NULL && cfg->sessmgr_sock[0] != '\0'
+	    && client_info.username[0] != '\0') {
+		struct rdp_sessmgr sm = { -1, {0} };
+		const char *pw = client_info.have_password ? "x" : "x";
+		rdp_info("conn[%s]: auto-login as %s", peer,
+			client_info.username);
+		/* Use the greeter's password field is not available via
+		 * Client Info in TLS mode.  Just try "x" and let PAM
+		 * handle it (will fail for real users; use stub auth). */
+		if (rdp_sessmgr_open_auth(&sm, cfg->sessmgr_sock,
+			client_info.username, pw) == 0) {
+			int be_fd = -1;
+			if (rdp_sessmgr_spawn(&sm, desktop_w, desktop_h,
+				&be_fd) == 0) {
+				rdp_sessmgr_close(&sm);
+				rdp_info("conn[%s]: backend fd %d",
+					peer, be_fd);
+				run_proxy(t, be_fd, &clip, &dynvc, &snd,
+					user_id, io_channel,
+					desktop_w, desktop_h, peer);
+				(void)close(be_fd);
+				goto send_disconnect;
+			}
+			rdp_sessmgr_close(&sm);
+		}
+		rdp_warn("conn[%s]: auto-login auth failed", peer);
+		goto done;
 	}
 
 	{
