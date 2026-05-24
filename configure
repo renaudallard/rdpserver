@@ -238,6 +238,51 @@ int main(void) { AudioQueueRef q = 0; (void)q; return 0; }' \
 	fi
 fi
 
+# wlroots for Wayland compositor backend (optional).
+HAVE_WLROOTS=0
+WLROOTS_CFLAGS=
+WLROOTS_LIBS=
+for _wlpc in wlroots-0.19 wlroots-0.18 wlroots; do
+	_wlcf=
+	_wllf=
+	for _wldir in /usr/lib/pkgconfig \
+		/usr/lib/$(uname -m)-linux-gnu/pkgconfig \
+		/usr/lib/aarch64-linux-gnu/pkgconfig \
+		/usr/lib/x86_64-linux-gnu/pkgconfig \
+		/usr/local/lib/pkgconfig; do
+		if [ -f "$_wldir/$_wlpc.pc" ]; then
+			_wlprefix=$(sed -n 's/^prefix=//p' "$_wldir/$_wlpc.pc")
+			_wlincdir=$(sed -n 's/^includedir=//p' "$_wldir/$_wlpc.pc" \
+				| sed "s|\${prefix}|${_wlprefix}|g")
+			_wllibdir=$(sed -n 's/^libdir=//p' "$_wldir/$_wlpc.pc" \
+				| sed "s|\${prefix}|${_wlprefix}|g")
+			_wlcf="-I${_wlincdir}/wlroots-0.19"
+			_wllf="-L${_wllibdir} -lwlroots-0.19"
+			break
+		fi
+	done
+	if [ -n "$_wlcf" ]; then
+		# wlroots headers need pixman and wayland-server
+		for _pix in /usr/include/pixman-1 /usr/local/include/pixman-1; do
+			if [ -f "$_pix/pixman.h" ]; then
+				_wlcf="$_wlcf -I$_pix"
+				break
+			fi
+		done
+		probe "for $_wlpc" '#define WLR_USE_UNSTABLE
+#include <wlr/backend.h>
+int main(void) { return 0; }' \
+			"$_wlcf" "$_wllf -lwayland-server -lxkbcommon" \
+			&& HAVE_WLROOTS=1
+		if [ "$HAVE_WLROOTS" = 1 ]; then
+			WLROOTS_CFLAGS="$_wlcf"
+			WLROOTS_LIBS="$_wllf -lwayland-server -lxkbcommon"
+			echo "configure: $_wlpc available"
+			break
+		fi
+	fi
+done
+
 # Xorg DDX video driver module (optional).
 HAVE_XORG_DDX=0
 XORG_CFLAGS=
@@ -562,6 +607,7 @@ cat > src/include/config.h <<EOF
 #define HAVE_PULSEAUDIO       $HAVE_PULSEAUDIO
 #define HAVE_SNDIO            $HAVE_SNDIO
 #define HAVE_COREAUDIO        $HAVE_COREAUDIO
+#define HAVE_WLROOTS          $HAVE_WLROOTS
 #define HAVE_XORG_DDX         $HAVE_XORG_DDX
 
 #define RDP_XVFB_PATH         "$XVFB_PATH"
@@ -610,6 +656,11 @@ HAVE_PULSEAUDIO = $HAVE_PULSEAUDIO
 HAVE_SNDIO      = $HAVE_SNDIO
 AUDIO_LIBS      = $AUDIO_LIBS
 AUDIO_OBJ       = $AUDIO_OBJ
+
+HAVE_WLROOTS    = $HAVE_WLROOTS
+WLROOTS_CFLAGS  = $WLROOTS_CFLAGS
+WLROOTS_LIBS    = $WLROOTS_LIBS
+WAYLAND_OBJ     = $([ "$HAVE_WLROOTS" = 1 ] && echo "src/session/wayland_comp.o")
 
 HAVE_XORG_DDX  = $HAVE_XORG_DDX
 XORG_CFLAGS    = $XORG_CFLAGS

@@ -70,7 +70,7 @@ BACKEND_OBJS = src/backend/proto.o
 BACKEND_LIB  = src/backend/libbackend.a
 
 # Per-user session helper (X11).
-SESSION_OBJS = src/session/rdp_session.o src/session/clip_x11.o $(AUDIO_OBJ)
+SESSION_OBJS = src/session/rdp_session.o src/session/clip_x11.o $(AUDIO_OBJ) $(WAYLAND_OBJ)
 SESSION_PROG = src/session/rdp-session
 
 # Daemon objects.
@@ -135,6 +135,9 @@ src/ddx/rdpserverdev.o: src/ddx/rdpserverdev.c
 $(DDX_SO): $(DDX_OBJS)
 	$(CC) -shared -o $@ $(DDX_OBJS)
 
+src/session/wayland_comp.o: src/session/wayland_comp.c
+	$(CC) $(CFLAGS) $(WLROOTS_CFLAGS) -Isrc/session/protocols -c -o $@ src/session/wayland_comp.c
+
 src/session/rdp_session.o: src/session/rdp_session.c
 	$(CC) $(CFLAGS) $(X11_CFLAGS) -DRDP_XVFB_PATH=\"$(XVFB_PATH)\" \
 		-c -o $@ src/session/rdp_session.c
@@ -144,7 +147,7 @@ src/session/clip_x11.o: src/session/clip_x11.c
 
 $(SESSION_PROG): $(SESSION_OBJS) $(BACKEND_LIB) $(COMMON_LIB)
 	$(CC) $(LDFLAGS) -o $@ $(SESSION_OBJS) $(BACKEND_LIB) $(COMMON_LIB) \
-		$(X11_LIBS) $(AUDIO_LIBS)
+		$(X11_LIBS) $(AUDIO_LIBS) $(WLROOTS_LIBS)
 
 .c.o:
 	$(CC) $(CFLAGS) -c -o $@ $<

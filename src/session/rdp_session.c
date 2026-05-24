@@ -65,6 +65,7 @@
 
 #include "clip_x11.h"
 #include "audio.h"
+#include "wayland_comp.h"
 
 #include <sys/ipc.h>
 #include <sys/shm.h>
@@ -775,12 +776,146 @@ out:
 	return 0;
 }
 
+static int
+run_wayland_mode(int w, int h)
+{
+	struct rdp_wl_comp *wl;
+	uint8_t *row_buf;
+
+	wl = rdp_wl_comp_create(w, h);
+	if (wl == NULL) {
+		rdp_err("wayland compositor init failed");
+		return 1;
+	}
+	rdp_info("Wayland mode: %s (%dx%d)", rdp_wl_comp_get_socket(wl), w, h);
+
+	(void)setenv("WAYLAND_DISPLAY", rdp_wl_comp_get_socket(wl), 1);
+	(void)setenv("XDG_RUNTIME_DIR", "/tmp", 0);
+
+	{
+		struct rdp_be_hello hello = {(uint16_t)w, (uint16_t)h, 24, 0};
+		if (rdp_be_send(BE_FD, RDP_BE_HELLO_S2W,
+		    &hello, sizeof hello) != 0) {
+			rdp_err("HELLO send failed: %s", strerror(errno));
+			rdp_wl_comp_destroy(wl);
+			return 1;
+		}
+	}
+
+	{
+		pid_t child = fork();
+		if (child == 0) {
+			const char *term = getenv("WAYLAND_TERMINAL");
+			if (term == NULL) term = "foot";
+			execlp(term, term, (char *)NULL);
+			execlp("weston-terminal", "weston-terminal", (char *)NULL);
+			execlp("xterm", "xterm", (char *)NULL);
+			_exit(127);
+		}
+	}
+
+	row_buf = malloc((size_t)w * 3);
+	if (row_buf == NULL) {
+		rdp_wl_comp_destroy(wl);
+		return 1;
+	}
+
+	while (!want_shutdown) {
+		struct pollfd pfd;
+		pfd.fd = BE_FD;
+		pfd.events = POLLIN;
+		pfd.revents = 0;
+
+		rdp_wl_comp_dispatch(wl, 0);
+		(void)poll(&pfd, 1, FRAME_INTERVAL_MS);
+
+		if (pfd.revents & POLLIN) {
+			uint32_t type;
+			static uint8_t buf[0x10000];
+			ssize_t n = rdp_be_recv(BE_FD, &type, buf, sizeof buf);
+			if (n <= 0) break;
+			if (type == RDP_BE_INPUT_KEY
+			    && n >= (ssize_t)sizeof(struct rdp_be_input_key)) {
+				struct rdp_be_input_key k;
+				memcpy(&k, buf, sizeof k);
+				rdp_wl_comp_inject_key(wl,
+				    k.scancode, k.down);
+			} else if (type == RDP_BE_INPUT_MOUSE
+			    && n >= (ssize_t)sizeof(struct rdp_be_input_mouse)) {
+				struct rdp_be_input_mouse m;
+				memcpy(&m, buf, sizeof m);
+				rdp_wl_comp_inject_pointer(wl,
+				    m.x, m.y, m.buttons, m.flags & 1);
+			} else if (type == RDP_BE_RESIZE
+			    && n >= (ssize_t)sizeof(struct rdp_be_resize)) {
+				struct rdp_be_resize rs;
+				memcpy(&rs, buf, sizeof rs);
+				if (rs.width >= 200 && rs.height >= 200) {
+					w = rs.width; h = rs.height;
+					rdp_wl_comp_resize(wl, w, h);
+					free(row_buf);
+					row_buf = malloc((size_t)w * 3);
+					if (row_buf == NULL) break;
+				}
+			} else if (type == RDP_BE_BYE) {
+				break;
+			}
+		}
+
+		{
+			uint8_t *pixels;
+			int fw, fh, fstride;
+			if (rdp_wl_comp_get_framebuffer(wl, &pixels,
+			    &fw, &fh, &fstride) == 0) {
+				struct rdp_be_frame_hdr fhdr;
+				uint8_t hdr[RDP_BE_HEADER + sizeof fhdr];
+				uint32_t total = (uint32_t)sizeof fhdr
+				    + (uint32_t)fw * fh * 3;
+				int row;
+
+				hdr[0] = RDP_BE_FRAME;
+				hdr[1] = hdr[2] = hdr[3] = 0;
+				hdr[4] = (uint8_t)(total & 0xff);
+				hdr[5] = (uint8_t)((total >> 8) & 0xff);
+				hdr[6] = (uint8_t)((total >> 16) & 0xff);
+				hdr[7] = (uint8_t)((total >> 24) & 0xff);
+				fhdr.x = 0; fhdr.y = 0;
+				fhdr.w = (uint16_t)fw; fhdr.h = (uint16_t)fh;
+				memcpy(hdr + RDP_BE_HEADER, &fhdr, sizeof fhdr);
+				if (rdp_write_full(BE_FD, hdr, sizeof hdr)
+				    != sizeof hdr) break;
+
+				for (row = 0; row < fh; row++) {
+					const uint8_t *src = pixels
+					    + (size_t)row * fstride;
+					int col;
+					for (col = 0; col < fw; col++) {
+						row_buf[col*3+0] = src[col*4+0];
+						row_buf[col*3+1] = src[col*4+1];
+						row_buf[col*3+2] = src[col*4+2];
+					}
+					if (rdp_write_full(BE_FD, row_buf,
+					    (size_t)fw * 3) != (ssize_t)fw * 3)
+						goto wl_out;
+				}
+			}
+		}
+	}
+
+wl_out:
+	rdp_info("Wayland session shutting down");
+	free(row_buf);
+	rdp_wl_comp_destroy(wl);
+	return 0;
+}
+
 static void
 usage(const char *prog)
 {
 	(void)fprintf(stderr,
-"usage: %s [-D] [-w width] [-H height]\n"
+"usage: %s [-D] [-W] [-w width] [-H height]\n"
 "  -D     use native DDX driver instead of Xvfb\n"
+"  -W     use Wayland compositor instead of X11\n"
 "  -w n   desktop width  (default 1024)\n"
 "  -H n   desktop height (default 768)\n"
 "\n"
@@ -793,7 +928,7 @@ int
 main(int argc, char *argv[])
 {
 	int w = 1024, h = 768;
-	int opt, use_ddx = 0;
+	int opt, use_ddx = 0, use_wayland = 0;
 	int display_num;
 	pid_t xvfb_pid, xterm_pid;
 	Display *dpy;
@@ -802,9 +937,10 @@ main(int argc, char *argv[])
 	struct timespec last_send = {0, 0};
 	struct rdp_log_cfg lc;
 
-	while ((opt = getopt(argc, argv, "Dw:H:?")) != -1) {
+	while ((opt = getopt(argc, argv, "DWw:H:?")) != -1) {
 		switch (opt) {
 		case 'D': use_ddx = 1; break;
+		case 'W': use_wayland = 1; break;
 		case 'w': w = atoi(optarg); break;
 		case 'H': h = atoi(optarg); break;
 		case '?': default: usage(argv[0]); return 1;
@@ -822,6 +958,12 @@ main(int argc, char *argv[])
 	rdp_log_init(&lc);
 
 	install_signals();
+
+	if (use_wayland) {
+		int rc = run_wayland_mode(w, h);
+		rdp_log_close();
+		return rc;
+	}
 
 	if (use_ddx) {
 		int rc = run_ddx_mode(w, h);
