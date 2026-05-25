@@ -93,20 +93,21 @@
  *              as fd 3 before exec.
  *
  * SUSPEND request (worker -> sessmgr, on client disconnect):
- *   u8  op       = 3
+ *   u8  op           = 3
  *   u8  reserved
  *   u16 reserved
  *   u32 logonId
+ *   u8  arc_random[16]   ARC random bits for verifier
  *   Ancillary: the backend fd via SCM_RIGHTS.
- * SUSPEND reply: status byte.
+ * SUSPEND reply: status byte (8 bytes).
  *
  * RESUME request (new worker -> sessmgr, on reconnect attempt):
  *   u8  op       = 4
  *   u8  reserved
  *   u16 reserved
  *   u32 logonId
- * RESUME reply: status byte. On success, the backend fd is returned
- *   via SCM_RIGHTS.
+ * RESUME reply (24 bytes): status(8) + arc_random(16). On success,
+ *   the backend fd is returned via SCM_RIGHTS.
  */
 
 #define RDP_SESSMGR_SUSPEND_MAX     16
