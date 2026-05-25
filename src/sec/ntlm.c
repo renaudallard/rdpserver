@@ -38,6 +38,7 @@
 #include "../common/buf.h"
 #include "../common/utf16.h"
 #include "../common/rand.h"
+#include "../common/str.h"
 
 #include <openssl/evp.h>
 
@@ -288,7 +289,7 @@ ntlm_verify_ntlmv2(const uint8_t server_challenge[8],
 		server_challenge, 8, temp, temp_len, nt_proof) != 0)
 		return -1;
 
-	if (memcmp(nt_proof, auth->nt_response, 16) != 0)
+	if (rdp_consttime_eq(nt_proof, auth->nt_response, 16) != 0)
 		return -1;
 
 	if (rdp_hmac_md5(ntlmv2_hash, 16, nt_proof, 16,
@@ -334,7 +335,7 @@ ntlm_verify_ntlmv2_hash(const uint8_t server_challenge[8],
 		server_challenge, 8, temp, temp_len, nt_proof) != 0)
 		return -1;
 
-	if (memcmp(nt_proof, auth->nt_response, 16) != 0)
+	if (rdp_consttime_eq(nt_proof, auth->nt_response, 16) != 0)
 		return -1;
 
 	if (rdp_hmac_md5(ntlmv2_hash, 16, nt_proof, 16,
