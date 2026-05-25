@@ -389,39 +389,15 @@ sweep_expired(void)
 }
 
 static int
-handle_suspend(int cfd)
+handle_suspend(int cfd, const uint8_t *req, size_t req_len, int recvd_fd)
 {
-	/* Receive the backend fd via SCM_RIGHTS alongside the request. */
-	uint8_t buf[16];
-	char cbuf[CMSG_SPACE(sizeof(int))];
-	struct msghdr msg;
-	struct iovec iov;
-	struct cmsghdr *cmsg;
-	int recvd_fd = -1;
-	ssize_t n;
 	uint32_t logon_id;
 	int i, slot = -1;
 
-	memset(&msg, 0, sizeof msg);
-	iov.iov_base = buf;
-	iov.iov_len = sizeof buf;
-	msg.msg_iov = &iov;
-	msg.msg_iovlen = 1;
-	msg.msg_control = cbuf;
-	msg.msg_controllen = sizeof cbuf;
-	n = recvmsg(cfd, &msg, 0);
-	if (n < 8) return reply(cfd, RDP_SESSMGR_FAIL, -1);
-	for (cmsg = CMSG_FIRSTHDR(&msg); cmsg;
-	     cmsg = CMSG_NXTHDR(&msg, cmsg)) {
-		if (cmsg->cmsg_level == SOL_SOCKET
-		    && cmsg->cmsg_type == SCM_RIGHTS
-		    && cmsg->cmsg_len >= CMSG_LEN(sizeof(int)))
-			memcpy(&recvd_fd, CMSG_DATA(cmsg), sizeof(int));
-	}
-	if (recvd_fd < 0)
+	if (req_len < 8 || recvd_fd < 0)
 		return reply(cfd, RDP_SESSMGR_FAIL, -1);
-	logon_id = (uint32_t)buf[4] | ((uint32_t)buf[5] << 8)
-		| ((uint32_t)buf[6] << 16) | ((uint32_t)buf[7] << 24);
+	logon_id = (uint32_t)req[4] | ((uint32_t)req[5] << 8)
+		| ((uint32_t)req[6] << 16) | ((uint32_t)req[7] << 24);
 	sweep_expired();
 	for (i = 0; i < RDP_SESSMGR_SUSPEND_MAX; i++) {
 		if (!suspended[i].in_use) { slot = i; break; }
@@ -516,12 +492,34 @@ handle_client(int cfd, const char *service)
 	for (;;) {
 		uint8_t buf[RDP_SESSMGR_FRAME_MAX];
 		ssize_t n;
-		struct pollfd pfd;
-		pfd.fd = cfd;
-		pfd.events = POLLIN;
-		if (poll(&pfd, 1, 30000) <= 0) break;
-		n = recv(cfd, buf, sizeof buf, 0);
+		struct pollfd pfd_wait;
+		struct msghdr rmsg;
+		struct iovec riov;
+		char rcbuf[CMSG_SPACE(sizeof(int))];
+		struct cmsghdr *rcmsg;
+		int recv_fd = -1;
+
+		pfd_wait.fd = cfd;
+		pfd_wait.events = POLLIN;
+		if (poll(&pfd_wait, 1, 30000) <= 0) break;
+
+		memset(&rmsg, 0, sizeof rmsg);
+		riov.iov_base = buf;
+		riov.iov_len = sizeof buf;
+		rmsg.msg_iov = &riov;
+		rmsg.msg_iovlen = 1;
+		memset(rcbuf, 0, sizeof rcbuf);
+		rmsg.msg_control = rcbuf;
+		rmsg.msg_controllen = sizeof rcbuf;
+		n = recvmsg(cfd, &rmsg, 0);
 		if (n <= 0) break;
+		for (rcmsg = CMSG_FIRSTHDR(&rmsg); rcmsg;
+		     rcmsg = CMSG_NXTHDR(&rmsg, rcmsg))
+			if (rcmsg->cmsg_level == SOL_SOCKET
+			    && rcmsg->cmsg_type == SCM_RIGHTS
+			    && rcmsg->cmsg_len >= CMSG_LEN(sizeof(int)))
+				memcpy(&recv_fd, CMSG_DATA(rcmsg),
+				    sizeof(int));
 		switch (buf[0]) {
 		case RDP_SESSMGR_OP_AUTH:
 			(void)handle_auth(cfd, buf, (size_t)n, service,
@@ -538,7 +536,8 @@ handle_client(int cfd, const char *service)
 				(void)close(retained_fd);
 				retained_fd = -1;
 			}
-			(void)handle_suspend(cfd);
+			(void)handle_suspend(cfd, buf, (size_t)n, recv_fd);
+			recv_fd = -1;
 			break;
 		case RDP_SESSMGR_OP_RESUME:
 			(void)handle_resume(cfd, buf, (size_t)n);
@@ -546,6 +545,10 @@ handle_client(int cfd, const char *service)
 		default:
 			(void)reply(cfd, RDP_SESSMGR_ENOSYS, -1);
 			break;
+		}
+		if (recv_fd >= 0) {
+			(void)close(recv_fd);
+			recv_fd = -1;
 		}
 	}
 
