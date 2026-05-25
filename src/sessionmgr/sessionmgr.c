@@ -352,6 +352,7 @@ struct suspended_session {
 	uint32_t logon_id;
 	int      be_fd;
 	time_t   suspended_at;
+	uint8_t  arc_random[16];
 };
 
 static struct suspended_session
@@ -394,7 +395,7 @@ handle_suspend(int cfd, const uint8_t *req, size_t req_len, int recvd_fd)
 	uint32_t logon_id;
 	int i, slot = -1;
 
-	if (req_len < 8 || recvd_fd < 0)
+	if (req_len < 24 || recvd_fd < 0)
 		return reply(cfd, RDP_SESSMGR_FAIL, -1);
 	logon_id = (uint32_t)req[4] | ((uint32_t)req[5] << 8)
 		| ((uint32_t)req[6] << 16) | ((uint32_t)req[7] << 24);
@@ -411,6 +412,7 @@ handle_suspend(int cfd, const uint8_t *req, size_t req_len, int recvd_fd)
 	suspended[slot].logon_id = logon_id;
 	suspended[slot].be_fd = recvd_fd;
 	suspended[slot].suspended_at = time(NULL);
+	memcpy(suspended[slot].arc_random, req + 8, 16);
 	rdp_info("SUSPEND: logonId %u in slot %d",
 		(unsigned)logon_id, slot);
 	return reply(cfd, RDP_SESSMGR_OK, -1);
@@ -445,9 +447,37 @@ handle_resume(int cfd, const uint8_t *req, size_t req_len)
 			}
 			rdp_info("RESUME: logonId %u from slot %d",
 				(unsigned)logon_id, i);
-			if (reply(cfd, RDP_SESSMGR_OK, fd) != 0) {
-				(void)close(fd);
-				return -1;
+			{
+				uint8_t rbuf[24];
+				struct msghdr rmsg;
+				struct iovec riov;
+				char rcb[CMSG_SPACE(sizeof(int))];
+				struct cmsghdr *rc;
+				ssize_t rr;
+
+				memset(rbuf, 0, 8);
+				rbuf[0] = RDP_SESSMGR_OK;
+				memcpy(rbuf + 8,
+				    suspended[i].arc_random, 16);
+				memset(&rmsg, 0, sizeof rmsg);
+				riov.iov_base = rbuf;
+				riov.iov_len = sizeof rbuf;
+				rmsg.msg_iov = &riov;
+				rmsg.msg_iovlen = 1;
+				memset(rcb, 0, sizeof rcb);
+				rmsg.msg_control = rcb;
+				rmsg.msg_controllen = sizeof rcb;
+				rc = CMSG_FIRSTHDR(&rmsg);
+				rc->cmsg_level = SOL_SOCKET;
+				rc->cmsg_type = SCM_RIGHTS;
+				rc->cmsg_len = CMSG_LEN(sizeof(int));
+				memcpy(CMSG_DATA(rc), &fd, sizeof(int));
+				do { rr = sendmsg(cfd, &rmsg, 0); }
+				while (rr < 0 && errno == EINTR);
+				if (rr < 0) {
+					(void)close(fd);
+					return -1;
+				}
 			}
 			(void)close(fd);
 			return 0;

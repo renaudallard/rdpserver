@@ -210,10 +210,11 @@ rdp_sessmgr_close(struct rdp_sessmgr *s)
 
 int
 rdp_sessmgr_suspend(const char *sock_path,
-		uint32_t logon_id, int be_fd)
+		uint32_t logon_id, const uint8_t arc_random[16],
+		int be_fd)
 {
 	int fd;
-	uint8_t req[8];
+	uint8_t req[24];
 	struct msghdr msg;
 	struct iovec iov;
 	char cbuf[CMSG_SPACE(sizeof(int))];
@@ -229,6 +230,7 @@ rdp_sessmgr_suspend(const char *sock_path,
 	req[5] = (uint8_t)((logon_id >> 8) & 0xff);
 	req[6] = (uint8_t)((logon_id >> 16) & 0xff);
 	req[7] = (uint8_t)((logon_id >> 24) & 0xff);
+	memcpy(req + 8, arc_random, 16);
 
 	memset(&msg, 0, sizeof msg);
 	iov.iov_base = req;
@@ -254,11 +256,12 @@ rdp_sessmgr_suspend(const char *sock_path,
 
 int
 rdp_sessmgr_resume(const char *sock_path,
-		uint32_t logon_id, int *fd_out)
+		uint32_t logon_id, int *fd_out,
+		uint8_t arc_random_out[16])
 {
 	int fd;
 	uint8_t req[8];
-	uint8_t resp[8];
+	uint8_t resp[24];
 	struct msghdr msg;
 	struct iovec iov;
 	char cbuf[CMSG_SPACE(sizeof(int))];
@@ -296,6 +299,8 @@ rdp_sessmgr_resume(const char *sock_path,
 			memcpy(&recvd_fd, CMSG_DATA(cmsg), sizeof(int));
 	}
 	if (recvd_fd < 0) return -1;
+	if (n >= 24 && arc_random_out != NULL)
+		memcpy(arc_random_out, resp + 8, 16);
 	*fd_out = recvd_fd;
 	return 0;
 }

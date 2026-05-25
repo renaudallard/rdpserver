@@ -1744,18 +1744,15 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 
 	/* Check for auto-reconnect cookie.  If the client presented one
 	 * and the sessmgr still holds the suspended backend, skip the
-	 * greeter entirely and resume the existing session.
-	 * NOTE: we match only on logon_id (32-bit random) + sessmgr
-	 * rate-limiting.  Full ARC verifier check (HMAC-MD5 of
-	 * arc_random) would require sessmgr to store arc_random per
-	 * suspended session; deferred for now. */
+	 * greeter entirely and resume the existing session. */
 	if (client_info.have_arc
 	    && cfg->sessmgr_sock != NULL && cfg->sessmgr_sock[0] != '\0') {
 		int be_fd = -1;
+		uint8_t stored_arc[16];
 		rdp_info("conn[%s]: reconnect attempt logonId=%u",
 			peer, (unsigned)client_info.arc_logon_id);
 		if (rdp_sessmgr_resume(cfg->sessmgr_sock,
-			client_info.arc_logon_id, &be_fd) == 0) {
+			client_info.arc_logon_id, &be_fd, stored_arc) == 0) {
 			rdp_info("conn[%s]: resumed backend fd %d",
 				peer, be_fd);
 			/* Generate a fresh ARC cookie for the next
@@ -1778,7 +1775,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 			/* On disconnect: try to SUSPEND the session so it
 			 * survives for the next reconnect. */
 			if (rdp_sessmgr_suspend(cfg->sessmgr_sock,
-				logon_id, be_fd) == 0)
+				logon_id, arc_random, be_fd) == 0)
 				rdp_info("conn[%s]: session suspended", peer);
 			(void)close(be_fd);
 			goto send_disconnect;
@@ -1906,7 +1903,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 			if (cfg->sessmgr_sock != NULL
 			    && cfg->sessmgr_sock[0] != '\0'
 			    && rdp_sessmgr_suspend(cfg->sessmgr_sock,
-				logon_id, be_fd) == 0)
+				logon_id, arc_random, be_fd) == 0)
 				rdp_info("conn[%s]: session suspended "
 					"(logonId=%u)", peer,
 					(unsigned)logon_id);
