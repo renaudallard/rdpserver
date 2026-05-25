@@ -75,7 +75,7 @@ SESSION_OBJS = src/session/rdp_session.o src/session/clip_x11.o \
 SESSION_PROG = src/session/rdp-session
 
 # Daemon objects.
-RDPD_OBJS = src/daemon/rdpd.o src/daemon/conn.o $(SESSMGR_CLIENT_OBJ) \
+RDPD_OBJS = src/daemon/rdpd.o src/daemon/conn.o src/daemon/sandbox.o $(SESSMGR_CLIENT_OBJ) \
 	$(BACKEND_OBJS) $(CHANNELS_OBJS)
 
 PROGS = src/daemon/rdpd src/sessionmgr/rdp-sessionmgr $(SESSION_PROG)
