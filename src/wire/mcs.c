@@ -353,8 +353,7 @@ rdp_mcs_build_connect_response(uint8_t *out, size_t cap,
 
 	if (r->channel_count > RDP_MCS_MAX_CHANNELS) return -1;
 
-	/* SC_CORE block: type(2) length(2) version(4) clientRequestedProtocols(4)
-	 * earlyCapabilityFlags(4 -- optional, omit). */
+	/* SC_CORE: version + requestedProtocols + earlyCapabilityFlags */
 	rdp_buf_init(&sb, sc, sizeof sc);
 	{
 		uint8_t *hdr;
@@ -365,6 +364,7 @@ rdp_mcs_build_connect_response(uint8_t *out, size_t cap,
 		start = rdp_buf_used(&sb);
 		if (rdp_buf_put_u32le(&sb, 0x00080004u) != 0) return -1;
 		if (rdp_buf_put_u32le(&sb, r->requested_protocols) != 0) return -1;
+		if (rdp_buf_put_u32le(&sb, 0) != 0) return -1;
 		hdr[0] = RDP_SC_CORE & 0xff;
 		hdr[1] = (RDP_SC_CORE >> 8) & 0xff;
 		{
@@ -373,25 +373,7 @@ rdp_mcs_build_connect_response(uint8_t *out, size_t cap,
 			hdr[3] = (sz >> 8) & 0xff;
 		}
 	}
-	/* SC_SECURITY block. */
-	{
-		uint8_t *hdr;
-		size_t start;
-		hdr = rdp_buf_reserve(&sb, 4);
-		if (hdr == NULL) return -1;
-		start = rdp_buf_used(&sb);
-		if (rdp_buf_put_u32le(&sb, r->encryption_method) != 0) return -1;
-		if (rdp_buf_put_u32le(&sb, r->encryption_level) != 0) return -1;
-		hdr[0] = RDP_SC_SECURITY & 0xff;
-		hdr[1] = (RDP_SC_SECURITY >> 8) & 0xff;
-		{
-			uint16_t sz = (uint16_t)(rdp_buf_used(&sb) - start + 4);
-			hdr[2] = sz & 0xff;
-			hdr[3] = (sz >> 8) & 0xff;
-		}
-	}
-	/* SC_NET block: type(2) length(2) MCSChannelId(2) channelCount(2)
-	 * channelIds(2 * count) [pad to 4-byte boundary]. */
+	/* SC_NET: MCSChannelId + channelIds (before SC_SECURITY per mstsc) */
 	{
 		uint8_t *hdr;
 		size_t start;
@@ -416,14 +398,51 @@ rdp_mcs_build_connect_response(uint8_t *out, size_t cap,
 			hdr[3] = (sz >> 8) & 0xff;
 		}
 	}
+	/* SC_SECURITY */
+	{
+		uint8_t *hdr;
+		size_t start;
+		hdr = rdp_buf_reserve(&sb, 4);
+		if (hdr == NULL) return -1;
+		start = rdp_buf_used(&sb);
+		if (rdp_buf_put_u32le(&sb, r->encryption_method) != 0) return -1;
+		if (rdp_buf_put_u32le(&sb, r->encryption_level) != 0) return -1;
+		hdr[0] = RDP_SC_SECURITY & 0xff;
+		hdr[1] = (RDP_SC_SECURITY >> 8) & 0xff;
+		{
+			uint16_t sz = (uint16_t)(rdp_buf_used(&sb) - start + 4);
+			hdr[2] = sz & 0xff;
+			hdr[3] = (sz >> 8) & 0xff;
+		}
+	}
+	/* SC_MCS_MSGCHANNEL omitted for now - some clients choke on it */
 
-	/* GCC user data layout that xfreerdp / mstsc expect:
-	 *   17-byte fixed prefix (ends with 0xc0 0x00 -- "non-standard
-	 *   parameter"), then the H.221 key "McDn", then a single PER
-	 *   length determinant covering the server data blocks, then
-	 *   the SC_* blocks themselves. */
+	/* GCC Conference Create Response, built field-by-field to match
+	 * the format Microsoft clients expect. */
 	rdp_buf_init(&gb, gcc, sizeof gcc);
-	if (rdp_buf_put(&gb, GCC_CR_PREFIX, sizeof GCC_CR_PREFIX) != 0) return -1;
+	if (rdp_per_write_choice(&gb, 0) != 0) return -1;
+	{
+		static const uint8_t t124_oid[] = {0x00, 0x14, 0x7c, 0x00, 0x01};
+		if (rdp_buf_put_u8(&gb, 0x05) != 0) return -1;
+		if (rdp_buf_put(&gb, t124_oid, sizeof t124_oid) != 0) return -1;
+	}
+	if (rdp_per_write_length(&gb, 0x2A) != 0) return -1;
+	if (rdp_per_write_choice(&gb, 0x14) != 0) return -1;
+	{
+		uint16_t node_id = 0x79F3 - 1001;
+		if (rdp_buf_put_u8(&gb, (uint8_t)((node_id >> 8) & 0xff)) != 0) return -1;
+		if (rdp_buf_put_u8(&gb, (uint8_t)(node_id & 0xff)) != 0) return -1;
+	}
+	/* tag = per_write_integer(1): length(1) + value(1) */
+	if (rdp_buf_put_u8(&gb, 1) != 0) return -1;
+	if (rdp_buf_put_u8(&gb, 1) != 0) return -1;
+	/* result = per_write_enumerated(0) */
+	if (rdp_buf_put_u8(&gb, 0) != 0) return -1;
+	/* number_of_sets(1) */
+	if (rdp_buf_put_u8(&gb, 1) != 0) return -1;
+	if (rdp_per_write_choice(&gb, 0xC0) != 0) return -1;
+	/* h221NonStandard: per_write_octet_string("McDn", 4, min=4) → length=0 + key */
+	if (rdp_buf_put_u8(&gb, 0x00) != 0) return -1;
 	if (rdp_per_write_h221_key(&gb, "McDn") != 0) return -1;
 	if (rdp_per_write_length(&gb, rdp_buf_used(&sb)) != 0) return -1;
 	if (rdp_buf_put(&gb, sc, rdp_buf_used(&sb)) != 0) return -1;

@@ -53,9 +53,7 @@ rdp_license_build_valid_client(uint8_t *out, size_t cap)
 	if (cap < total) return -1;
 	rdp_buf_init(&b, out, cap);
 	if (rdp_buf_put_u8(&b, RDP_LIC_MSGTYPE_ERROR_ALERT) != 0) return -1;
-	if (rdp_buf_put_u8(&b,
-		RDP_LIC_PREAMBLE_VERSION_3_0
-		| RDP_LIC_EXT_ERROR_MSG_SUPPORTED) != 0) return -1;
+	if (rdp_buf_put_u8(&b, RDP_LIC_PREAMBLE_VERSION_3_0) != 0) return -1;
 	if (rdp_buf_put_u16le(&b, total) != 0) return -1;
 	if (rdp_buf_put_u32le(&b, RDP_LIC_STATUS_VALID_CLIENT) != 0) return -1;
 	if (rdp_buf_put_u32le(&b, RDP_LIC_STATE_NO_TRANSITION) != 0) return -1;

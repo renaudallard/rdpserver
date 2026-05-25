@@ -1373,11 +1373,13 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 	ssize_t  n;
 	struct rdp_x224_cr cr;
 	struct rdp_tls *t = NULL;
-	uint16_t user_id = 1007;
+	uint16_t user_id = 1002;
 	uint16_t io_channel = RDP_MCS_IO_CHANNEL_ID;
 	uint16_t desktop_w = 0, desktop_h = 0;
 	int use_nla = 0;
 	char nla_user[256] = {0}, nla_pass[256] = {0};
+	const uint8_t *ci_pw = NULL;
+	size_t ci_pw_len = 0;
 	struct rdp_tls_ctx *tls = cfg->tls;
 	struct clip_state clip = {0};
 	struct dynvc_state dynvc = {0};
@@ -1574,6 +1576,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 
 	/* 5. Channel Join loop -- mstsc joins user channel, I/O channel,
 	 *    then each virtual channel.  We confirm each. */
+	{int _jc = 0;
 	for (;;) {
 		const uint8_t *mcs_p;
 		size_t mcs_len;
@@ -1598,6 +1601,13 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 			dt_n = rdp_x224_build_dt(scratch + 4,
 				sizeof scratch - 4);
 			memcpy(scratch + 4 + dt_n, body, bn);
+			if (_jc < 3) {
+				rdp_debug("conn[%s]: join req uid=%u cid=%u -> confirm %02x %02x %02x %02x %02x %02x %02x %02x",
+					peer, uid, cid,
+					body[0], body[1], body[2], body[3],
+					bn>4?body[4]:0, bn>5?body[5]:0, bn>6?body[6]:0, bn>7?body[7]:0);
+			}
+			if (++_jc > 50) { rdp_err("conn[%s]: join loop overflow", peer); goto done; }
 			if (write_tpkt_tls(t, scratch,
 				4 + (size_t)dt_n + (size_t)bn) != 0) goto done;
 			continue;
@@ -1607,9 +1617,6 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 			size_t payload_len;
 			uint32_t sec_flags;
 			ssize_t sh;
-			const uint8_t *pw;
-			size_t pw_len;
-
 			if (rdp_mcs_parse_send_data_request(mcs_p, mcs_len,
 				&uid, &cid, &payload, &payload_len) < 0)
 				goto done;
@@ -1622,7 +1629,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 			}
 			if (rdp_client_info_parse(payload + sh,
 				payload_len - (size_t)sh, &client_info,
-				&pw, &pw_len) < 0) {
+				&ci_pw, &ci_pw_len) < 0) {
 				rdp_err("conn[%s]: bad Client Info", peer);
 				goto done;
 			}
@@ -1636,7 +1643,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 		rdp_err("conn[%s]: unexpected MCS type 0x%02x",
 			peer, mcs_p[0]);
 		goto done;
-	}
+	}}
 
 	/* 7. Send License Valid Client. */
 	{
@@ -1826,19 +1833,24 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 		goto done;
 	}
 
-	/* Auto-login: skip the greeter, go straight to sessmgr AUTH. */
-	if (cfg->auto_login
-	    && cfg->sessmgr_sock != NULL && cfg->sessmgr_sock[0] != '\0'
-	    && client_info.username[0] != '\0') {
+	/* Auto-login: if the client provided credentials in Client Info,
+	 * skip the greeter and authenticate directly. */
+	if (cfg->sessmgr_sock != NULL && cfg->sessmgr_sock[0] != '\0'
+	    && client_info.username[0] != '\0'
+	    && (cfg->auto_login || (client_info.have_password && ci_pw_len > 0))) {
 		struct rdp_sessmgr sm = { -1, {0} };
-		const char *pw = client_info.have_password ? "x" : "x";
-		rdp_info("conn[%s]: auto-login as %s", peer,
+		char pw_utf8[256] = {0};
+		if (client_info.have_password && ci_pw_len > 0 && ci_pw != NULL) {
+			size_t got = rdp_utf16le_to_utf8(pw_utf8,
+				sizeof pw_utf8 - 1, ci_pw, ci_pw_len);
+			if (got == (size_t)-1 || got >= sizeof pw_utf8) got = 0;
+			pw_utf8[got] = '\0';
+		}
+		rdp_info("conn[%s]: login as %s", peer,
 			client_info.username);
-		/* Use the greeter's password field is not available via
-		 * Client Info in TLS mode.  Just try "x" and let PAM
-		 * handle it (will fail for real users; use stub auth). */
 		if (rdp_sessmgr_open_auth(&sm, cfg->sessmgr_sock,
-			client_info.username, pw) == 0) {
+			client_info.username,
+			pw_utf8[0] ? pw_utf8 : "x") == 0) {
 			int be_fd = -1;
 			if (rdp_sessmgr_spawn(&sm, desktop_w, desktop_h,
 				&be_fd) == 0) {
@@ -1853,8 +1865,8 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 			}
 			rdp_sessmgr_close(&sm);
 		}
-		rdp_warn("conn[%s]: auto-login auth failed", peer);
-		goto done;
+		rdp_warn("conn[%s]: auto-login auth failed, trying greeter", peer);
+		explicit_bzero(pw_utf8, sizeof pw_utf8);
 	}
 
 	{

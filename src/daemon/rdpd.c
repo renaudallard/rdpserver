@@ -49,6 +49,7 @@
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 
@@ -229,6 +230,11 @@ main(int argc, char *argv[])
 		 * interval, 6 probes -- about two minutes of silence
 		 * before the worker notices a dead client. */
 		(void)rdp_set_tcp_keepalive(cfd);
+		{
+			int one = 1;
+			(void)setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY,
+				&one, sizeof one);
+		}
 
 		pid = fork();
 		if (pid < 0) {
