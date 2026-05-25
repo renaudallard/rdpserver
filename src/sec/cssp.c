@@ -147,8 +147,19 @@ rdp_cssp_parse(const uint8_t *p, size_t len, struct rdp_tsrequest *out)
 			out->pub_key_auth = od;
 			out->pub_key_auth_len = odl;
 			off += comp_len;
+		} else if (tag == BER_CTX_CONSTRUCTED(5)) {
+			const uint8_t *od;
+			size_t odl;
+			r = read_ctx_tag(p + off, len - off, tag, &comp_len);
+			if (r < 0) return -1;
+			off += (size_t)r;
+			r = rdp_ber_read_octet_string(p + off, comp_len,
+				&od, &odl);
+			if (r < 0) return -1;
+			out->client_nonce = od;
+			out->client_nonce_len = odl;
+			off += comp_len;
 		} else {
-			/* Skip unknown optional component. */
 			r = rdp_ber_read_length(p + off + 1, len - off - 1,
 				&comp_len);
 			if (r < 0) return -1;

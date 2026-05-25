@@ -158,4 +158,17 @@ void ntlm_seal_key(int from_client_to_server,
 		const uint8_t exported_session_key[16],
 		uint8_t out_key[16]);
 
+void ntlm_sign_key(int from_client_to_server,
+		const uint8_t exported_session_key[16],
+		uint8_t out_key[16]);
+
+/* NTLM SEAL: encrypt + sign a message. Output is 16-byte signature
+ * followed by the encrypted message. Returns total output length
+ * (16 + msg_len) or -1 on error. */
+ssize_t ntlm_seal_message(const uint8_t seal_key[16],
+		const uint8_t sign_key[16],
+		uint32_t seq_num,
+		const uint8_t *msg, size_t msg_len,
+		uint8_t *out, size_t out_cap);
+
 #endif /* RDP_NTLM_H */

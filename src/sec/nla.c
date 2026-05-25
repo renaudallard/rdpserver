@@ -52,6 +52,8 @@
 #include "../include/rdp_log.h"
 #include "../common/utf16.h"
 
+#include <openssl/evp.h>
+
 #include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
@@ -230,36 +232,75 @@ rdp_nla_server(struct rdp_tls *t,
 		return -1;
 	ntlm_seal_key(1, exported, cts_seal);
 
-	/* 5. Send pubKeyAuth -- encrypt server cert public key with
-	 * the NTLM seal key to prove we own the TLS certificate. */
+	/* Initialize the client-to-server RC4 state. The client's RC4
+	 * handle persists across messages, so we must advance ours past
+	 * the client's pubKeyAuth before we can decrypt authInfo. */
+	struct rdp_rc4 *cts_rc4 = rdp_rc4_new(cts_seal, 16);
+	if (cts_rc4 == NULL) return -1;
+	if (req.pub_key_auth != NULL && req.pub_key_auth_len > 16) {
+		uint8_t junk[2048];
+		size_t pka_msg_len = req.pub_key_auth_len - 16;
+		rdp_rc4_process(cts_rc4, req.pub_key_auth + 16, junk,
+		    pka_msg_len > sizeof junk ? sizeof junk : pka_msg_len);
+		rdp_rc4_process(cts_rc4, req.pub_key_auth + 4, junk, 8);
+	}
+
+	/* 5. Send pubKeyAuth -- NTLM-seal the server cert public key
+	 * to prove we own the TLS certificate. */
 	{
 		uint8_t pubkey[2048];
 		ssize_t pklen;
-		uint8_t stsc_seal[16];
-		struct rdp_rc4 *rc4;
+		uint8_t stsc_seal[16], stsc_sign[16];
+		uint8_t sealed[2048 + 16];
+		ssize_t sealed_len;
+		uint8_t msg_to_seal[2048];
+		size_t msg_len;
 
 		ntlm_seal_key(0, exported, stsc_seal);
+		ntlm_sign_key(0, exported, stsc_sign);
 		pklen = rdp_tls_get_server_pubkey(t, pubkey, sizeof pubkey);
 		if (pklen <= 0) {
 			rdp_warn("nla: cannot get server pubkey");
 			return -1;
 		}
-		if (req.version >= 5)
-			pubkey[0]++;
-		rc4 = rdp_rc4_new(stsc_seal, 16);
-		if (rc4 == NULL) return -1;
-		rdp_rc4_process(rc4, pubkey, pubkey, (size_t)pklen);
-		rdp_rc4_free(rc4);
+		if (req.version >= 5 && req.client_nonce != NULL
+		    && req.client_nonce_len >= 32) {
+			/* CredSSP v5+: seal SHA-256(magic + nonce + pubkey) */
+			static const uint8_t magic[] =
+				"CredSSP Server-To-Client Binding Hash";
+			EVP_MD_CTX *sha = EVP_MD_CTX_new();
+			unsigned int hlen = 32;
+			uint8_t hash[32];
+			if (sha == NULL) return -1;
+			EVP_DigestInit_ex(sha, EVP_sha256(), NULL);
+			EVP_DigestUpdate(sha, magic, sizeof magic);
+			EVP_DigestUpdate(sha, req.client_nonce,
+			    req.client_nonce_len);
+			EVP_DigestUpdate(sha, pubkey, (size_t)pklen);
+			EVP_DigestFinal_ex(sha, hash, &hlen);
+			EVP_MD_CTX_free(sha);
+			memcpy(msg_to_seal, hash, 32);
+			msg_len = 32;
+		} else {
+			/* CredSSP v2-4: seal pubkey with first byte + 1 */
+			memcpy(msg_to_seal, pubkey, (size_t)pklen);
+			msg_to_seal[0]++;
+			msg_len = (size_t)pklen;
+		}
+		sealed_len = ntlm_seal_message(stsc_seal, stsc_sign, 0,
+			msg_to_seal, msg_len, sealed, sizeof sealed);
+		if (sealed_len <= 0) return -1;
 
 		memset(&resp, 0, sizeof resp);
 		resp.version = req.version;
-		resp.pub_key_auth = pubkey;
-		resp.pub_key_auth_len = (size_t)pklen;
+		resp.pub_key_auth = sealed;
+		resp.pub_key_auth_len = (size_t)sealed_len;
 		bn = rdp_cssp_build(out_buf, sizeof out_buf, &resp);
 		if (bn <= 0) return -1;
 		if (rdp_tls_write_full(t, out_buf, (size_t)bn)
 		    != (ssize_t)bn) return -1;
 		explicit_bzero(stsc_seal, sizeof stsc_seal);
+		explicit_bzero(stsc_sign, sizeof stsc_sign);
 	}
 
 	/* 6. Read authInfo and decrypt. */
@@ -275,17 +316,28 @@ rdp_nla_server(struct rdp_tls *t,
 
 	{
 		uint8_t *decrypted;
-		size_t dec_len = req.auth_info_len;
+		size_t dec_len;
 		struct rdp_rc4 *rc4;
 		struct rdp_tscredentials tc;
 
+		if (req.auth_info_len < 16) {
+			rdp_warn("nla: authInfo too short");
+			return -1;
+		}
+		dec_len = req.auth_info_len - 16;
 		decrypted = malloc(dec_len);
-		if (decrypted == NULL) return -1;
+		if (decrypted == NULL) {
+			rdp_rc4_free(cts_rc4);
+			return -1;
+		}
 
-		rc4 = rdp_rc4_new(cts_seal, 16);
-		if (rc4 == NULL) { free(decrypted); return -1; }
-		rdp_rc4_process(rc4, req.auth_info, decrypted, dec_len);
-		rdp_rc4_free(rc4);
+		/* Decrypt using the persisted RC4 state (message first) */
+		rdp_rc4_process(cts_rc4, req.auth_info + 16, decrypted, dec_len);
+		{
+			uint8_t skip[8];
+			rdp_rc4_process(cts_rc4, req.auth_info + 4, skip, 8);
+		}
+		rdp_rc4_free(cts_rc4);
 
 		if (rdp_cssp_parse_tscredentials(decrypted, dec_len, &tc) != 0) {
 			rdp_warn("nla: TSCredentials parse failed");

@@ -57,6 +57,7 @@ struct rdp_tsrequest {
 	const uint8_t *nego_token;     size_t nego_token_len;
 	const uint8_t *auth_info;      size_t auth_info_len;
 	const uint8_t *pub_key_auth;   size_t pub_key_auth_len;
+	const uint8_t *client_nonce;   size_t client_nonce_len;
 };
 
 int rdp_cssp_parse(const uint8_t *p, size_t len,

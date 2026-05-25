@@ -386,3 +386,65 @@ ntlm_seal_key(int from_client_to_server,
 		EVP_MD_CTX_free(ctx);
 	}
 }
+
+void
+ntlm_sign_key(int from_client_to_server,
+		const uint8_t exported_session_key[16],
+		uint8_t out_key[16])
+{
+	static const char client_to_server[] =
+		"session key to client-to-server signing key magic constant";
+	static const char server_to_client[] =
+		"session key to server-to-client signing key magic constant";
+	const char *magic = from_client_to_server
+		? client_to_server : server_to_client;
+	uint8_t buf[16 + 64];
+	memcpy(buf, exported_session_key, 16);
+	memcpy(buf + 16, magic, strlen(magic) + 1);
+	{
+		EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+		unsigned int outlen = 16;
+		EVP_DigestInit_ex(ctx, EVP_md5(), NULL);
+		EVP_DigestUpdate(ctx, buf, 16 + strlen(magic) + 1);
+		EVP_DigestFinal_ex(ctx, out_key, &outlen);
+		EVP_MD_CTX_free(ctx);
+	}
+}
+
+ssize_t
+ntlm_seal_message(const uint8_t seal_key[16],
+		const uint8_t sign_key[16],
+		uint32_t seq_num,
+		const uint8_t *msg, size_t msg_len,
+		uint8_t *out, size_t out_cap)
+{
+	uint8_t hmac_input[4 + 65536];
+	uint8_t hmac_out[16];
+	struct rdp_rc4 *rc4;
+
+	if (out_cap < 16 + msg_len || msg_len > 65536) return -1;
+
+	hmac_input[0] = (uint8_t)(seq_num & 0xff);
+	hmac_input[1] = (uint8_t)((seq_num >> 8) & 0xff);
+	hmac_input[2] = (uint8_t)((seq_num >> 16) & 0xff);
+	hmac_input[3] = (uint8_t)((seq_num >> 24) & 0xff);
+	memcpy(hmac_input + 4, msg, msg_len);
+	if (rdp_hmac_md5(sign_key, 16, hmac_input, 4 + msg_len,
+		hmac_out) != 0) return -1;
+
+	rc4 = rdp_rc4_new(seal_key, 16);
+	if (rc4 == NULL) return -1;
+
+	/* Per MS-NLMP 3.4.4: encrypt message FIRST, then checksum */
+	rdp_rc4_process(rc4, msg, out + 16, msg_len);
+
+	/* Signature: version(4) + encrypted_checksum(8) + seq_num(4) */
+	out[0] = 0x01; out[1] = 0x00; out[2] = 0x00; out[3] = 0x00;
+	rdp_rc4_process(rc4, hmac_out, out + 4, 8);
+	out[12] = (uint8_t)(seq_num & 0xff);
+	out[13] = (uint8_t)((seq_num >> 8) & 0xff);
+	out[14] = (uint8_t)((seq_num >> 16) & 0xff);
+	out[15] = (uint8_t)((seq_num >> 24) & 0xff);
+	rdp_rc4_free(rc4);
+	return (ssize_t)(16 + msg_len);
+}
