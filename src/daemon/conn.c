@@ -71,6 +71,8 @@
 #include "../channels/cliprdr.h"
 #include "../channels/drdynvc.h"
 #include "../sec/nla.h"
+#include "../sec/nla_crypto.h"
+#include "../common/str.h"
 #include "sandbox.h"
 #include "../channels/rdpdr.h"
 #include "../channels/rdpsnd.h"
@@ -1754,6 +1756,17 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 			peer, (unsigned)client_info.arc_logon_id);
 		if (rdp_sessmgr_resume(cfg->sessmgr_sock,
 			client_info.arc_logon_id, &be_fd, stored_arc) == 0) {
+			uint8_t expected_verifier[16];
+			rdp_hmac_md5(stored_arc, 16,
+				client_info.arc_security_verifier, 16,
+				expected_verifier);
+			if (rdp_consttime_eq(expected_verifier,
+			    client_info.arc_security_verifier, 16) != 0) {
+				rdp_warn("conn[%s]: ARC verifier mismatch",
+					peer);
+				(void)close(be_fd);
+				goto done;
+			}
 			rdp_info("conn[%s]: resumed backend fd %d",
 				peer, be_fd);
 			/* Generate a fresh ARC cookie for the next
