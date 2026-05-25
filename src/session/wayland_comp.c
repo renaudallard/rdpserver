@@ -334,6 +334,18 @@ rdp_wl_comp_inject_pointer(struct rdp_wl_comp *c,
 		    BTN_RIGHT, WL_POINTER_BUTTON_STATE_PRESSED);
 }
 
+int
+rdp_wl_comp_is_dirty(struct rdp_wl_comp *c)
+{
+	return c != NULL && c->fb_dirty;
+}
+
+void
+rdp_wl_comp_clear_dirty(struct rdp_wl_comp *c)
+{
+	if (c != NULL) c->fb_dirty = 0;
+}
+
 void
 rdp_wl_comp_resize(struct rdp_wl_comp *c, int w, int h)
 {
@@ -384,6 +396,8 @@ void rdp_wl_comp_inject_key(struct rdp_wl_comp *c, uint32_t k, int p)
 void rdp_wl_comp_inject_pointer(struct rdp_wl_comp *c,
     int x, int y, uint32_t b, int m)
 { (void)c; (void)x; (void)y; (void)b; (void)m; }
+int rdp_wl_comp_is_dirty(struct rdp_wl_comp *c) { (void)c; return 0; }
+void rdp_wl_comp_clear_dirty(struct rdp_wl_comp *c) { (void)c; }
 void rdp_wl_comp_resize(struct rdp_wl_comp *c, int w, int h)
 { (void)c; (void)w; (void)h; }
 void rdp_wl_comp_destroy(struct rdp_wl_comp *c) { (void)c; }

@@ -42,6 +42,8 @@ void rdp_wl_comp_inject_key(struct rdp_wl_comp *c,
     uint32_t keycode, int pressed);
 void rdp_wl_comp_inject_pointer(struct rdp_wl_comp *c,
     int x, int y, uint32_t buttons, int motion);
+int rdp_wl_comp_is_dirty(struct rdp_wl_comp *c);
+void rdp_wl_comp_clear_dirty(struct rdp_wl_comp *c);
 void rdp_wl_comp_resize(struct rdp_wl_comp *c, int w, int h);
 void rdp_wl_comp_destroy(struct rdp_wl_comp *c);
 

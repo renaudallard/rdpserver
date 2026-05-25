@@ -71,6 +71,7 @@
 #include "../channels/cliprdr.h"
 #include "../channels/drdynvc.h"
 #include "../sec/nla.h"
+#include "sandbox.h"
 #include "../channels/rdpdr.h"
 #include "../channels/rdpsnd.h"
 #include "../channels/rdpgfx.h"

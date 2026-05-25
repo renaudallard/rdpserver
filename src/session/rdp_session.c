@@ -60,6 +60,7 @@
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#include <X11/extensions/Xdamage.h>
 #include <X11/extensions/XShm.h>
 #include <X11/extensions/XTest.h>
 
@@ -867,9 +868,10 @@ run_wayland_mode(int w, int h)
 			}
 		}
 
-		{
+		if (rdp_wl_comp_is_dirty(wl)) {
 			uint8_t *pixels;
 			int fw, fh, fstride;
+			rdp_wl_comp_clear_dirty(wl);
 			if (rdp_wl_comp_get_framebuffer(wl, &pixels,
 			    &fw, &fh, &fstride) == 0) {
 				struct rdp_be_frame_hdr fhdr;
