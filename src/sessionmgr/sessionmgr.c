@@ -508,6 +508,7 @@ auto_suspend(int be_fd)
 	suspended[slot].logon_id = logon_id;
 	suspended[slot].be_fd = be_fd;
 	suspended[slot].suspended_at = time(NULL);
+	memset(suspended[slot].arc_random, 0, sizeof suspended[slot].arc_random);
 	rdp_info("auto-suspend: logonId %u in slot %d (worker died)",
 		(unsigned)logon_id, slot);
 }
