@@ -1779,10 +1779,6 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 				run_proxy(t, be_fd, &clip, &dynvc, &snd,
 					&devr, user_id, io_channel,
 					desktop_w, desktop_h, peer);
-				if (cfg->sessmgr_sock != NULL
-				    && rdp_sessmgr_suspend(cfg->sessmgr_sock,
-					0, be_fd) == 0)
-					rdp_info("conn[%s]: session suspended", peer);
 				(void)close(be_fd);
 				goto done;
 			}
