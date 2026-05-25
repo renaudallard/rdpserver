@@ -44,6 +44,7 @@
 
 #include <sys/types.h>
 #include <stddef.h>
+#include <stdint.h>
 
 struct rdp_tls;
 struct rdp_tls_ctx;
@@ -80,5 +81,9 @@ ssize_t rdp_tls_write_full(struct rdp_tls *t, const void *buf, size_t n);
 int rdp_tls_fd(const struct rdp_tls *t);
 
 void rdp_tls_close(struct rdp_tls *t);
+
+/* Extract the server certificate's DER-encoded SubjectPublicKeyInfo.
+ * Returns bytes written to out, or -1. */
+ssize_t rdp_tls_get_server_pubkey(struct rdp_tls *t, uint8_t *out, size_t cap);
 
 #endif /* RDP_TLS_H */

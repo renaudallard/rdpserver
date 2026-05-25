@@ -230,17 +230,36 @@ rdp_nla_server(struct rdp_tls *t,
 		return -1;
 	ntlm_seal_key(1, exported, cts_seal);
 
-	/* 5. Send pubKeyAuth (stub - not channel-bound). */
+	/* 5. Send pubKeyAuth -- encrypt server cert public key with
+	 * the NTLM seal key to prove we own the TLS certificate. */
 	{
-		uint8_t stub_pka[16] = {0};
+		uint8_t pubkey[2048];
+		ssize_t pklen;
+		uint8_t stsc_seal[16];
+		struct rdp_rc4 *rc4;
+
+		ntlm_seal_key(0, exported, stsc_seal);
+		pklen = rdp_tls_get_server_pubkey(t, pubkey, sizeof pubkey);
+		if (pklen <= 0) {
+			rdp_warn("nla: cannot get server pubkey");
+			return -1;
+		}
+		if (req.version >= 5)
+			pubkey[0]++;
+		rc4 = rdp_rc4_new(stsc_seal, 16);
+		if (rc4 == NULL) return -1;
+		rdp_rc4_process(rc4, pubkey, pubkey, (size_t)pklen);
+		rdp_rc4_free(rc4);
+
 		memset(&resp, 0, sizeof resp);
 		resp.version = req.version;
-		resp.pub_key_auth = stub_pka;
-		resp.pub_key_auth_len = sizeof stub_pka;
+		resp.pub_key_auth = pubkey;
+		resp.pub_key_auth_len = (size_t)pklen;
 		bn = rdp_cssp_build(out_buf, sizeof out_buf, &resp);
 		if (bn <= 0) return -1;
 		if (rdp_tls_write_full(t, out_buf, (size_t)bn)
 		    != (ssize_t)bn) return -1;
+		explicit_bzero(stsc_seal, sizeof stsc_seal);
 	}
 
 	/* 6. Read authInfo and decrypt. */

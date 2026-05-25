@@ -324,6 +324,24 @@ rdp_tls_fd(const struct rdp_tls *t)
 	return t->fd;
 }
 
+ssize_t
+rdp_tls_get_server_pubkey(struct rdp_tls *t, uint8_t *out, size_t cap)
+{
+	X509 *cert;
+	unsigned char *der = NULL;
+	int len;
+
+	if (t == NULL || t->ssl == NULL) return -1;
+	cert = SSL_get_certificate(t->ssl);
+	if (cert == NULL) return -1;
+	len = i2d_X509_PUBKEY(X509_get_X509_PUBKEY(cert), &der);
+	if (len <= 0 || der == NULL) return -1;
+	if ((size_t)len > cap) { OPENSSL_free(der); return -1; }
+	memcpy(out, der, (size_t)len);
+	OPENSSL_free(der);
+	return (ssize_t)len;
+}
+
 void
 rdp_tls_close(struct rdp_tls *t)
 {
