@@ -1414,7 +1414,9 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 	{
 		uint32_t selected = RDP_PROTO_SSL;
 		if (cr.have_neg_req
-		    && (cr.requested_protocols & RDP_PROTO_HYBRID))
+		    && (cr.requested_protocols & RDP_PROTO_HYBRID)
+		    && cfg->sessmgr_sock != NULL
+		    && cfg->sessmgr_sock[0] != '\0')
 			selected = RDP_PROTO_HYBRID;
 		ssize_t cc = rdp_x224_build_cc(scratch + 4, sizeof scratch - 4,
 			0, selected, 0);

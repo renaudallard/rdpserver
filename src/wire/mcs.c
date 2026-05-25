@@ -382,8 +382,6 @@ rdp_mcs_build_connect_response(uint8_t *out, size_t cap,
 		start = rdp_buf_used(&sb);
 		if (rdp_buf_put_u32le(&sb, r->encryption_method) != 0) return -1;
 		if (rdp_buf_put_u32le(&sb, r->encryption_level) != 0) return -1;
-		if (rdp_buf_put_u32le(&sb, 0) != 0) return -1;  /* serverRandomLen */
-		if (rdp_buf_put_u32le(&sb, 0) != 0) return -1;  /* serverCertLen */
 		hdr[0] = RDP_SC_SECURITY & 0xff;
 		hdr[1] = (RDP_SC_SECURITY >> 8) & 0xff;
 		{
