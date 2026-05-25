@@ -206,13 +206,17 @@ rdp_tls_ensure_selfsigned(const char *cert_path, const char *key_path,
 	}
 	(void)chmod(cert_path, 0644);
 
-	bkey = BIO_new_file(key_path, "w");
-	if (bkey == NULL || !PEM_write_bio_PrivateKey(bkey, pk,
+	{
+		int kfd = open(key_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+		if (kfd < 0) { tls_log_err("open key"); goto out; }
+		bkey = BIO_new_fd(kfd, BIO_CLOSE);
+		if (bkey == NULL) { close(kfd); goto out; }
+	}
+	if (!PEM_write_bio_PrivateKey(bkey, pk,
 			NULL, NULL, 0, NULL, NULL)) {
 		tls_log_err("write key");
 		goto out;
 	}
-	(void)chmod(key_path, 0600);
 
 	rc = 0;
 out:
