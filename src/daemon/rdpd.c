@@ -44,6 +44,7 @@
 #include "../common/io.h"
 #include "../sec/tls.h"
 #include "conn.h"
+#include "sandbox.h"
 
 #include <sys/socket.h>
 #include <sys/wait.h>
@@ -242,9 +243,9 @@ main(int argc, char *argv[])
 			 * the AF_UNIX socket to sessmgr, and writing tmp/
 			 * cert files isn't its job (already done by the
 			 * listener).  On non-OpenBSD this is a no-op. */
-			/* pledge disabled for debugging */
-			/* if (pledge("stdio inet unix", NULL) != 0)
-				rdp_warn("pledge worker: %s", strerror(errno)); */
+			if (pledge("stdio inet unix rpath", NULL) != 0)
+				rdp_warn("pledge worker: %s", strerror(errno));
+			rdp_sandbox_worker();
 			rdp_conn_run(cfd, &ccfg, peer);
 			rdp_tls_ctx_free(tls);
 			rdp_log_close();
