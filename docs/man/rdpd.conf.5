@@ -1,22 +1,82 @@
 .\" Manual page for rdpd.conf(5).  mdoc format.
-.Dd May 23, 2026
+.Dd May 25, 2026
 .Dt RDPD.CONF 5
 .Os
 .Sh NAME
 .Nm rdpd.conf
 .Nd configuration file for the Remote Desktop Protocol server
 .Sh DESCRIPTION
+There is no configuration file yet.
+All options are passed as command-line flags to
+.Xr rdpd 8
+and
+.Xr rdp-sessionmgr 8 .
+.Pp
 .Nm
-will hold the runtime configuration for
+will eventually hold the runtime configuration for
 .Xr rdpd 8 :
 listen address, TLS certificate path, allowed authentication
 backends, channel allow-list, session command, and per-user limits.
 .Pp
-The grammar is not yet defined.  This page exists so the daemon's
-release tooling can reference it.
-.Sh SEE ALSO
+The current command-line flags for
 .Xr rdpd 8
+are:
+.Bl -tag -width Ds
+.It Fl A
+Enable auto-login (skip greeter, use Client Info credentials).
+.It Fl d
+Enable debug logging.
+.It Fl f
+Run in the foreground; log to stderr.
+.It Fl h Ar host
+Bind address (default: all).
+.It Fl p Ar port
+Listen port (default 3389).
+.It Fl S Ar socket
+Path to the
+.Xr rdp-sessionmgr 8
+AF_UNIX socket.
+.El
+.Pp
+The current command-line flags for
+.Xr rdp-sessionmgr 8
+are:
+.Bl -tag -width Ds
+.It Fl d
+Enable debug logging.
+.It Fl f
+Run in the foreground; log to stderr.
+.It Fl s Ar path
+Listen socket path (default
+.Pa /var/run/rdpserver/sessmgr.sock ) .
+.It Fl u Ar user
+Drop privileges to this user after bind.
+.It Fl S Ar name
+PAM service name (default
+.Ql login ) .
+.It Fl X Ar path
+Path to the
+.Xr rdp-session 8
+binary (default
+.Pa /usr/local/sbin/rdp-session ) .
+.El
+.Pp
+The current command-line flags for
+.Xr rdp-session 8
+are:
+.Bl -tag -width Ds
+.It Fl D
+Use the native Xorg DDX driver instead of Xvfb.
+.It Fl W
+Use the Wayland compositor instead of X11.
+.It Fl w Ar width
+Desktop width (default 1024).
+.It Fl H Ar height
+Desktop height (default 768).
+.El
+.Sh SEE ALSO
+.Xr rdpd 8 ,
+.Xr rdp-sessionmgr 8 ,
+.Xr rdp-session 8
 .Sh AUTHORS
 .An Renaud Allard Aq Mt renaud@allard.it
-.Sh BUGS
-Not implemented in Phase 0.

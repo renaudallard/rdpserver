@@ -1,5 +1,5 @@
 .\" Manual page for rdpd(8).  mdoc format.
-.Dd May 23, 2026
+.Dd May 25, 2026
 .Dt RDPD 8
 .Os
 .Sh NAME
@@ -7,29 +7,46 @@
 .Nd Remote Desktop Protocol server
 .Sh SYNOPSIS
 .Nm
-.Op Fl df
+.Op Fl Adf
 .Op Fl h Ar host
 .Op Fl p Ar port
+.Op Fl S Ar socket
 .Sh DESCRIPTION
 .Nm
 is the Remote Desktop Protocol server.  It listens for incoming RDP
 connections, presents a graphical login screen drawn directly with
-RDP drawing orders, authenticates the user, and spawns a fresh
-per-user X11 session.  The server speaks RDP natively; there is no
-VNC in the stack.
+RDP drawing orders, authenticates the user via
+.Xr rdp-sessionmgr 8 ,
+and spawns a fresh per-user X11 session.  The server speaks RDP
+natively; there is no VNC in the stack.
 .Pp
-This is the
-.Sy Phase A
-release: the daemon completes the full RDP handshake (TPKT, X.224,
-TLS, MCS, license, capability negotiation, finalization) and paints
-a solid background.  The login greeter, PAM session spawning, X11
-session helper, clipboard channel, and NLA are scaffolded but not
-yet implemented; see
-.Pa docs/ROADMAP.md
-in the source tree.
+The daemon implements the full RDP handshake (TPKT, X.224, TLS, MCS,
+license, capability negotiation, finalization) and supports
+Network Level Authentication
+.Pq NLA
+via the
+.Sy PROTOCOL_HYBRID
+security mode (CredSSP with NTLMv2).
+Clients negotiating NLA are authenticated before any session is created.
+.Pp
+Graphical output is sent as H.264 / AVC420 frames over the
+.Sy RDPGFX
+(Graphics Pipeline) dynamic virtual channel when the client supports
+it, falling back to fast-path bitmap updates otherwise.
+Audio from the session is forwarded to the client via the
+.Sy RDPSND
+channel (PCM 16-bit stereo, 44.1 kHz).
+Client drive, printer, and serial device redirection is handled by the
+.Sy RDPDR
+channel.
+Multi-monitor layouts are parsed from the GCC CS_MONITOR block, and
+dynamic resize is supported via the RDPEDISP Display Control Channel.
 .Pp
 The options are as follows:
 .Bl -tag -width Ds
+.It Fl A
+Enable auto-login mode.  Credentials from the Client Info PDU are
+used directly for authentication; the built-in greeter is skipped.
 .It Fl d
 Enable debug logging.
 .It Fl f
@@ -43,13 +60,19 @@ instead of all addresses.
 Listen on
 .Ar port
 instead of 3389.
+.It Fl S Ar socket
+Path to the
+.Xr rdp-sessionmgr 8
+AF_UNIX socket.
+When omitted, the built-in stub authenticator accepts any non-empty
+username/password pair.
 .El
 .Sh FILES
 .Bl -tag -width Ds
 .It Pa /etc/rdpd.conf
 Configuration file (see
 .Xr rdpd.conf 5 ;
-not yet honoured in this release).
+not yet honoured).
 .El
 .Sh EXIT STATUS
 .Ex -std
@@ -59,6 +82,3 @@ not yet honoured in this release).
 .Xr rdp-session 8
 .Sh AUTHORS
 .An Renaud Allard Aq Mt renaud@allard.it
-.Sh BUGS
-Phase 0 is the protocol skeleton only; it does not yet accept the RDP
-handshake.  See the project roadmap.

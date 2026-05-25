@@ -1,5 +1,5 @@
 .\" Manual page for rdp-sessionmgr(8).  mdoc format.
-.Dd May 23, 2026
+.Dd May 25, 2026
 .Dt RDP-SESSIONMGR 8
 .Os
 .Sh NAME
@@ -7,6 +7,11 @@
 .Nd privileged session broker for the Remote Desktop Protocol server
 .Sh SYNOPSIS
 .Nm
+.Op Fl df
+.Op Fl s Ar path
+.Op Fl u Ar user
+.Op Fl S Ar service
+.Op Fl X Ar path
 .Sh DESCRIPTION
 .Nm
 is the privileged half of
@@ -22,11 +27,58 @@ allocates the per-user runtime directory, and forks the
 .Xr rdp-session 8
 helper as the target user.
 .Pp
-Phase 0 placeholder; not yet implemented.
+When a client disconnects, the
+.Xr rdpd 8
+worker sends a
+.Sy SUSPEND
+request carrying the backend file descriptor via
+.Dv SCM_RIGHTS .
+.Nm
+stores the descriptor in a suspend slot tagged with the session's
+logon ID.  When a new worker presents a
+.Sy RESUME
+request with a matching logon ID, the stored descriptor is returned
+so the session continues without restarting.
+.Pp
+If the worker process dies before issuing
+.Sy SUSPEND ,
+.Nm
+automatically suspends the session using the retained copy of the
+backend descriptor.
+Dead descriptors are validated by
+.Xr poll 2
+at resume time and reaped by a periodic sweep.
+Suspended sessions expire after 120 seconds.
+.Pp
+The options are as follows:
+.Bl -tag -width Ds
+.It Fl d
+Enable debug logging.
+.It Fl f
+Run in the foreground and log to standard error instead of
+.Xr syslog 3 .
+.It Fl s Ar path
+Listen socket path.
+The default is
+.Pa /var/run/rdpserver/sessmgr.sock .
+.It Fl u Ar user
+Drop privileges to this user after binding the socket.
+Only safe when
+.Sy SPAWN
+is not used.
+.It Fl S Ar service
+PAM service name.
+The default is
+.Ql login .
+.It Fl X Ar path
+Path to the
+.Xr rdp-session 8
+binary.
+The default is
+.Pa /usr/local/sbin/rdp-session .
+.El
 .Sh SEE ALSO
 .Xr rdpd 8 ,
 .Xr rdp-session 8
 .Sh AUTHORS
 .An Renaud Allard Aq Mt renaud@allard.it
-.Sh BUGS
-Not implemented in Phase 0.

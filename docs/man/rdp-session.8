@@ -1,5 +1,5 @@
 .\" Manual page for rdp-session(8).  mdoc format.
-.Dd May 23, 2026
+.Dd May 25, 2026
 .Dt RDP-SESSION 8
 .Os
 .Sh NAME
@@ -7,27 +7,62 @@
 .Nd per-user session helper for the Remote Desktop Protocol server
 .Sh SYNOPSIS
 .Nm
+.Op Fl DW
+.Op Fl w Ar width
+.Op Fl H Ar height
 .Sh DESCRIPTION
 .Nm
 is the unprivileged per-user component of the Remote Desktop
 Protocol server.  It is started by
 .Xr rdp-sessionmgr 8
 after authentication, with one end of a backend RPC socket pre-opened
-on a known file descriptor.  It launches
-.Xr Xvfb 1
-(or the configured X server), captures damaged regions with
-.Xr XDamage 3 ,
-injects input via the XTEST extension, bridges the X11 CLIPBOARD
-selection to the
+on file descriptor 3.  By default it launches
+.Xr Xvfb 1 ,
+captures damaged regions with the XDamage extension, injects input
+via the XTEST extension, and bridges the X11 CLIPBOARD selection
+to the
 .Sy CLIPRDR
-RDP channel, and runs the user's session script
-.Pa ~/.xsession .
+RDP channel.
 .Pp
-Phase 0 placeholder; not yet implemented.
+Audio from applications in the session is captured and forwarded to
+the RDP client via the backend protocol.
+The audio capture backend is selected at compile time:
+.Bl -bullet -compact
+.It
+PulseAudio on Linux (auto-creates a per-session null sink).
+.It
+.Xr sndio 7
+on
+.Ox .
+.It
+CoreAudio on macOS.
+.El
+.Pp
+The options are as follows:
+.Bl -tag -width Ds
+.It Fl D
+Use the native Xorg DDX driver
+.Pq rdpserverdev_drv.so
+instead of Xvfb.
+The DDX driver renders directly to a POSIX shared memory framebuffer
+and reports damage via a control socket, sending only changed regions
+to
+.Xr rdpd 8 .
+.It Fl W
+Use the Wayland compositor instead of X11.
+Requires
+.Sy libwlroots
+0.18 or later.
+Wayland-native clients connect to the embedded compositor directly.
+.It Fl w Ar width
+Desktop width in pixels.
+The default is 1024.
+.It Fl H Ar height
+Desktop height in pixels.
+The default is 768.
+.El
 .Sh SEE ALSO
 .Xr rdpd 8 ,
 .Xr rdp-sessionmgr 8
 .Sh AUTHORS
 .An Renaud Allard Aq Mt renaud@allard.it
-.Sh BUGS
-Not implemented in Phase 0.
