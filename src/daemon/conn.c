@@ -1243,13 +1243,33 @@ run_proxy(struct rdp_tls *t, int be_fd,
 				uint32_t path_len;
 				if (rdp_read_full(be_fd, &freq,
 				    sizeof freq) != sizeof freq) goto out;
-				path_len = len - (uint32_t)sizeof freq;
-				if (path_len > sizeof path - 1)
-					path_len = sizeof path - 1;
-				if (path_len > 0 && rdp_read_full(be_fd,
-				    path, path_len) != (ssize_t)path_len)
-					goto out;
-				path[path_len] = '\0';
+				{
+					uint32_t total_path = len
+					    - (uint32_t)sizeof freq;
+					path_len = total_path;
+					if (path_len > sizeof path - 1)
+						path_len = sizeof path - 1;
+					if (path_len > 0
+					    && rdp_read_full(be_fd, path,
+					    path_len) != (ssize_t)path_len)
+						goto out;
+					path[path_len] = '\0';
+					if (total_path > path_len) {
+						uint8_t junk[256];
+						uint32_t skip = total_path
+						    - path_len;
+						while (skip > 0) {
+							uint32_t c = skip
+							    > sizeof junk
+							    ? sizeof junk
+							    : skip;
+							if (rdp_read_full(
+							    be_fd, junk, c)
+							    <= 0) goto out;
+							skip -= c;
+						}
+					}
+				}
 				{
 					uint8_t irp[2048];
 					ssize_t in;
@@ -1724,7 +1744,11 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 
 	/* Check for auto-reconnect cookie.  If the client presented one
 	 * and the sessmgr still holds the suspended backend, skip the
-	 * greeter entirely and resume the existing session. */
+	 * greeter entirely and resume the existing session.
+	 * NOTE: we match only on logon_id (32-bit random) + sessmgr
+	 * rate-limiting.  Full ARC verifier check (HMAC-MD5 of
+	 * arc_random) would require sessmgr to store arc_random per
+	 * suspended session; deferred for now. */
 	if (client_info.have_arc
 	    && cfg->sessmgr_sock != NULL && cfg->sessmgr_sock[0] != '\0') {
 		int be_fd = -1;
