@@ -43,7 +43,6 @@
  *   - read INPUT messages from the worker and inject via XTest
  *
  * Tradeoffs (everything below the line is Phase F v2 work):
- *   - no XDamage; we always push the whole frame
  *   - no cursor sync (server-rendered system cursor only)
  *   - no clipboard bridge yet (Phase G)
  *   - keystroke mapping is scancode+8 (works for US-layout Xvfb)
@@ -943,6 +942,8 @@ main(int argc, char *argv[])
 	uint8_t *frame_buf;
 	struct timespec last_send = {0, 0};
 	struct rdp_log_cfg lc;
+	Damage dmg = None;
+	int damage_event = 0, damage_error = 0, dirty = 1;
 
 	while ((opt = getopt(argc, argv, "DWw:H:?")) != -1) {
 		switch (opt) {
@@ -1026,6 +1027,14 @@ main(int argc, char *argv[])
 		XCloseDisplay(dpy);
 		(void)kill(xvfb_pid, SIGTERM);
 		return 1;
+	}
+
+	if (XDamageQueryExtension(dpy, &damage_event, &damage_error)) {
+		dmg = XDamageCreate(dpy, DefaultRootWindow(dpy),
+		    XDamageReportRawRectangles);
+		rdp_info("XDamage tracking enabled");
+	} else {
+		rdp_info("XDamage unavailable; full-frame capture");
 	}
 
 	struct rdp_clip clip;
@@ -1127,6 +1136,13 @@ main(int argc, char *argv[])
 					(void)system(cmd);
 					capture_close(&cap);
 					(void)capture_init(&cap, dpy, w, h);
+					if (dmg != None) {
+						XDamageDestroy(dpy, dmg);
+						dmg = XDamageCreate(dpy,
+						    DefaultRootWindow(dpy),
+						    XDamageReportRawRectangles);
+					}
+					dirty = 1;
 					free(frame_buf);
 					frame_buf = malloc((size_t)w * h * 3);
 					if (frame_buf == NULL) break;
@@ -1139,7 +1155,10 @@ main(int argc, char *argv[])
 			while (XPending(dpy) > 0) {
 				XEvent ev;
 				XNextEvent(dpy, &ev);
-				if (clip_ok)
+				if (dmg != None
+				    && ev.type == damage_event + XDamageNotify)
+					dirty = 1;
+				else if (clip_ok)
 					(void)rdp_clip_handle_xevent(&clip, &ev);
 			}
 		}
@@ -1147,11 +1166,14 @@ main(int argc, char *argv[])
 		(void)clock_gettime(CLOCK_MONOTONIC, &now);
 		elapsed_ms = (now.tv_sec - last_send.tv_sec) * 1000
 			+ (now.tv_nsec - last_send.tv_nsec) / 1000000;
-		if (elapsed_ms >= FRAME_INTERVAL_MS) {
+		if (elapsed_ms >= FRAME_INTERVAL_MS && dirty) {
 			if (capture_grab(&cap, frame_buf) == 0) {
 				if (send_frame(BE_FD, w, h, frame_buf) != 0)
 					break;
 			}
+			if (dmg != None)
+				XDamageSubtract(dpy, dmg, None, None);
+			dirty = 0;
 			last_send = now;
 		}
 		if (audio != NULL && audio_buf != NULL) {
@@ -1167,6 +1189,7 @@ main(int argc, char *argv[])
 	free(audio_buf);
 	if (clip_ok) rdp_clip_close(&clip);
 	free(frame_buf);
+	if (dmg != None) XDamageDestroy(dpy, dmg);
 	capture_close(&cap);
 	XCloseDisplay(dpy);
 	if (xterm_pid > 0) (void)kill(xterm_pid, SIGTERM);
