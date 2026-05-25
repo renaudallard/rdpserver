@@ -1032,7 +1032,10 @@ main(int argc, char *argv[])
 	if (XDamageQueryExtension(dpy, &damage_event, &damage_error)) {
 		dmg = XDamageCreate(dpy, DefaultRootWindow(dpy),
 		    XDamageReportRawRectangles);
-		rdp_info("XDamage tracking enabled");
+		if (dmg != None)
+			rdp_info("XDamage tracking enabled");
+		else
+			rdp_info("XDamageCreate failed; full-frame capture");
 	} else {
 		rdp_info("XDamage unavailable; full-frame capture");
 	}
@@ -1171,9 +1174,10 @@ main(int argc, char *argv[])
 				if (send_frame(BE_FD, w, h, frame_buf) != 0)
 					break;
 			}
-			if (dmg != None)
+			if (dmg != None) {
 				XDamageSubtract(dpy, dmg, None, None);
-			dirty = 0;
+				dirty = 0;
+			}
 			last_send = now;
 		}
 		if (audio != NULL && audio_buf != NULL) {
