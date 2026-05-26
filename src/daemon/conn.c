@@ -1156,7 +1156,7 @@ run_proxy(struct rdp_tls *t, int be_fd,
 				}
 				if (r == 4 && !gfx.active
 				    && dv->dv.gfx_channel_id >= 0
-				    && h264 != NULL) {
+				    && 0 /* GFX disabled: mstsc rejects caps confirm */) {
 					/* GFX caps received; init the pipeline. */
 					uint8_t gbuf[512];
 					ssize_t gn;
