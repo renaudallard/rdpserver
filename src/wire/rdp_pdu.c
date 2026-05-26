@@ -255,3 +255,41 @@ rdp_pdu_build_save_session_info_arc(uint8_t *out, size_t cap,
 	if (rdp_buf_put(&b, arc_random, 16) != 0) return -1;
 	return (ssize_t)rdp_buf_used(&b);
 }
+
+ssize_t
+rdp_pdu_build_set_error_info(uint8_t *out, size_t cap,
+		uint16_t pdu_source, uint32_t share_id, uint32_t error_code)
+{
+	uint16_t total = 18 + 4;
+	ssize_t r;
+	struct rdp_buf b;
+
+	if (cap < total) return -1;
+	r = rdp_pdu_build_share_data(out, cap, pdu_source, share_id,
+		RDP_PDU2_SET_ERROR_INFO, total);
+	if (r < 0) return -1;
+	rdp_buf_init(&b, out + r, cap - (size_t)r);
+	if (rdp_buf_put_u32le(&b, error_code) != 0) return -1;
+	return total;
+}
+
+ssize_t
+rdp_pdu_build_save_session_logon(uint8_t *out, size_t cap,
+		uint16_t pdu_source, uint32_t share_id)
+{
+	uint16_t total = 18 + 4 + 576;
+	ssize_t r;
+	struct rdp_buf b;
+	uint8_t pad[576];
+
+	if (cap < total) return -1;
+	memset(pad, 0, sizeof pad);
+	r = rdp_pdu_build_share_data(out, cap, pdu_source, share_id,
+		RDP_PDU2_SAVE_SESSION_INFO, total);
+	if (r < 0) return -1;
+	rdp_buf_init(&b, out + r, cap - (size_t)r);
+	if (rdp_buf_put_u32le(&b, RDP_INFOTYPE_LOGON_PLAINNOTIFY) != 0)
+		return -1;
+	if (rdp_buf_put(&b, pad, sizeof pad) != 0) return -1;
+	return r + (ssize_t)rdp_buf_used(&b);
+}

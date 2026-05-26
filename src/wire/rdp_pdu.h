@@ -72,7 +72,8 @@
 #define RDP_PDU2_FONTMAP           40
 #define RDP_PDU2_SHUTDOWN_REQUEST  36
 #define RDP_PDU2_SHUTDOWN_DENIED   37
-#define RDP_PDU2_SAVE_SESSION_INFO 38
+#define RDP_PDU2_SAVE_SESSION_INFO  38
+#define RDP_PDU2_SET_ERROR_INFO     47
 
 #define RDP_INFOTYPE_LOGON              0
 #define RDP_INFOTYPE_LOGON_LONG         1
@@ -154,5 +155,11 @@ ssize_t rdp_pdu_build_deactivate_all(uint8_t *out, size_t cap,
 ssize_t rdp_pdu_build_save_session_info_arc(uint8_t *out, size_t cap,
 		uint16_t pdu_source, uint32_t share_id,
 		uint32_t logon_id, const uint8_t arc_random[16]);
+
+ssize_t rdp_pdu_build_set_error_info(uint8_t *out, size_t cap,
+		uint16_t pdu_source, uint32_t share_id, uint32_t error_code);
+
+ssize_t rdp_pdu_build_save_session_logon(uint8_t *out, size_t cap,
+		uint16_t pdu_source, uint32_t share_id);
 
 #endif /* RDP_PDU_H */
