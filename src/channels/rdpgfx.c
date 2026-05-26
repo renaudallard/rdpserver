@@ -90,9 +90,9 @@ rdp_rdpgfx_build_caps_confirm(uint8_t *out, size_t cap)
 	rdp_buf_init(&b, out, cap);
 	if (put_gfx_header(&b, RDPGFX_CMDID_CAPSCONFIRM,
 		RDPGFX_HEADER_SIZE + bodyLen) != 0) return -1;
-	if (rdp_buf_put_u32le(&b, RDPGFX_CAPVERSION_10) != 0) return -1;
+	if (rdp_buf_put_u32le(&b, 0x000A0701) != 0) return -1;
 	if (rdp_buf_put_u32le(&b, 4) != 0) return -1;
-	if (rdp_buf_put_u32le(&b, 0) != 0) return -1;
+	if (rdp_buf_put_u32le(&b, 0x00000002) != 0) return -1;
 	return (ssize_t)rdp_buf_used(&b);
 }
 
@@ -113,9 +113,11 @@ rdp_rdpgfx_build_reset(uint8_t *out, size_t cap,
 		return -1;
 	body[0] = w & 0xff; body[1] = (w >> 8) & 0xff;
 	body[4] = h & 0xff; body[5] = (h >> 8) & 0xff;
-	body[8] = 1;
+	body[8] = 1;  /* monitorCount */
+	/* monitor[0]: left=0, top=0, right=w-1, bottom=h-1, flags=1 (primary) */
 	body[20] = (w - 1) & 0xff; body[21] = ((w - 1) >> 8) & 0xff;
 	body[24] = (h - 1) & 0xff; body[25] = ((h - 1) >> 8) & 0xff;
+	body[28] = 1;  /* flags = TS_MONITOR_PRIMARY */
 	if (rdp_buf_put(&b, body, sizeof body) != 0) return -1;
 	return (ssize_t)rdp_buf_used(&b);
 }
@@ -133,24 +135,25 @@ rdp_rdpgfx_build_create_surface(uint8_t *out, size_t cap,
 	if (rdp_buf_put_u16le(&b, surface_id) != 0) return -1;
 	if (rdp_buf_put_u16le(&b, w) != 0) return -1;
 	if (rdp_buf_put_u16le(&b, h) != 0) return -1;
-	if (rdp_buf_put_u8(&b, RDPGFX_PIXELFORMAT_XRGB_8888) != 0) return -1;
+	if (rdp_buf_put_u8(&b, RDPGFX_PIXELFORMAT_ARGB_8888) != 0) return -1;
 	return (ssize_t)rdp_buf_used(&b);
 }
 
 ssize_t
 rdp_rdpgfx_build_map_surface(uint8_t *out, size_t cap,
-		uint16_t surface_id)
+		uint16_t surface_id, uint16_t w, uint16_t h)
 {
 	struct rdp_buf b;
-	uint32_t pduLen = RDPGFX_HEADER_SIZE + 12;
+	uint32_t pduLen = RDPGFX_HEADER_SIZE + 20;
 	if (cap < pduLen) return -1;
 	rdp_buf_init(&b, out, cap);
-	if (put_gfx_header(&b, RDPGFX_CMDID_MAPSURFACETOOUTPUT, pduLen) != 0)
-		return -1;
+	if (put_gfx_header(&b, 0x0017, pduLen) != 0) return -1;
 	if (rdp_buf_put_u16le(&b, surface_id) != 0) return -1;
 	if (rdp_buf_put_u16le(&b, 0) != 0) return -1;   /* reserved */
 	if (rdp_buf_put_u32le(&b, 0) != 0) return -1;   /* outputOriginX */
 	if (rdp_buf_put_u32le(&b, 0) != 0) return -1;   /* outputOriginY */
+	if (rdp_buf_put_u32le(&b, w) != 0) return -1;   /* targetWidth */
+	if (rdp_buf_put_u32le(&b, h) != 0) return -1;   /* targetHeight */
 	return (ssize_t)rdp_buf_used(&b);
 }
 
@@ -185,7 +188,7 @@ rdp_rdpgfx_build_avc420_frame(uint8_t *out, size_t cap,
 		(uint32_t)wire_len) != 0) return -1;
 	if (rdp_buf_put_u16le(&b, surface_id) != 0) return -1;
 	if (rdp_buf_put_u16le(&b, RDPGFX_CODECID_AVC420) != 0) return -1;
-	if (rdp_buf_put_u8(&b, RDPGFX_PIXELFORMAT_XRGB_8888) != 0) return -1;
+	if (rdp_buf_put_u8(&b, RDPGFX_PIXELFORMAT_ARGB_8888) != 0) return -1;
 	/* destRect: left=0, top=0, right=w, bottom=h */
 	if (rdp_buf_put_u16le(&b, 0) != 0) return -1;
 	if (rdp_buf_put_u16le(&b, 0) != 0) return -1;

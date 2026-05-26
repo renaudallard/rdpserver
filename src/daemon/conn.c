@@ -648,6 +648,15 @@ maybe_dispatch_clip(struct rdp_tls *t, int be_fd,
 				(void)send_clip_pdu(t, cs->user_id,
 					dv->channel_id, resp, resp_len);
 			}
+			if (rc == 5 && !dv->dv.gfx_create_pending
+			    && dv->dv.gfx_channel_id < 0) {
+				uint8_t gc[64];
+				ssize_t gn = rdp_drdynvc_build_create_gfx(
+					&dv->dv, gc, sizeof gc);
+				if (gn > 0)
+					(void)send_clip_pdu(t, cs->user_id,
+						dv->channel_id, gc, (size_t)gn);
+			}
 			if (rc == 2) return 2;
 			if (rc == 3 && gfx_data != NULL && gfx_len > 0) {
 				const uint8_t *gp = gfx_data;
@@ -1156,7 +1165,7 @@ run_proxy(struct rdp_tls *t, int be_fd,
 				}
 				if (r == 4 && !gfx.active
 				    && dv->dv.gfx_channel_id >= 0
-				    && 0 /* GFX disabled: mstsc rejects caps confirm */) {
+				    && 0 /* GFX disabled: mstsc closes channel; needs investigation */) {
 					/* GFX caps received; init the pipeline. */
 					uint8_t gbuf[512];
 					ssize_t gn;
@@ -1189,7 +1198,8 @@ run_proxy(struct rdp_tls *t, int be_fd,
 							gbuf, (size_t)gn);
 					gn = rdp_rdpgfx_build_map_surface(
 						gbuf, sizeof gbuf,
-						gfx.surface_id);
+						gfx.surface_id,
+						desktop_w, desktop_h);
 					if (gn > 0)
 						(void)send_gfx_pdu(t,
 							user_id,

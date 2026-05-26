@@ -83,7 +83,7 @@ ssize_t rdp_rdpgfx_build_create_surface(uint8_t *out, size_t cap,
 		uint16_t surface_id, uint16_t w, uint16_t h);
 
 ssize_t rdp_rdpgfx_build_map_surface(uint8_t *out, size_t cap,
-		uint16_t surface_id);
+		uint16_t surface_id, uint16_t w, uint16_t h);
 
 /* Build StartFrame + WireToSurface1 (AVC420) + EndFrame. */
 ssize_t rdp_rdpgfx_build_avc420_frame(uint8_t *out, size_t cap,

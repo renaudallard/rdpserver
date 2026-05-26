@@ -42,7 +42,7 @@ rdp_drdynvc_build_caps(uint8_t *out, size_t cap)
 	if (cap < 4) return -1;
 	out[0] = (DRDYNVC_CMD_CAPS << 4);  /* Cmd=5, Sp=0, cbId=0 */
 	out[1] = 0;                         /* pad */
-	out[2] = 1;                         /* version LE low */
+	out[2] = 2;                         /* version LE low */
 	out[3] = 0;                         /* version LE high */
 	return 4;
 }
@@ -96,11 +96,19 @@ rdp_drdynvc_handle(struct drdynvc_state *st,
 	cmd = (uint8_t)((hdr >> 4) & 0x0f);
 	cbId = (uint8_t)(hdr & 0x03);
 
+	rdp_debug("drdynvc: recv cmd=%u cbId=%u len=%zu hdr=%02x %02x %02x %02x",
+		cmd, cbId, len,
+		pdu[0], len>1?pdu[1]:0, len>2?pdu[2]:0, len>3?pdu[3]:0);
+
 	switch (cmd) {
-	case DRDYNVC_CMD_CAPS:
+	case DRDYNVC_CMD_CAPS: {
+		uint16_t cli_ver = 0;
+		if (len >= 4)
+			cli_ver = (uint16_t)pdu[2] | ((uint16_t)pdu[3] << 8);
 		st->caps_exchanged = 1;
-		rdp_debug("drdynvc: client caps received");
+		rdp_info("drdynvc: client caps ver=%u", cli_ver);
 		return 0;
+	}
 
 	case DRDYNVC_CMD_CREATE: {
 		uint32_t chan_id;
