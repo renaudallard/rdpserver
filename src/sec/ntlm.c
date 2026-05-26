@@ -121,7 +121,7 @@ ntlm_build_challenge(uint8_t *out, size_t cap,
 	uint32_t flags;
 	uint8_t  target_utf16[256];
 	size_t   target_utf16_len;
-	uint8_t  av_block[256];
+	uint8_t  av_block[560];
 	size_t   av_len = 0;
 	uint64_t timestamp;
 	size_t   total, payload_off;
@@ -159,16 +159,19 @@ ntlm_build_challenge(uint8_t *out, size_t cap,
 	 * timestamp, EOL. */
 	timestamp = ((uint64_t)time(NULL) + 11644473600ULL) * 10000000ULL;
 
+	if (av_len + 4 + target_utf16_len > sizeof av_block) return -1;
 	st_u16le(av_block + av_len, MSV_AV_NB_COMPUTER_NAME); av_len += 2;
 	st_u16le(av_block + av_len, (uint16_t)target_utf16_len); av_len += 2;
 	memcpy(av_block + av_len, target_utf16, target_utf16_len);
 	av_len += target_utf16_len;
 
+	if (av_len + 4 + target_utf16_len > sizeof av_block) return -1;
 	st_u16le(av_block + av_len, MSV_AV_NB_DOMAIN_NAME); av_len += 2;
 	st_u16le(av_block + av_len, (uint16_t)target_utf16_len); av_len += 2;
 	memcpy(av_block + av_len, target_utf16, target_utf16_len);
 	av_len += target_utf16_len;
 
+	if (av_len + 4 + 8 > sizeof av_block) return -1;
 	st_u16le(av_block + av_len, MSV_AV_TIMESTAMP); av_len += 2;
 	st_u16le(av_block + av_len, 8); av_len += 2;
 	{
@@ -179,6 +182,7 @@ ntlm_build_challenge(uint8_t *out, size_t cap,
 	}
 	av_len += 8;
 
+	if (av_len + 4 > sizeof av_block) return -1;
 	st_u16le(av_block + av_len, MSV_AV_EOL); av_len += 2;
 	st_u16le(av_block + av_len, 0); av_len += 2;
 
