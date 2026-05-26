@@ -90,7 +90,7 @@
 #include <sys/mman.h>
 
 #define BE_FD 3
-#define FRAME_INTERVAL_MS 200
+#define FRAME_INTERVAL_MS 33
 
 #ifndef RDP_XVFB_PATH
 # define RDP_XVFB_PATH "/usr/bin/Xvfb"
@@ -622,6 +622,30 @@ run_ddx_mode(int w, int h)
 		(void)snprintf(buf, sizeof buf, ":%d", display_num);
 		setenv("DISPLAY", buf, 1);
 	}
+
+	{
+		char rtdir[64];
+		(void)snprintf(rtdir, sizeof rtdir, "/run/user/%u",
+			(unsigned)getuid());
+		(void)mkdir(rtdir, 0700);
+		(void)setenv("XDG_RUNTIME_DIR", rtdir, 1);
+	}
+
+	/* Start PulseAudio with a null sink for audio capture. */
+	{
+		pid_t pa = fork();
+		if (pa == 0) {
+			execlp("pulseaudio", "pulseaudio",
+				"--start", "--exit-idle-time=-1",
+				(char *)NULL);
+			_exit(0);
+		}
+		if (pa > 0) {
+			int st;
+			(void)waitpid(pa, &st, 0);
+		}
+	}
+
 	xterm_pid = spawn_xterm();
 
 	row_buf = malloc((size_t)fb_w * 3);
