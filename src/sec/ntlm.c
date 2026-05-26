@@ -171,7 +171,12 @@ ntlm_build_challenge(uint8_t *out, size_t cap,
 
 	st_u16le(av_block + av_len, MSV_AV_TIMESTAMP); av_len += 2;
 	st_u16le(av_block + av_len, 8); av_len += 2;
-	memcpy(av_block + av_len, &timestamp, 8);
+	{
+		int i;
+		for (i = 0; i < 8; i++)
+			av_block[av_len + i] =
+				(uint8_t)(timestamp >> (i * 8));
+	}
 	av_len += 8;
 
 	st_u16le(av_block + av_len, MSV_AV_EOL); av_len += 2;
