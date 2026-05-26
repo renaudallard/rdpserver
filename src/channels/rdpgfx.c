@@ -71,7 +71,7 @@ rdp_rdpgfx_build_caps_confirm(uint8_t *out, size_t cap)
 		RDPGFX_HEADER_SIZE + bodyLen) != 0) return -1;
 	if (rdp_buf_put_u32le(&b, RDPGFX_CAPVERSION_81) != 0) return -1;
 	if (rdp_buf_put_u32le(&b, 4) != 0) return -1;
-	if (rdp_buf_put_u32le(&b, 0) != 0) return -1;
+	if (rdp_buf_put_u32le(&b, 0x00000010) != 0) return -1;
 	return (ssize_t)rdp_buf_used(&b);
 }
 
@@ -183,9 +183,10 @@ rdp_rdpgfx_build_avc420_frame(uint8_t *out, size_t cap,
 	if (rdp_buf_put_u16le(&b, 0) != 0) return -1;
 	if (rdp_buf_put_u16le(&b, w) != 0) return -1;
 	if (rdp_buf_put_u16le(&b, h) != 0) return -1;
-	/* qualityVal=85, progressiveVal=0 */
-	if (rdp_buf_put_u8(&b, 85) != 0) return -1;
-	if (rdp_buf_put_u8(&b, 0) != 0) return -1;
+	/* qpVal: qp=22 (bits 0-5), reserved=0 (bit 6), progressive=0 (bit 7) */
+	if (rdp_buf_put_u8(&b, 22) != 0) return -1;
+	/* qualityVal: 100 (best quality) */
+	if (rdp_buf_put_u8(&b, 100) != 0) return -1;
 	/* H.264 NAL data */
 	if (rdp_buf_put(&b, h264_data, h264_len) != 0) return -1;
 
