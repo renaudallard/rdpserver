@@ -26,10 +26,12 @@ separation boundary:
 
 ```
 TCP/3389 ── TLS ──> rdpd (root)
-                     │  X.224 / MCS / RDP wire / greeter / CLIPRDR
+                     │  X.224 / MCS / NLA (CredSSP/NTLMv2) / RDP wire
+                     │  CLIPRDR / RDPGFX / RDPSND / RDPDR
                      ▼
                      rdp-sessionmgr (root)
                      │  PAM (Linux) or bsd_auth (OpenBSD)
+                     │  auto-caches NT hashes for NLA
                      │  fork + setresuid + exec
                      ▼
                      rdp-session (user)
@@ -41,10 +43,10 @@ framebuffer; an embedded 8×16 PSF font renders the labels and typed
 text. After auth, a backend RPC shuttles pixel frames from
 `rdp-session` to `rdpd` and input events the other way.
 
-> **Status: alpha.** Verified end-to-end against `xfreerdp` between a
-> Linux client and an OpenBSD daemon.  Not yet deployment-hardened on
-> a real workload.  See [`docs/SECURITY.md`](./docs/SECURITY.md) for
-> the trust model.
+> **Status: alpha.** Verified end-to-end against `xfreerdp`,
+> Microsoft `mstsc.exe` (Windows 11), Microsoft Remote Desktop
+> (macOS and Android).  NLA/CredSSP works with all Microsoft clients.
+> See [`docs/SECURITY.md`](./docs/SECURITY.md) for the trust model.
 
 ## Features
 
@@ -56,7 +58,7 @@ text. After auth, a backend RPC shuttles pixel frames from
 - **Bidirectional clipboard** — MS-RDPECLIP static virtual channel, text formats (CF_UNICODETEXT).  Copy in the remote `xterm` and paste in your local clipboard; copy locally and paste in `xterm`.  `XFixesSelectSelectionInput` watches the X CLIPBOARD selection and the worker bridges to the RDP channel via the backend RPC.
 - **Clean disconnect** — properly framed MCS Disconnect Provider Ultimatum (X.224 DT + TPKT, no Send-Data nesting), Shutdown Request answered with Shutdown Denied so clients send a graceful MCS Disconnect, `SO_KEEPALIVE` + `TCP_KEEPIDLE/INTVL/CNT` on accepted sockets so half-open TCP is detected within ~2 minutes.
 - **Hardened build** — `-Werror -Wall -Wextra -Wshadow -Wstrict-prototypes -Wpointer-arith -Wcast-qual -Wundef -Wformat=2 -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIE -pie -Wl,-z,relro,-z,now,-z,noexecstack` by default.  `./configure --enable-sanitizers` swaps in `-fsanitize=address,undefined`.  An in-tree fuzzer (`make fuzz`) drives 9 parsers with random bytes; 2.1 million iterations across three seeds under ASan + UBSan, zero crashes, zero UB.
-- **OpenBSD `pledge(2)`** — `rdpd` worker pledges `stdio inet unix`; `rdp-sessionmgr` pledges `stdio rpath wpath cpath unix sendfd recvfd proc exec id getpw dpath fattr`; `rdp-session` pledges `stdio rpath wpath cpath unix proc`.  On non-OpenBSD the calls compile to a no-op via the `compat.h` shim.  Linux seccomp-bpf and FreeBSD capsicum are detected at configure time; wiring them is the next hardening item.
+- **OpenBSD `pledge(2)`** — `rdpd` worker pledges `stdio inet unix rpath wpath cpath sendfd recvfd`; `rdp-sessionmgr` pledges `stdio rpath wpath cpath unix sendfd recvfd proc exec id getpw dpath fattr`; `rdp-session` pledges `stdio rpath wpath cpath unix proc`.  On non-OpenBSD the calls compile to a no-op via the `compat.h` shim.  Linux seccomp-bpf sandbox is wired and allowlists the required syscalls.
 - **One configure script, two OSes** — hand-rolled POSIX `sh` (no autotools, no CMake).  Probes for libtls or OpenSSL, PAM or bsd_auth, getrandom or arc4random, epoll or kqueue, pledge / unveil / capsicum / seccomp, X11 dev libs, `Xvfb` path.  Builds clean under both bmake and GNU make.
 
 ## What works today vs not yet
@@ -71,7 +73,7 @@ text. After auth, a backend RPC shuttles pixel frames from
 | Per-user Xvfb + xterm session | ✓ | |
 | CLIPRDR clipboard, bidirectional, text formats | ✓ | |
 | Clean disconnect, Shutdown Request, TCP keepalive | ✓ | |
-| NLA / CredSSP / NTLMv2 | ✓ | Full CredSSP flow with NTLMv2 verification against a local NT hash file (`/etc/rdpserver/nthashes`).  No AD/winbind needed; run `rdp-passwd username` to populate hashes.  Credentials are extracted from TSPasswordCreds and verified via PAM/bsd_auth.  Clients using `xfreerdp /sec:nla` connect without a greeter. |
+| NLA / CredSSP / NTLMv2 | ✓ | Full CredSSP v6 flow with NTLMv2 verification.  NT hashes are auto-cached by the session manager on first successful authentication, so no manual setup is needed.  Microsoft clients (mstsc, macOS, Android) connect via NLA directly.  Credentials are extracted from TSPasswordCreds and verified via PAM/bsd_auth. |
 | RDPGFX / H.264 (AVC420) | ✓ | Server opens the GraphicsPipeline DRDYNVC channel, exchanges RDPGFX caps (v8.1), creates a surface, and streams frames as AVC420 WireToSurface1 PDUs encoded via libx264 (ultrafast/zerolatency, CRF 32).  Large frames are split across ZGFX segments and channel PDU fragments.  Verified end-to-end with xfreerdp 3.x on Linux and OpenBSD. |
 | Audio output (RDPSND / MS-RDPEA) | ✓ | PCM 16-bit stereo 44.1 kHz streamed via SNDC_WAVE2 PDUs.  PulseAudio on Linux (auto-creates a per-session null sink), sndio on OpenBSD.  Audio from apps playing in the session is captured and forwarded to the RDP client in real time. |
 | Drive / printer / serial redirection | ✓ | RDPDR channel with capability exchange, device enumeration, and IRP dispatch for drive file I/O.  Supports Create, Read, Close, and QueryDirectory IRPs with completion tracking.  The session can request file operations on client drives via the backend protocol; the worker relays them as IRPs and forwards completions back. |
@@ -88,9 +90,10 @@ RDP client should work.  Live-tested against:
 
 | Client | Notes |
 | --- | --- |
-| `xfreerdp` (FreeRDP 3.x) | Primary test client.  `xfreerdp /v:host:3389 /cert:ignore /size:1024x768 +clipboard`. |
-| Microsoft `mstsc.exe` | Should work; not yet exercised. |
-| Microsoft Remote Desktop (macOS / iOS / Android) | Same wire protocol; not yet exercised. |
+| `xfreerdp` (FreeRDP 3.x) | Primary test client.  `xfreerdp /v:host:3389 /cert:ignore /size:1024x768 +clipboard /sec:nla`. |
+| Microsoft `mstsc.exe` (Windows 11) | Verified working via NLA.  Bitmap mode and H.264/GFX. |
+| Microsoft Remote Desktop (macOS) | Verified working via NLA.  Connects directly without greeter. |
+| Microsoft Remote Desktop (Android) | Verified working via NLA. |
 | Remmina | Uses FreeRDP under the hood; should work. |
 | `rdesktop` (legacy) | Older PDU shapes; not yet exercised. |
 
