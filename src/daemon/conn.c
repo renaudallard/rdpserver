@@ -1124,6 +1124,11 @@ run_proxy(struct rdp_tls *t, int be_fd,
 			if (errno == EINTR) continue;
 			break;
 		}
+		if (pfd[1].revents & (POLLHUP | POLLERR)) {
+			rdp_debug("conn[%s]: backend gone (rev=0x%x)",
+				peer, pfd[1].revents);
+			break;
+		}
 
 		if (pfd[0].revents & POLLIN) {
 			uint8_t pdu[0x4000];
@@ -1515,16 +1520,9 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 		    && (cr.requested_protocols & RDP_PROTO_HYBRID)
 		    && cfg->sessmgr_sock != NULL
 		    && cfg->sessmgr_sock[0] != '\0') {
-			/* Check for pending NLA auth token (user was
-			 * verified via NLA on a prior connection).
-			 * Open and unlink atomically to prevent a
-			 * second worker from reading the same token. */
-			int _tfd = open(NTHASH_PATH ".tok", O_RDONLY);
-			if (_tfd >= 0) {
-				(void)unlink(NTHASH_PATH ".tok");
-				(void)close(_tfd);
-				selected = RDP_PROTO_SSL;
-			} else {
+			FILE *_hf = fopen(NTHASH_PATH, "r");
+			if (_hf != NULL) {
+				fclose(_hf);
 				selected = RDP_PROTO_HYBRID;
 			}
 		}
