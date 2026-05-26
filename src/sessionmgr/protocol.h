@@ -60,10 +60,11 @@
 
 #include <stdint.h>
 
-#define RDP_SESSMGR_OP_AUTH    0x01
-#define RDP_SESSMGR_OP_SPAWN   0x02
-#define RDP_SESSMGR_OP_SUSPEND 0x03
-#define RDP_SESSMGR_OP_RESUME  0x04
+#define RDP_SESSMGR_OP_AUTH      0x01
+#define RDP_SESSMGR_OP_SPAWN     0x02
+#define RDP_SESSMGR_OP_SUSPEND   0x03
+#define RDP_SESSMGR_OP_RESUME    0x04
+#define RDP_SESSMGR_OP_NLA_AUTH  0x05
 
 #define RDP_SESSMGR_OK        0x00
 #define RDP_SESSMGR_FAIL      0x01

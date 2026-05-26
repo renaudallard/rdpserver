@@ -122,7 +122,7 @@ src/daemon/rdpd: $(RDPD_OBJS) $(GREETER_LIB) $(WIRE_LIB) $(SEC_LIB) $(COMMON_LIB
 
 src/sessionmgr/rdp-sessionmgr: $(SESSMGR_DAEMON_OBJ) $(COMMON_LIB)
 	$(CC) $(LDFLAGS) -o $@ $(SESSMGR_DAEMON_OBJ) $(COMMON_LIB) \
-		$(AUTH_LIBS)
+		$(AUTH_LIBS) $(TLS_LIBS)
 
 $(BACKEND_LIB): $(BACKEND_OBJS)
 	ar rcs $@ $(BACKEND_OBJS)

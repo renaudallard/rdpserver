@@ -51,6 +51,9 @@
 #include "auth.h"
 #include "protocol.h"
 #include "../common/rand.h"
+#include "../common/utf16.h"
+
+#include <openssl/evp.h>
 
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -260,6 +263,76 @@ spawn_session(const struct passwd *pw, uint16_t w, uint16_t h, int *out_fd)
 	return 0;
 }
 
+#define NTHASH_DIR  "/etc/rdpserver"
+#define NTHASH_PATH NTHASH_DIR "/nthashes"
+
+static void
+cache_nthash(const char *user, const char *pass)
+{
+	uint8_t pw16[512], hash[16];
+	size_t pw16_len;
+	char line[512], tmp[512];
+	FILE *out, *in;
+	int found = 0;
+
+	pw16_len = rdp_utf8_to_utf16le(pw16, sizeof pw16,
+		pass, strlen(pass));
+	if (pw16_len == (size_t)-1)
+		return;
+
+	{
+		EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+		const EVP_MD *md4 = EVP_md4();
+		unsigned int hlen = 16;
+		if (ctx == NULL || md4 == NULL) {
+			EVP_MD_CTX_free(ctx);
+			explicit_bzero(pw16, sizeof pw16);
+			return;
+		}
+		EVP_DigestInit_ex(ctx, md4, NULL);
+		EVP_DigestUpdate(ctx, pw16, pw16_len);
+		EVP_DigestFinal_ex(ctx, hash, &hlen);
+		EVP_MD_CTX_free(ctx);
+	}
+	explicit_bzero(pw16, sizeof pw16);
+
+	(void)mkdir(NTHASH_DIR, 0700);
+	snprintf(tmp, sizeof tmp, "%s.tmp", NTHASH_PATH);
+	out = fopen(tmp, "w");
+	if (out == NULL)
+		return;
+	(void)fchmod(fileno(out), 0600);
+
+	in = fopen(NTHASH_PATH, "r");
+	if (in != NULL) {
+		while (fgets(line, sizeof line, in) != NULL) {
+			char *colon = strchr(line, ':');
+			if (colon != NULL
+			    && (size_t)(colon - line) == strlen(user)
+			    && strncmp(line, user, strlen(user)) == 0) {
+				found = 1;
+				fprintf(out, "%s:", user);
+				for (int i = 0; i < 16; i++)
+					fprintf(out, "%02x", hash[i]);
+				fprintf(out, "\n");
+			} else {
+				fputs(line, out);
+			}
+		}
+		fclose(in);
+	}
+	if (!found) {
+		fprintf(out, "%s:", user);
+		for (int i = 0; i < 16; i++)
+			fprintf(out, "%02x", hash[i]);
+		fprintf(out, "\n");
+	}
+	fclose(out);
+	(void)rename(tmp, NTHASH_PATH);
+	explicit_bzero(hash, sizeof hash);
+	rdp_info("cached NT hash for '%s'", user);
+}
+
 static int
 handle_auth(int cfd, const uint8_t *req, size_t req_len,
 		const char *service, char *user_out, size_t user_out_sz)
@@ -295,6 +368,8 @@ handle_auth(int cfd, const uint8_t *req, size_t req_len,
 
 		(void)sigaction(SIGCHLD, &saved, NULL);
 	}
+	if (rc == 0)
+		cache_nthash(user, pass);
 	explicit_bzero(pass, sizeof pass);
 	if (rc == 0) {
 		size_t n = user_len < user_out_sz - 1 ? user_len : user_out_sz - 1;
@@ -572,6 +647,24 @@ handle_client(int cfd, const char *service)
 			break;
 		case RDP_SESSMGR_OP_RESUME:
 			(void)handle_resume(cfd, buf, (size_t)n);
+			break;
+		case RDP_SESSMGR_OP_NLA_AUTH:
+			{
+				size_t ulen = (size_t)buf[2]
+					| ((size_t)buf[3] << 8);
+				if (n >= 8 && ulen <= RDP_SESSMGR_USER_MAX
+				    && 8 + ulen <= (size_t)n) {
+					size_t nn = ulen < sizeof auth_user - 1
+						? ulen : sizeof auth_user - 1;
+					memcpy(auth_user, buf + 8, nn);
+					auth_user[nn] = '\0';
+					rdp_info("NLA_AUTH: accepted '%s'",
+						auth_user);
+					(void)reply(cfd, RDP_SESSMGR_OK, -1);
+				} else {
+					(void)reply(cfd, RDP_SESSMGR_FAIL, -1);
+				}
+			}
 			break;
 		default:
 			(void)reply(cfd, RDP_SESSMGR_ENOSYS, -1);

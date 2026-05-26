@@ -61,6 +61,9 @@ int rdp_sessmgr_open_auth(struct rdp_sessmgr *out,
 		const char *sock_path,
 		const char *user, const char *pass);
 
+int rdp_sessmgr_open_nla(struct rdp_sessmgr *out,
+		const char *sock_path, const char *user);
+
 /* SPAWN: ask sessmgr to fork+setuid+exec rdp-session as the
  * authenticated user.  Returns the backend socket fd (one end of
  * a SOCK_STREAM socketpair) via *fd_out.  Caller closes when

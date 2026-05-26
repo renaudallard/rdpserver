@@ -134,6 +134,44 @@ rdp_sessmgr_open_auth(struct rdp_sessmgr *out,
 }
 
 int
+rdp_sessmgr_open_nla(struct rdp_sessmgr *out,
+		const char *sock_path, const char *user)
+{
+	uint8_t  frame[RDP_SESSMGR_FRAME_MAX];
+	uint8_t  resp[8];
+	size_t   user_len, off;
+	ssize_t  n;
+	int      fd;
+
+	if (out == NULL || user == NULL) { errno = EINVAL; return -1; }
+	user_len = strlen(user);
+	if (user_len > RDP_SESSMGR_USER_MAX) { errno = E2BIG; return -1; }
+
+	fd = connect_unix(sock_path);
+	if (fd < 0) return -1;
+
+	memset(frame, 0, 8);
+	frame[0] = RDP_SESSMGR_OP_NLA_AUTH;
+	frame[2] = (uint8_t)(user_len & 0xff);
+	frame[3] = (uint8_t)((user_len >> 8) & 0xff);
+	off = 8;
+	memcpy(frame + off, user, user_len); off += user_len;
+
+	n = send(fd, frame, off, 0);
+	if (n != (ssize_t)off) { (void)close(fd); return -1; }
+	n = recv(fd, resp, sizeof resp, 0);
+	if (n < 1 || resp[0] != RDP_SESSMGR_OK) {
+		(void)close(fd);
+		errno = EACCES;
+		return -1;
+	}
+	out->fd = fd;
+	(void)strncpy(out->auth_user, user, sizeof out->auth_user - 1);
+	out->auth_user[sizeof out->auth_user - 1] = '\0';
+	return 0;
+}
+
+int
 rdp_sessmgr_spawn(struct rdp_sessmgr *s, uint16_t w, uint16_t h, int *fd_out)
 {
 	uint8_t req[8];
