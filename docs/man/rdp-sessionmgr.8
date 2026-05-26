@@ -50,6 +50,18 @@ Dead descriptors are validated by
 at resume time and reaped by a periodic sweep.
 Suspended sessions expire after 120 seconds.
 .Pp
+When NLA authentication succeeds, the worker registers a random
+16-byte nonce with
+.Nm
+via the
+.Sy NLA_STORE
+command and writes it to a token file.
+A subsequent worker reading the token file must present the matching
+nonce with the
+.Sy NLA_AUTH
+command; requests with a missing or incorrect nonce are rejected.
+Pending nonces expire after 120 seconds.
+.Pp
 The options are as follows:
 .Bl -tag -width Ds
 .It Fl d

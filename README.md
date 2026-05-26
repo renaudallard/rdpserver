@@ -205,6 +205,16 @@ See [`docs/SECURITY.md`](./docs/SECURITY.md) for the trust model,
 process layout, `pledge` promise sets, and the explanation of why NLA
 is currently a framework-only feature.
 
+The NLA token file (`.tok`) is opened with `O_EXCL` to prevent
+creation races, unlinked immediately after open to prevent a second
+worker from reading the same token, and protected by a random 16-byte
+nonce that must be presented with the `NLA_AUTH` session manager
+command. The NTLM challenge timestamp is written in little-endian
+byte order for correctness on big-endian hosts. The seccomp-bpf
+sandbox allowlists `unlinkat` and `renameat` for token file cleanup.
+AV pair construction and sealed-message buffers are bounds-checked
+to prevent stack overflows.
+
 ## Contributing
 
 Bug reports and patches welcome via
