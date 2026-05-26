@@ -249,6 +249,12 @@ main(int argc, char *argv[])
 			 * the AF_UNIX socket to sessmgr, and writing tmp/
 			 * cert files isn't its job (already done by the
 			 * listener).  On non-OpenBSD this is a no-op. */
+			/* Load OpenSSL legacy provider (MD4, RC4) before
+			 * sandboxing, since dlopen is blocked after. */
+			{
+				extern void rdp_nla_crypto_init(void);
+				rdp_nla_crypto_init();
+			}
 			if (pledge("stdio inet unix rpath wpath cpath sendfd recvfd", NULL) != 0)
 				rdp_warn("pledge worker: %s", strerror(errno));
 			rdp_sandbox_worker();

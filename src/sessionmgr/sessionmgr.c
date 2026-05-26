@@ -54,6 +54,9 @@
 #include "../common/utf16.h"
 
 #include <openssl/evp.h>
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+#include <openssl/provider.h>
+#endif
 
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -289,7 +292,21 @@ cache_nthash(const char *user, const char *pass)
 			explicit_bzero(pw16, sizeof pw16);
 			return;
 		}
-		EVP_DigestInit_ex(ctx, md4, NULL);
+		if (EVP_DigestInit_ex(ctx, md4, NULL) != 1) {
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+			OSSL_PROVIDER_load(NULL, "legacy");
+			OSSL_PROVIDER_load(NULL, "default");
+			if (EVP_DigestInit_ex(ctx, md4, NULL) != 1) {
+				EVP_MD_CTX_free(ctx);
+				explicit_bzero(pw16, sizeof pw16);
+				return;
+			}
+#else
+			EVP_MD_CTX_free(ctx);
+			explicit_bzero(pw16, sizeof pw16);
+			return;
+#endif
+		}
 		EVP_DigestUpdate(ctx, pw16, pw16_len);
 		EVP_DigestFinal_ex(ctx, hash, &hlen);
 		EVP_MD_CTX_free(ctx);

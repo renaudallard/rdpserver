@@ -43,9 +43,33 @@
 
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+#include <openssl/provider.h>
+#endif
 
 #include <stdlib.h>
 #include <string.h>
+
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+static int legacy_loaded = 0;
+static void
+ensure_legacy_provider(void)
+{
+	if (legacy_loaded) return;
+	if (OSSL_PROVIDER_load(NULL, "legacy") != NULL) {
+		OSSL_PROVIDER_load(NULL, "default");
+		legacy_loaded = 1;
+	}
+}
+#endif
+
+void
+rdp_nla_crypto_init(void)
+{
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+	ensure_legacy_provider();
+#endif
+}
 
 int
 rdp_md4(const void *data, size_t len, uint8_t out[RDP_MD4_LEN])
@@ -56,6 +80,9 @@ rdp_md4(const void *data, size_t len, uint8_t out[RDP_MD4_LEN])
 
 	ctx = EVP_MD_CTX_new();
 	if (ctx == NULL) return -1;
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+	ensure_legacy_provider();
+#endif
 	if (EVP_DigestInit_ex(ctx, EVP_md4(), NULL) != 1) goto out;
 	if (EVP_DigestUpdate(ctx, data, len) != 1) goto out;
 	if (EVP_DigestFinal_ex(ctx, out, &outlen) != 1) goto out;
@@ -116,8 +143,10 @@ rdp_rc4_new(const void *key, size_t key_len)
 	if (r == NULL) return NULL;
 	r->ctx = EVP_CIPHER_CTX_new();
 	if (r->ctx == NULL) { free(r); return NULL; }
-	if (EVP_CIPHER_CTX_set_padding(r->ctx, 0) != 1) goto err;
+	ensure_legacy_provider();
 	if (EVP_EncryptInit_ex(r->ctx, EVP_rc4(), NULL, NULL, NULL) != 1)
+		goto err;
+	if (EVP_CIPHER_CTX_set_padding(r->ctx, 0) != 1)
 		goto err;
 	if (EVP_CIPHER_CTX_set_key_length(r->ctx, (int)key_len) != 1)
 		goto err;
