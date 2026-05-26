@@ -148,7 +148,7 @@ ntlm_build_challenge(uint8_t *out, size_t cap,
 		| NTLMSSP_NEGOTIATE_TARGET_INFO
 		| NTLMSSP_NEGOTIATE_128;
 	flags &= ~NTLMSSP_NEGOTIATE_OEM;
-	flags &= ~NTLMSSP_NEGOTIATE_VERSION;
+	flags |= NTLMSSP_NEGOTIATE_VERSION;
 
 	target_utf16_len = rdp_utf8_to_utf16le(target_utf16,
 		sizeof target_utf16, target_name, strlen(target_name));
@@ -197,7 +197,11 @@ ntlm_build_challenge(uint8_t *out, size_t cap,
 	st_u16le(out + 40, (uint16_t)av_len);
 	st_u16le(out + 42, (uint16_t)av_len);
 	st_u32le(out + 44, (uint32_t)(payload_off + target_utf16_len));
-	/* Version (8 bytes at offset 48) -- zero. */
+	/* Version: 10.0.0 NTLMSSP_REVISION_W2K3 (15) */
+	out[48] = 10;    /* ProductMajorVersion */
+	out[49] = 0;     /* ProductMinorVersion */
+	st_u16le(out + 50, 0);  /* ProductBuild */
+	out[55] = 15;    /* NTLMRevisionCurrent */
 
 	memcpy(out + payload_off, target_utf16, target_utf16_len);
 	memcpy(out + payload_off + target_utf16_len, av_block, av_len);
