@@ -59,8 +59,9 @@
 #define RDPGFX_HEADER_SIZE 8
 
 struct rdpgfx_state {
-	int      active;        /* 1 after caps exchange */
-	int      dv_chan_id;    /* DRDYNVC channel ID for GFX */
+	int      active;         /* 1 after GFX pipeline fully set up */
+	int      caps_received;  /* 1 after client caps advertise */
+	int      dv_chan_id;     /* DRDYNVC channel ID for GFX */
 	uint16_t surface_id;
 	uint32_t frame_id;
 	uint16_t desktop_w;

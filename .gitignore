@@ -25,3 +25,6 @@ TAGS
 .depend
 src/ddx/rdpserverdev_drv.so
 src/session/protocols/
+*.xz
+*.dsc
+tools/rdp-passwd

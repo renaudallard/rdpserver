@@ -1155,7 +1155,8 @@ run_proxy(struct rdp_tls *t, int be_fd,
 							rw, rh);
 				}
 				if (r == 4 && !gfx.active
-				    && dv->dv.gfx_channel_id >= 0) {
+				    && dv->dv.gfx_channel_id >= 0
+				    && h264 != NULL) {
 					/* GFX caps received; init the pipeline. */
 					uint8_t gbuf[512];
 					ssize_t gn;
@@ -1195,13 +1196,11 @@ run_proxy(struct rdp_tls *t, int be_fd,
 							dv->channel_id,
 							dv->dv.gfx_channel_id,
 							gbuf, (size_t)gn);
+					gfx.active = 1;
+					rdp_info("conn[%s]: GFX pipeline active",
+						peer);
 					h264 = rdp_h264_open(desktop_w,
 						desktop_h);
-					if (h264 != NULL) {
-						gfx.active = 1;
-						rdp_info("conn[%s]: GFX+H.264 active",
-							peer);
-					}
 				}
 				/* Untouched TPKTs (Shutdown, etc.) silently
 				 * ignored.  MCS Disconnect already handled. */
@@ -1757,7 +1756,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 			dt_n = rdp_x224_build_dt(scratch + 4,
 				sizeof scratch - 4);
 			memcpy(scratch + 4 + dt_n, body, bn);
-			if (_jc < 3) {
+			if (_jc < 12) {
 				rdp_debug("conn[%s]: join req uid=%u cid=%u -> confirm %02x %02x %02x %02x %02x %02x %02x %02x",
 					peer, uid, cid,
 					body[0], body[1], body[2], body[3],

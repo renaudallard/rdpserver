@@ -1120,7 +1120,7 @@ main(int argc, char *argv[])
 		return 1;
 	}
 
-	struct rdp_h264 *h264 = rdp_h264_open(w, h);
+	struct rdp_h264 *h264 = NULL;
 	if (h264 != NULL)
 		rdp_info("session H.264 encoder active (%dx%d)", w, h);
 	else
@@ -1281,8 +1281,11 @@ main(int argc, char *argv[])
 					    w, h, &enc, &enc_len, &kf) == 0
 					    && enc != NULL && enc_len > 0) {
 						if (send_h264_frame(BE_FD, w, h,
-						    enc, enc_len) != 0)
+						    enc, enc_len) != 0) {
+							rdp_err("h264 frame send failed: %s",
+								strerror(errno));
 							break;
+						}
 					}
 				} else {
 					if (send_frame(BE_FD, w, h,

@@ -55,7 +55,28 @@ rdp_rdpgfx_parse_caps_advertise(const uint8_t *pdu, size_t len)
 	if (cmdId != RDPGFX_CMDID_CAPSADVERTISE) return -1;
 	{
 		uint16_t cnt = (uint16_t)pdu[8] | ((uint16_t)pdu[9] << 8);
+		size_t off = 10;
+		uint16_t i;
 		rdp_info("rdpgfx: caps advertise, %u cap sets", (unsigned)cnt);
+		for (i = 0; i < cnt && off + 8 <= len; i++) {
+			uint32_t ver = (uint32_t)pdu[off]
+				| ((uint32_t)pdu[off+1] << 8)
+				| ((uint32_t)pdu[off+2] << 16)
+				| ((uint32_t)pdu[off+3] << 24);
+			uint32_t dlen = (uint32_t)pdu[off+4]
+				| ((uint32_t)pdu[off+5] << 8)
+				| ((uint32_t)pdu[off+6] << 16)
+				| ((uint32_t)pdu[off+7] << 24);
+			uint32_t flags = 0;
+			if (dlen >= 4 && off + 8 + 4 <= len)
+				flags = (uint32_t)pdu[off+8]
+					| ((uint32_t)pdu[off+9] << 8)
+					| ((uint32_t)pdu[off+10] << 16)
+					| ((uint32_t)pdu[off+11] << 24);
+			rdp_info("rdpgfx:   [%u] ver=0x%08x flags=0x%08x",
+				(unsigned)i, ver, flags);
+			off += 8 + dlen;
+		}
 	}
 	return 0;
 }
@@ -69,9 +90,9 @@ rdp_rdpgfx_build_caps_confirm(uint8_t *out, size_t cap)
 	rdp_buf_init(&b, out, cap);
 	if (put_gfx_header(&b, RDPGFX_CMDID_CAPSCONFIRM,
 		RDPGFX_HEADER_SIZE + bodyLen) != 0) return -1;
-	if (rdp_buf_put_u32le(&b, RDPGFX_CAPVERSION_81) != 0) return -1;
+	if (rdp_buf_put_u32le(&b, RDPGFX_CAPVERSION_10) != 0) return -1;
 	if (rdp_buf_put_u32le(&b, 4) != 0) return -1;
-	if (rdp_buf_put_u32le(&b, 0x00000010) != 0) return -1;
+	if (rdp_buf_put_u32le(&b, 0) != 0) return -1;
 	return (ssize_t)rdp_buf_used(&b);
 }
 
