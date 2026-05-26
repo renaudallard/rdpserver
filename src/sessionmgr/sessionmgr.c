@@ -433,6 +433,21 @@ struct suspended_session {
 static struct suspended_session
 	suspended[RDP_SESSMGR_SUSPEND_MAX];
 
+/* Pending NLA tokens: a worker registers a nonce after successful
+ * NLA+password auth; the next worker must present the same nonce
+ * with NLA_AUTH to bypass password authentication. */
+#define NLA_PENDING_MAX 16
+#define NLA_PENDING_TIMEOUT 120  /* seconds */
+
+struct nla_pending {
+	int      in_use;
+	char     user[RDP_SESSMGR_USER_MAX + 1];
+	uint8_t  nonce[RDP_SESSMGR_NLA_NONCE_LEN];
+	time_t   created_at;
+};
+
+static struct nla_pending nla_pending[NLA_PENDING_MAX];
+
 static int
 fd_alive(int fd)
 {
@@ -652,15 +667,86 @@ handle_client(int cfd, const char *service)
 			{
 				size_t ulen = (size_t)buf[2]
 					| ((size_t)buf[3] << 8);
+				size_t nonce_off = 8 + ulen;
 				if (n >= 8 && ulen <= RDP_SESSMGR_USER_MAX
-				    && 8 + ulen <= (size_t)n) {
-					size_t nn = ulen < sizeof auth_user - 1
-						? ulen : sizeof auth_user - 1;
-					memcpy(auth_user, buf + 8, nn);
-					auth_user[nn] = '\0';
-					rdp_info("NLA_AUTH: accepted '%s'",
-						auth_user);
-					(void)reply(cfd, RDP_SESSMGR_OK, -1);
+				    && nonce_off + RDP_SESSMGR_NLA_NONCE_LEN
+				    <= (size_t)n) {
+					char tuser[RDP_SESSMGR_USER_MAX + 1];
+					size_t nn = ulen < sizeof tuser - 1
+						? ulen : sizeof tuser - 1;
+					int found = 0, i;
+					time_t now = time(NULL);
+					memcpy(tuser, buf + 8, nn);
+					tuser[nn] = '\0';
+					for (i = 0; i < NLA_PENDING_MAX; i++) {
+						if (!nla_pending[i].in_use)
+							continue;
+						if (now - nla_pending[i].created_at
+						    > NLA_PENDING_TIMEOUT) {
+							nla_pending[i].in_use = 0;
+							continue;
+						}
+						if (strcmp(nla_pending[i].user, tuser) == 0
+						    && memcmp(nla_pending[i].nonce,
+						    buf + nonce_off,
+						    RDP_SESSMGR_NLA_NONCE_LEN) == 0) {
+							found = 1;
+							nla_pending[i].in_use = 0;
+							break;
+						}
+					}
+					if (found) {
+						memcpy(auth_user, tuser, nn + 1);
+						rdp_info("NLA_AUTH: accepted '%s'",
+							auth_user);
+						(void)reply(cfd, RDP_SESSMGR_OK, -1);
+					} else {
+						rdp_warn("NLA_AUTH: rejected '%s' "
+							"(bad nonce)", tuser);
+						(void)reply(cfd, RDP_SESSMGR_FAIL, -1);
+					}
+				} else {
+					(void)reply(cfd, RDP_SESSMGR_FAIL, -1);
+				}
+			}
+			break;
+		case RDP_SESSMGR_OP_NLA_STORE:
+			{
+				size_t ulen = (size_t)buf[2]
+					| ((size_t)buf[3] << 8);
+				size_t nonce_off = 8 + ulen;
+				if (n >= 8 && ulen <= RDP_SESSMGR_USER_MAX
+				    && nonce_off + RDP_SESSMGR_NLA_NONCE_LEN
+				    <= (size_t)n) {
+					int i, slot = -1;
+					time_t now = time(NULL);
+					for (i = 0; i < NLA_PENDING_MAX; i++) {
+						if (!nla_pending[i].in_use
+						    || now - nla_pending[i].created_at
+						    > NLA_PENDING_TIMEOUT) {
+							if (slot < 0) slot = i;
+							if (nla_pending[i].in_use)
+								nla_pending[i].in_use = 0;
+						}
+					}
+					if (slot >= 0) {
+						size_t nn = ulen < RDP_SESSMGR_USER_MAX
+							? ulen : RDP_SESSMGR_USER_MAX;
+						nla_pending[slot].in_use = 1;
+						memcpy(nla_pending[slot].user,
+							buf + 8, nn);
+						nla_pending[slot].user[nn] = '\0';
+						memcpy(nla_pending[slot].nonce,
+							buf + nonce_off,
+							RDP_SESSMGR_NLA_NONCE_LEN);
+						nla_pending[slot].created_at = now;
+						rdp_info("NLA_STORE: registered "
+							"nonce for '%s'",
+							nla_pending[slot].user);
+						(void)reply(cfd, RDP_SESSMGR_OK, -1);
+					} else {
+						(void)reply(cfd, RDP_SESSMGR_FAIL, -1);
+					}
 				} else {
 					(void)reply(cfd, RDP_SESSMGR_FAIL, -1);
 				}

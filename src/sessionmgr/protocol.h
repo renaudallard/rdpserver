@@ -65,6 +65,7 @@
 #define RDP_SESSMGR_OP_SUSPEND   0x03
 #define RDP_SESSMGR_OP_RESUME    0x04
 #define RDP_SESSMGR_OP_NLA_AUTH  0x05
+#define RDP_SESSMGR_OP_NLA_STORE 0x06
 
 #define RDP_SESSMGR_OK        0x00
 #define RDP_SESSMGR_FAIL      0x01
@@ -110,6 +111,32 @@
  * RESUME reply (24 bytes): status(8) + arc_random(16). On success,
  *   the backend fd is returned via SCM_RIGHTS.
  */
+
+/* NLA_STORE request (op=6): register a nonce after successful AUTH.
+ *   u8  op           = 6
+ *   u8  flags
+ *   u16 user_len
+ *   u16 reserved
+ *   u16 reserved
+ *   user_bytes (user_len)
+ *   nonce[16]
+ *
+ * NLA_AUTH request (op=5): present the matching nonce.
+ *   u8  op           = 5
+ *   u8  flags
+ *   u16 user_len
+ *   u16 reserved
+ *   u16 reserved
+ *   user_bytes (user_len)
+ *   nonce[16]
+ *
+ * The worker writes the nonce into the .tok file and registers
+ * it via NLA_STORE.  A subsequent worker reads the .tok, sends
+ * NLA_AUTH with the nonce, and the sessmgr verifies it matches
+ * the stored value.  This prevents local processes from using
+ * NLA_AUTH without possessing the token file. */
+
+#define RDP_SESSMGR_NLA_NONCE_LEN 16
 
 #define RDP_SESSMGR_SUSPEND_MAX     16
 #define RDP_SESSMGR_SUSPEND_TIMEOUT 120  /* seconds */
