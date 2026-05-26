@@ -90,9 +90,9 @@ rdp_rdpgfx_build_caps_confirm(uint8_t *out, size_t cap)
 	rdp_buf_init(&b, out, cap);
 	if (put_gfx_header(&b, RDPGFX_CMDID_CAPSCONFIRM,
 		RDPGFX_HEADER_SIZE + bodyLen) != 0) return -1;
-	if (rdp_buf_put_u32le(&b, 0x000A0701) != 0) return -1;
+	if (rdp_buf_put_u32le(&b, 0x00080004) != 0) return -1;
 	if (rdp_buf_put_u32le(&b, 4) != 0) return -1;
-	if (rdp_buf_put_u32le(&b, 0x00000002) != 0) return -1;
+	if (rdp_buf_put_u32le(&b, 0) != 0) return -1;
 	return (ssize_t)rdp_buf_used(&b);
 }
 

@@ -1078,16 +1078,22 @@ run_proxy(struct rdp_tls *t, int be_fd,
 	if (dv->enabled) {
 		uint8_t dvcaps[64];
 		ssize_t cn = rdp_drdynvc_build_caps(dvcaps, sizeof dvcaps);
-		if (cn > 0)
+		if (cn > 0) {
+			rdp_debug("conn[%s]: drdynvc CAPS tx %zd: %02x %02x %02x %02x",
+				peer, cn, dvcaps[0], cn>1?dvcaps[1]:0,
+				cn>2?dvcaps[2]:0, cn>3?dvcaps[3]:0);
 			(void)send_clip_pdu(t, user_id, dv->channel_id,
 				dvcaps, (size_t)cn);
-		rdp_debug("conn[%s]: drdynvc caps sent (chan=%u)",
-			peer, dv->channel_id);
+		}
 		cn = rdp_drdynvc_build_create_gfx(&dv->dv,
 			dvcaps, sizeof dvcaps);
-		if (cn > 0)
+		if (cn > 0) {
+			rdp_debug("conn[%s]: drdynvc CREATE tx %zd: %02x %02x %02x",
+				peer, cn, dvcaps[0], cn>1?dvcaps[1]:0,
+				cn>2?dvcaps[2]:0);
 			(void)send_clip_pdu(t, user_id, dv->channel_id,
 				dvcaps, (size_t)cn);
+		}
 	}
 	if (ss->enabled) {
 		uint8_t fmts[128];

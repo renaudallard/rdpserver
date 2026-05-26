@@ -341,12 +341,20 @@ ntlm_verify_ntlmv2_hash(const uint8_t server_challenge[8],
 
 	to_utf16_upper(user_utf8, user_up, &user_len);
 	to_utf16_plain(domain_utf8, dom_le, &dom_len);
+	rdp_debug("ntlmv2_hash: user='%s'(%zu) domain='%s'(%zu) hash=%02x%02x%02x%02x",
+		user_utf8, user_len, domain_utf8, dom_len,
+		nt_hash[0], nt_hash[1], nt_hash[2], nt_hash[3]);
 	if (rdp_hmac_md5_2(nt_hash, 16, user_up, user_len,
 		dom_le, dom_len, ntlmv2_hash) != 0) return -1;
 
 	if (rdp_hmac_md5_2(ntlmv2_hash, 16,
 		server_challenge, 8, temp, temp_len, nt_proof) != 0)
 		return -1;
+
+	rdp_debug("ntlmv2_hash: computed=%02x%02x%02x%02x got=%02x%02x%02x%02x",
+		nt_proof[0], nt_proof[1], nt_proof[2], nt_proof[3],
+		auth->nt_response[0], auth->nt_response[1],
+		auth->nt_response[2], auth->nt_response[3]);
 
 	if (rdp_consttime_eq(nt_proof, auth->nt_response, 16) != 0)
 		return -1;
