@@ -422,11 +422,11 @@ ntlm_seal_message(const uint8_t seal_key[16],
 		const uint8_t *msg, size_t msg_len,
 		uint8_t *out, size_t out_cap)
 {
-	uint8_t hmac_input[4 + 65536];
+	uint8_t hmac_input[4 + 8192];
 	uint8_t hmac_out[16];
 	struct rdp_rc4 *rc4;
 
-	if (out_cap < 16 + msg_len || msg_len > 65536) return -1;
+	if (out_cap < 16 + msg_len || msg_len > 8192) return -1;
 
 	hmac_input[0] = (uint8_t)(seq_num & 0xff);
 	hmac_input[1] = (uint8_t)((seq_num >> 8) & 0xff);
