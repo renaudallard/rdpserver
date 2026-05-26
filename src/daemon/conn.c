@@ -549,6 +549,7 @@ read_one_rdp_pdu(struct rdp_tls *t, uint8_t *buf, size_t cap, int *kind)
 	if (r != 1) return -1;
 	if ((buf[1] & 0x80) == 0) {
 		total = buf[1];
+		if (total < 2) total = 2;
 		if (total > cap) return -1;
 		if (total > 2) {
 			r = rdp_tls_read_full(t, buf + 2, total - 2);
@@ -558,6 +559,7 @@ read_one_rdp_pdu(struct rdp_tls *t, uint8_t *buf, size_t cap, int *kind)
 		r = rdp_tls_read_full(t, buf + 2, 1);
 		if (r < 0) return -1;
 		total = ((size_t)(buf[1] & 0x7f) << 8) | buf[2];
+		if (total < 3) total = 3;
 		if (total > cap) return -1;
 		if (total > 3) {
 			r = rdp_tls_read_full(t, buf + 3, total - 3);
