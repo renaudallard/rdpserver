@@ -739,6 +739,17 @@ maybe_dispatch_clip(struct rdp_tls *t, int be_fd,
 		uint16_t ptype = (uint16_t)(payload[2] | (payload[3] << 8));
 		if ((ptype & 0x0f) == RDP_PDU_TYPE_DATA && payload_len >= 18) {
 			uint8_t pdu_type2 = payload[14];
+			if (pdu_type2 == RDP_PDU2_FONTLIST) {
+				uint8_t fm[64];
+				ssize_t fn = rdp_pdu_build_font_map(
+					fm, sizeof fm, uid,
+					RDP_CONN_SHARE_ID);
+				if (fn > 0)
+					(void)send_send_data(t, uid,
+						RDP_MCS_IO_CHANNEL_ID,
+						fm, (size_t)fn);
+				return 1;
+			}
 			if (pdu_type2 == RDP_PDU2_SHUTDOWN_REQUEST) {
 				/* Build a Shutdown Denied PDU and send back.
 				 * The client should follow up with MCS
@@ -801,16 +812,43 @@ do_reactivate(struct rdp_tls *t, int be_fd, uint16_t user_id,
 		}
 	}
 
-	/* 3. Read Confirm Active */
+	/* 3. Read Confirm Active (skip other PDUs the client may send) */
 	{
 		uint8_t buf[0x4000];
-		int kind = 0;
-		ssize_t r = read_one_rdp_pdu(t, buf, sizeof buf, &kind);
-		if (r <= 0 || kind != 1) return -1;
-		/* Accept whatever Confirm Active the client sends. */
+		int got_confirm = 0;
+		int tries;
+		for (tries = 0; tries < 20 && !got_confirm; tries++) {
+			int kind = 0;
+			ssize_t r = read_one_rdp_pdu(t, buf, sizeof buf, &kind);
+			if (r <= 0) return -1;
+			if (kind == 1) {
+				const uint8_t *mcs_p;
+				size_t mcs_len;
+				uint16_t uid, cid;
+				const uint8_t *payload;
+				size_t payload_len;
+				if (strip_tpkt_x224(buf, (size_t)r,
+				    &mcs_p, &mcs_len) == 0) {
+					if (mcs_p[0] == RDP_MCS_TYPE_SEND_DATA_REQ) {
+						if (rdp_mcs_parse_send_data_request(
+						    mcs_p, mcs_len, &uid, &cid,
+						    &payload, &payload_len) >= 0
+						    && payload_len >= 8) {
+							uint16_t ptype =
+							    (uint16_t)(payload[2]
+							    | (payload[3] << 8));
+							if ((ptype & 0x0f) ==
+							    RDP_PDU_TYPE_CONFIRM_ACTIVE)
+								got_confirm = 1;
+						}
+					}
+				}
+			}
+		}
+		if (!got_confirm) return -1;
 	}
 
-	/* 4. Re-run finalization */
+	/* 4. Server finalization first, then client responds in parallel. */
 	n = rdp_pdu_build_synchronize(pdu, sizeof pdu, user_id,
 		RDP_CONN_SHARE_ID, 1002);
 	if (n < 0 ||
@@ -838,7 +876,7 @@ do_reactivate(struct rdp_tls *t, int be_fd, uint16_t user_id,
 		(void)rdp_be_send(be_fd, RDP_BE_RESIZE, &rs, sizeof rs);
 	}
 
-	/* 6. Send Synchronize + Pointer Default. */
+	/* 7. Send Synchronize + Pointer Default. */
 	{
 		uint8_t fp[64];
 		ssize_t fn;
@@ -974,6 +1012,49 @@ run_proxy(struct rdp_tls *t, int be_fd,
 	gfx.desktop_w = desktop_w;
 	gfx.desktop_h = desktop_h;
 
+	/* Read client finalization (Sync, Control, Control, FontList)
+	 * before initializing channels. */
+	{
+		uint8_t fbuf[0x4000];
+		int _fi;
+		for (_fi = 0; _fi < 10; _fi++) {
+			int fk = 0;
+			ssize_t fr = read_one_rdp_pdu(t, fbuf, sizeof fbuf, &fk);
+			if (fr <= 0) break;
+			if (fk == 1) {
+				const uint8_t *mp;
+				size_t ml;
+				uint16_t fuid, fcid;
+				const uint8_t *fp;
+				size_t fl;
+				if (strip_tpkt_x224(fbuf, (size_t)fr,
+				    &mp, &ml) == 0
+				    && mp[0] == RDP_MCS_TYPE_SEND_DATA_REQ
+				    && rdp_mcs_parse_send_data_request(
+					mp, ml, &fuid, &fcid, &fp, &fl) >= 0
+				    && fl >= 18) {
+					uint16_t pt = (uint16_t)(fp[2]
+						| (fp[3] << 8));
+					if ((pt & 0x0f) == RDP_PDU_TYPE_DATA
+					    && fp[14] == RDP_PDU2_FONTLIST) {
+						ssize_t fn =
+							rdp_pdu_build_font_map(
+							fbuf, sizeof fbuf,
+							user_id,
+							RDP_CONN_SHARE_ID);
+						if (fn > 0)
+							(void)send_send_data(t,
+								user_id,
+								io_channel,
+								fbuf,
+								(size_t)fn);
+						break;
+					}
+				}
+			}
+		}
+	}
+
 	if (cs->enabled) {
 		if (clip_send_monitor_ready_and_caps(t, cs) != 0)
 			rdp_warn("conn[%s]: cliprdr init failed", peer);
@@ -1012,6 +1093,17 @@ run_proxy(struct rdp_tls *t, int be_fd,
 				ann, (size_t)an);
 		rdp_debug("conn[%s]: rdpdr announce sent (chan=%u)",
 			peer, dr->channel_id);
+	}
+
+	/* Send a fast-path Synchronize + pointer to keep the client
+	 * alive while the backend starts. */
+	{
+		uint8_t fp[64];
+		ssize_t fn;
+		fn = rdp_fp_build_synchronize(fp, sizeof fp);
+		if (fn > 0) (void)rdp_tls_write_full(t, fp, (size_t)fn);
+		fn = rdp_fp_build_pointer_default(fp, sizeof fp);
+		if (fn > 0) (void)rdp_tls_write_full(t, fp, (size_t)fn);
 	}
 
 	for (;;) {
@@ -1823,6 +1915,22 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 				explicit_bzero(nla_pass, sizeof nla_pass);
 				rdp_sessmgr_close(&sm);
 				rdp_info("conn[%s]: backend fd %d", peer, be_fd);
+				{
+					uint8_t ei[128];
+					ssize_t en = rdp_pdu_build_set_error_info(
+						ei, sizeof ei, user_id,
+						RDP_CONN_SHARE_ID, 0);
+					if (en > 0)
+						(void)send_send_data(t, user_id,
+							io_channel, ei, (size_t)en);
+					uint8_t li[700];
+					ssize_t ln = rdp_pdu_build_save_session_logon(
+						li, sizeof li, user_id,
+						RDP_CONN_SHARE_ID);
+					if (ln > 0)
+						(void)send_send_data(t, user_id,
+							io_channel, li, (size_t)ln);
+				}
 				run_proxy(t, be_fd, &clip, &dynvc, &snd,
 					&devr, user_id, io_channel,
 					desktop_w, desktop_h, peer);
