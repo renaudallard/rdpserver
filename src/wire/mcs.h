@@ -132,6 +132,9 @@ struct rdp_mcs_connect_initial {
 	uint32_t cluster_flags;
 	uint32_t redirected_session_id;
 
+	/* CS_MCS_MSGCHANNEL present? */
+	int has_msgchannel;
+
 	/* CS_MONITOR: client monitor layout. */
 #define RDP_MCS_MAX_MONITORS 16
 	uint32_t monitor_count;
@@ -151,7 +154,9 @@ struct rdp_mcs_connect_response {
 	uint16_t  channel_ids[RDP_MCS_MAX_CHANNELS];
 	uint32_t  encryption_method;   /* 0 when TLS is in use */
 	uint32_t  encryption_level;    /* 0 when TLS is in use */
-	uint16_t  requested_protocols; /* echoed from CS */
+	uint32_t  requested_protocols; /* client's original request */
+	uint32_t  early_capability_flags;
+	uint16_t  msgchannel_id;     /* 0 if not used */
 };
 
 ssize_t rdp_mcs_parse_connect_initial(const uint8_t *p, size_t len,

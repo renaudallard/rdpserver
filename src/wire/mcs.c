@@ -308,8 +308,10 @@ rdp_mcs_parse_connect_initial(const uint8_t *p, size_t len,
 			out->monitor_count = mi;
 			break;
 		}
+		case RDP_CS_MCS_MSGCHANNEL:
+			out->has_msgchannel = 1;
+			break;
 		default:
-			/* Unknown block; ignore. */
 			break;
 		}
 		ud_off += blen;
@@ -364,7 +366,7 @@ rdp_mcs_build_connect_response(uint8_t *out, size_t cap,
 		start = rdp_buf_used(&sb);
 		if (rdp_buf_put_u32le(&sb, 0x00080004u) != 0) return -1;
 		if (rdp_buf_put_u32le(&sb, r->requested_protocols) != 0) return -1;
-		if (rdp_buf_put_u32le(&sb, 0) != 0) return -1;
+		if (rdp_buf_put_u32le(&sb, r->early_capability_flags) != 0) return -1;
 		hdr[0] = RDP_SC_CORE & 0xff;
 		hdr[1] = (RDP_SC_CORE >> 8) & 0xff;
 		{
@@ -415,6 +417,23 @@ rdp_mcs_build_connect_response(uint8_t *out, size_t cap,
 			hdr[3] = (sz >> 8) & 0xff;
 		}
 	}
+	/* SC_MCS_MSGCHANNEL (type 0x0C04) -- required if client sent
+	 * CS_MCS_MSGCHANNEL, otherwise the client hangs on channel join. */
+	if (r->msgchannel_id != 0) {
+		uint8_t *hdr;
+		size_t start;
+		hdr = rdp_buf_reserve(&sb, 4);
+		if (hdr == NULL) return -1;
+		start = rdp_buf_used(&sb);
+		if (rdp_buf_put_u16le(&sb, r->msgchannel_id) != 0) return -1;
+		hdr[0] = 0x04; hdr[1] = 0x0c;
+		{
+			uint16_t sz = (uint16_t)(rdp_buf_used(&sb) - start + 4);
+			hdr[2] = sz & 0xff;
+			hdr[3] = (sz >> 8) & 0xff;
+		}
+	}
+
 	/* GCC Conference Create Response, built field-by-field to match
 	 * the format Microsoft clients expect.  The connectPDU length
 	 * must reflect the actual inner content size. */

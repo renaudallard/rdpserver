@@ -1527,9 +1527,12 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 			cr2.channel_count = (uint16_t)ci.channel_count;
 			for (uint16_t i = 0; i < cr2.channel_count; i++)
 				cr2.channel_ids[i] = (uint16_t)(1004 + i);
-			cr2.requested_protocols = use_nla
-			? (uint16_t)RDP_PROTO_HYBRID
-			: (uint16_t)RDP_PROTO_SSL;
+			cr2.requested_protocols = cr.have_neg_req
+			? cr.requested_protocols : 0;
+			cr2.early_capability_flags = 0;
+			if (ci.has_msgchannel)
+				cr2.msgchannel_id =
+					(uint16_t)(1004 + ci.channel_count);
 
 			dt_n = rdp_x224_build_dt(scratch + 4, sizeof scratch - 4);
 			cr_n = rdp_mcs_build_connect_response(
