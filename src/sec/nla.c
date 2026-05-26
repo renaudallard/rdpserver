@@ -292,12 +292,22 @@ rdp_nla_server(struct rdp_tls *t,
 			msg_to_seal[0]++;
 			msg_len = (size_t)pklen;
 		}
+		rdp_debug("nla: seal input len=%zu hash=%02x%02x%02x%02x "
+			"skey=%02x%02x%02x%02x",
+			msg_len,
+			msg_to_seal[0], msg_to_seal[1],
+			msg_to_seal[2], msg_to_seal[3],
+			stsc_seal[0], stsc_seal[1],
+			stsc_seal[2], stsc_seal[3]);
 		sealed_len = ntlm_seal_message(stsc_seal, stsc_sign, 0,
 			msg_to_seal, msg_len, sealed, sizeof sealed);
 		if (sealed_len <= 0) {
 			rdp_warn("nla: seal pubKeyAuth failed (%zd)", sealed_len);
 			return -1;
 		}
+		rdp_debug("nla: sealed len=%zd first=%02x%02x%02x%02x",
+			sealed_len, sealed[0], sealed[1],
+			sealed[2], sealed[3]);
 
 		memset(&resp, 0, sizeof resp);
 		resp.version = req.version;

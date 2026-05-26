@@ -336,13 +336,18 @@ rdp_tls_get_server_pubkey(struct rdp_tls *t, uint8_t *out, size_t cap)
 	if (t == NULL || t->ssl == NULL) return -1;
 	cert = SSL_get_certificate(t->ssl);
 	if (cert == NULL) return -1;
-	pkey = X509_get0_pubkey(cert);
-	if (pkey == NULL) return -1;
-	len = i2d_PublicKey(pkey, &der);
-	if (len <= 0 || der == NULL) return -1;
-	if ((size_t)len > cap) { OPENSSL_free(der); return -1; }
-	memcpy(out, der, (size_t)len);
-	OPENSSL_free(der);
+	{
+		X509_PUBKEY *xpk = X509_get_X509_PUBKEY(cert);
+		const unsigned char *pk_raw = NULL;
+		int pk_len = 0;
+		if (xpk == NULL) return -1;
+		if (X509_PUBKEY_get0_param(NULL, &pk_raw, &pk_len,
+		    NULL, xpk) != 1 || pk_raw == NULL || pk_len <= 0)
+			return -1;
+		len = pk_len;
+		if ((size_t)len > cap) return -1;
+		memcpy(out, pk_raw, (size_t)len);
+	}
 	return (ssize_t)len;
 }
 
