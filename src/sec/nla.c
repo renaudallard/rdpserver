@@ -265,6 +265,9 @@ rdp_nla_server(struct rdp_tls *t,
 			rdp_warn("nla: cannot get server pubkey");
 			return -1;
 		}
+		rdp_debug("nla: pubkey len=%zd first=%02x%02x%02x%02x ver=%u",
+			pklen, pubkey[0], pubkey[1], pubkey[2], pubkey[3],
+			req.version);
 		if (req.version >= 5 && req.client_nonce != NULL
 		    && req.client_nonce_len >= 32) {
 			/* CredSSP v5+: seal SHA-256(magic + nonce + pubkey) */

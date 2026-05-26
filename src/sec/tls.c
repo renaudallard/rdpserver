@@ -115,6 +115,7 @@ rdp_tls_ctx_new(const char *cert_pem, const char *key_pem)
 		return NULL;
 	}
 	(void)SSL_CTX_set_min_proto_version(t->ctx, TLS1_2_VERSION);
+	(void)SSL_CTX_set_max_proto_version(t->ctx, TLS1_2_VERSION);
 	(void)SSL_CTX_set_options(t->ctx,
 		SSL_OP_NO_COMPRESSION
 		| SSL_OP_NO_RENEGOTIATION
