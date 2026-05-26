@@ -180,7 +180,8 @@ rdp_x224_build_cc(uint8_t *out, size_t cap,
 		if (rdp_buf_put_u32le(&b, failure_code) != 0) return -1;
 	} else if (selected_protocols != 0) {
 		if (rdp_buf_put_u8(&b, RDP_NEG_TYPE_RSP) != 0) return -1;
-		if (rdp_buf_put_u8(&b, 0) != 0) return -1;       /* flags */
+		if (rdp_buf_put_u8(&b, RDP_NEG_RSP_EXTENDED_CLIENT_DATA |
+			RDP_NEG_RSP_DYNVC_GFX) != 0) return -1;
 		if (rdp_buf_put_u16le(&b, 8) != 0) return -1;     /* length */
 		if (rdp_buf_put_u32le(&b, selected_protocols) != 0) return -1;
 	}
