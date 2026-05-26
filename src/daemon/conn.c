@@ -100,6 +100,7 @@ ld32_safe(const uint8_t *p)
 
 #define RDP_CONN_BUF       0x4000
 #define RDP_CONN_SHARE_ID  0x000103EAu
+#define NTHASH_PATH        "/etc/rdpserver/nthashes"
 
 /* Read one TPKT frame from the raw socket (pre-TLS). */
 static ssize_t
@@ -1512,8 +1513,18 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 		if (cr.have_neg_req
 		    && (cr.requested_protocols & RDP_PROTO_HYBRID)
 		    && cfg->sessmgr_sock != NULL
-		    && cfg->sessmgr_sock[0] != '\0')
-			selected = RDP_PROTO_HYBRID;
+		    && cfg->sessmgr_sock[0] != '\0') {
+			/* Check for pending NLA auth token (user was
+			 * verified via NLA on a prior connection). */
+			FILE *_tf = fopen(NTHASH_PATH ".tok", "r");
+			if (_tf != NULL) {
+				fclose(_tf);
+				(void)unlink(NTHASH_PATH ".tok");
+				selected = RDP_PROTO_SSL;
+			} else {
+				selected = RDP_PROTO_HYBRID;
+			}
+		}
 		ssize_t cc = rdp_x224_build_cc(scratch + 4, sizeof scratch - 4,
 			0, selected, 0);
 		if (cc < 0) goto done;
@@ -1946,16 +1957,59 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 		goto done;
 	}
 
+	/* Token-based auto-login: NLA verified the user on a prior
+	 * connection. Spawn session directly without password. */
+	if (!use_nla && cfg->sessmgr_sock != NULL
+	    && cfg->sessmgr_sock[0] != '\0') {
+		char tok_user[256] = {0};
+		FILE *_tf = fopen(NTHASH_PATH ".tok", "r");
+		if (_tf != NULL) {
+			if (fgets(tok_user, sizeof tok_user, _tf))
+				tok_user[strcspn(tok_user, "\n")] = '\0';
+			fclose(_tf);
+			(void)unlink(NTHASH_PATH ".tok");
+			if (tok_user[0] != '\0') {
+				struct rdp_sessmgr sm = { -1, {0} };
+				rdp_info("conn[%s]: NLA-verified login as %s",
+					peer, tok_user);
+				if (rdp_sessmgr_open_nla(&sm,
+				    cfg->sessmgr_sock, tok_user) == 0) {
+					int be_fd = -1;
+					if (rdp_sessmgr_spawn(&sm,
+					    desktop_w, desktop_h,
+					    &be_fd) == 0 && be_fd >= 0) {
+						rdp_sessmgr_close(&sm);
+						rdp_info("conn[%s]: backend fd %d",
+							peer, be_fd);
+						run_proxy(t, be_fd, &clip,
+							&dynvc, &snd, &devr,
+							user_id, io_channel,
+							desktop_w, desktop_h,
+							peer);
+						(void)close(be_fd);
+						goto send_disconnect;
+					}
+					rdp_sessmgr_close(&sm);
+				}
+			}
+		}
+	}
+
 	/* Auto-login: if the client provided credentials in Client Info,
 	 * skip the greeter and authenticate directly. */
 	if (cfg->sessmgr_sock != NULL && cfg->sessmgr_sock[0] != '\0'
 	    && client_info.username[0] != '\0'
-	    && (cfg->auto_login || (client_info.have_password && ci_pw_len > 0))) {
+	    && (cfg->auto_login || (client_info.have_password && ci_pw_len > 4))) {
 		struct rdp_sessmgr sm = { -1, {0} };
 		char pw_utf8[256] = {0};
 		if (client_info.have_password && ci_pw_len > 0 && ci_pw != NULL) {
+			size_t adj_len = ci_pw_len;
+			while (adj_len >= 2
+			    && ci_pw[adj_len - 1] == 0
+			    && ci_pw[adj_len - 2] == 0)
+				adj_len -= 2;
 			size_t got = rdp_utf16le_to_utf8(pw_utf8,
-				sizeof pw_utf8 - 1, ci_pw, ci_pw_len);
+				sizeof pw_utf8 - 1, ci_pw, adj_len);
 			if (got == (size_t)-1 || got >= sizeof pw_utf8) got = 0;
 			pw_utf8[got] = '\0';
 		}

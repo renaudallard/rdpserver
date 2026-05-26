@@ -149,6 +149,10 @@ xfreerdp /v:127.0.0.1:13389 /cert:ignore /size:1024x768 +clipboard
 `rdpd` and `rdp-sessionmgr` install to `$PREFIX/sbin` via `make
 install`.  A sample `/etc/pam.d/rdpd` lives in
 [`contrib/pam.d/rdpd`](./contrib/pam.d/rdpd).
+Systemd unit files are in
+[`contrib/systemd/`](./contrib/systemd/)
+and OpenBSD rc.d scripts in
+[`contrib/rc.d/`](./contrib/rc.d/).
 
 ## Project layout
 
