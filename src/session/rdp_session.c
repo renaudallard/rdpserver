@@ -90,7 +90,7 @@
 #include <sys/mman.h>
 
 #define BE_FD 3
-#define FRAME_INTERVAL_MS 100
+#define FRAME_INTERVAL_MS 66
 
 #ifndef RDP_XVFB_PATH
 # define RDP_XVFB_PATH "/usr/bin/Xvfb"

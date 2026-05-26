@@ -57,17 +57,17 @@ init_encoder(struct rdp_h264 *e, int w, int h)
 	e->param.i_width  = w;
 	e->param.i_height = h;
 	e->param.i_csp    = X264_CSP_I420;
-	e->param.i_threads = 1;
+	e->param.i_threads = 0;
 	e->param.b_repeat_headers = 1;
 	e->param.b_annexb = 1;
-	e->param.i_keyint_max = 30;
-	e->param.i_keyint_min = 30;
+	e->param.i_keyint_max = 60;
+	e->param.i_keyint_min = 60;
 	e->param.i_bframe = 0;
 	e->param.rc.i_rc_method = X264_RC_CRF;
-	e->param.rc.f_rf_constant = 28.0f;
-	e->param.rc.i_vbv_max_bitrate = 8000;
-	e->param.rc.i_vbv_buffer_size = 8000;
-	e->param.rc.f_rf_constant_max = 40.0f;
+	e->param.rc.f_rf_constant = 32.0f;
+	e->param.rc.i_vbv_max_bitrate = 4000;
+	e->param.rc.i_vbv_buffer_size = 2000;
+	e->param.rc.f_rf_constant_max = 45.0f;
 	e->param.i_log_level = X264_LOG_NONE;
 
 	e->enc = x264_encoder_open(&e->param);
