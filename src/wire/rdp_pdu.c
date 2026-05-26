@@ -291,5 +291,5 @@ rdp_pdu_build_save_session_logon(uint8_t *out, size_t cap,
 	if (rdp_buf_put_u32le(&b, RDP_INFOTYPE_LOGON_PLAINNOTIFY) != 0)
 		return -1;
 	if (rdp_buf_put(&b, pad, sizeof pad) != 0) return -1;
-	return r + (ssize_t)rdp_buf_used(&b);
+	return total;
 }
