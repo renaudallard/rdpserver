@@ -90,7 +90,7 @@
 #include <sys/mman.h>
 
 #define BE_FD 3
-#define FRAME_INTERVAL_MS 33
+#define FRAME_INTERVAL_MS 100
 
 #ifndef RDP_XVFB_PATH
 # define RDP_XVFB_PATH "/usr/bin/Xvfb"
@@ -1085,10 +1085,35 @@ main(int argc, char *argv[])
 
 	/* Greet the worker with our mode. */
 	{
+		int sndbuf = 2 * 1024 * 1024;
+		(void)setsockopt(BE_FD, SOL_SOCKET, SO_SNDBUF,
+			&sndbuf, sizeof sndbuf);
+	}
+	{
 		struct rdp_be_hello hello = { (uint16_t)w, (uint16_t)h, 24, 0 };
 		if (rdp_be_send(BE_FD, RDP_BE_HELLO_S2W,
 			&hello, sizeof hello) != 0)
 			rdp_err("HELLO send failed: %s", strerror(errno));
+	}
+	{
+		char rtdir[64];
+		(void)snprintf(rtdir, sizeof rtdir, "/run/user/%u",
+			(unsigned)getuid());
+		(void)mkdir(rtdir, 0700);
+		(void)setenv("XDG_RUNTIME_DIR", rtdir, 1);
+	}
+	{
+		pid_t pa = fork();
+		if (pa == 0) {
+			execlp("pulseaudio", "pulseaudio",
+				"--start", "--exit-idle-time=-1",
+				(char *)NULL);
+			_exit(0);
+		}
+		if (pa > 0) {
+			int st;
+			(void)waitpid(pa, &st, 0);
+		}
 	}
 
 	xterm_pid = spawn_xterm();
