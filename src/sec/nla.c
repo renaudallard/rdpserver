@@ -228,8 +228,10 @@ rdp_nla_server(struct rdp_tls *t,
 	}
 	rdp_info("nla: NTLMv2 verified for '%s'", user_utf8);
 
-	if (ntlm_derive_exported_key(&auth, session_base_key, exported) != 0)
+	if (ntlm_derive_exported_key(&auth, session_base_key, exported) != 0) {
+		rdp_warn("nla: derive exported key failed");
 		return -1;
+	}
 	ntlm_seal_key(1, exported, cts_seal);
 
 	/* Initialize the client-to-server RC4 state. The client's RC4
@@ -289,7 +291,10 @@ rdp_nla_server(struct rdp_tls *t,
 		}
 		sealed_len = ntlm_seal_message(stsc_seal, stsc_sign, 0,
 			msg_to_seal, msg_len, sealed, sizeof sealed);
-		if (sealed_len <= 0) return -1;
+		if (sealed_len <= 0) {
+			rdp_warn("nla: seal pubKeyAuth failed (%zd)", sealed_len);
+			return -1;
+		}
 
 		memset(&resp, 0, sizeof resp);
 		resp.version = req.version;
