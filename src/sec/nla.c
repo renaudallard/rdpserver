@@ -176,6 +176,9 @@ rdp_nla_server(struct rdp_tls *t,
 	if (req.client_nonce != NULL && req.client_nonce_len >= 32) {
 		memcpy(saved_nonce, req.client_nonce, 32);
 		saved_nonce_len = 32;
+		rdp_debug("nla: saved nonce from NEGOTIATE");
+	} else {
+		rdp_debug("nla: no nonce in NEGOTIATE");
 	}
 
 	/* 2. Send CHALLENGE. */
@@ -219,6 +222,14 @@ rdp_nla_server(struct rdp_tls *t,
 		domain_utf8[got] = '\0';
 	}
 	rdp_info("nla: user='%s' domain='%s'", user_utf8, domain_utf8);
+
+	/* Fall back to AUTHENTICATE nonce if NEGOTIATE had none. */
+	if (saved_nonce_len == 0 && req.client_nonce != NULL
+	    && req.client_nonce_len >= 32) {
+		memcpy(saved_nonce, req.client_nonce, 32);
+		saved_nonce_len = 32;
+		rdp_debug("nla: saved nonce from AUTHENTICATE");
+	}
 
 	/* 4. Look up NT hash and verify NTLMv2. */
 	if (lookup_nthash(user_utf8, nthash) != 0) {

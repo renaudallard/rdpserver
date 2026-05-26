@@ -1171,7 +1171,7 @@ run_proxy(struct rdp_tls *t, int be_fd,
 				}
 				if (r == 4 && !gfx.active
 				    && dv->dv.gfx_channel_id >= 0
-				    && 1 /*: needs investigation: mstsc closes channel; needs investigation */) {
+				    && 0) {
 					/* GFX caps received; init the pipeline. */
 					uint8_t gbuf[512];
 					ssize_t gn;

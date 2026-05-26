@@ -44,7 +44,6 @@ rdp_drdynvc_build_caps(uint8_t *out, size_t cap)
 	out[1] = 0;                         /* pad */
 	out[2] = 3;                         /* version LE low (v3) */
 	out[3] = 0;                         /* version LE high */
-	/* v3 priority charges (4 bytes) */
 	out[4] = 0; out[5] = 0;            /* PriorityCharge0/1 */
 	out[6] = 0; out[7] = 0;            /* PriorityCharge2/3 */
 	return 8;
