@@ -85,6 +85,7 @@
 #include <poll.h>
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -1515,11 +1516,13 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 		    && cfg->sessmgr_sock != NULL
 		    && cfg->sessmgr_sock[0] != '\0') {
 			/* Check for pending NLA auth token (user was
-			 * verified via NLA on a prior connection). */
-			FILE *_tf = fopen(NTHASH_PATH ".tok", "r");
-			if (_tf != NULL) {
-				fclose(_tf);
+			 * verified via NLA on a prior connection).
+			 * Open and unlink atomically to prevent a
+			 * second worker from reading the same token. */
+			int _tfd = open(NTHASH_PATH ".tok", O_RDONLY);
+			if (_tfd >= 0) {
 				(void)unlink(NTHASH_PATH ".tok");
+				(void)close(_tfd);
 				selected = RDP_PROTO_SSL;
 			} else {
 				selected = RDP_PROTO_HYBRID;
@@ -1958,16 +1961,21 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 	}
 
 	/* Token-based auto-login: NLA verified the user on a prior
-	 * connection. Spawn session directly without password. */
+	 * connection. Open and unlink atomically to prevent a
+	 * second worker from reading the same token. */
 	if (!use_nla && cfg->sessmgr_sock != NULL
 	    && cfg->sessmgr_sock[0] != '\0') {
 		char tok_user[256] = {0};
-		FILE *_tf = fopen(NTHASH_PATH ".tok", "r");
-		if (_tf != NULL) {
-			if (fgets(tok_user, sizeof tok_user, _tf))
-				tok_user[strcspn(tok_user, "\n")] = '\0';
-			fclose(_tf);
+		int _tfd = open(NTHASH_PATH ".tok", O_RDONLY);
+		if (_tfd >= 0) {
+			ssize_t _tr;
 			(void)unlink(NTHASH_PATH ".tok");
+			_tr = read(_tfd, tok_user, sizeof tok_user - 1);
+			(void)close(_tfd);
+			if (_tr > 0) {
+				tok_user[_tr] = '\0';
+				tok_user[strcspn(tok_user, "\n")] = '\0';
+			}
 			if (tok_user[0] != '\0') {
 				struct rdp_sessmgr sm = { -1, {0} };
 				rdp_info("conn[%s]: NLA-verified login as %s",
