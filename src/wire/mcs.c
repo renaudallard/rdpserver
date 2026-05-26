@@ -415,37 +415,44 @@ rdp_mcs_build_connect_response(uint8_t *out, size_t cap,
 			hdr[3] = (sz >> 8) & 0xff;
 		}
 	}
-	/* SC_MCS_MSGCHANNEL omitted for now - some clients choke on it */
-
 	/* GCC Conference Create Response, built field-by-field to match
-	 * the format Microsoft clients expect. */
-	rdp_buf_init(&gb, gcc, sizeof gcc);
-	if (rdp_per_write_choice(&gb, 0) != 0) return -1;
+	 * the format Microsoft clients expect.  The connectPDU length
+	 * must reflect the actual inner content size. */
 	{
-		static const uint8_t t124_oid[] = {0x00, 0x14, 0x7c, 0x00, 0x01};
-		if (rdp_buf_put_u8(&gb, 0x05) != 0) return -1;
-		if (rdp_buf_put(&gb, t124_oid, sizeof t124_oid) != 0) return -1;
+		uint8_t inner[1024];
+		struct rdp_buf ib;
+		size_t inner_len;
+
+		rdp_buf_init(&ib, inner, sizeof inner);
+		if (rdp_per_write_choice(&ib, 0x14) != 0) return -1;
+		{
+			uint16_t node_id = 0x79F3 - 1001;
+			if (rdp_buf_put_u8(&ib, (uint8_t)((node_id >> 8) & 0xff)) != 0) return -1;
+			if (rdp_buf_put_u8(&ib, (uint8_t)(node_id & 0xff)) != 0) return -1;
+		}
+		if (rdp_buf_put_u8(&ib, 1) != 0) return -1;
+		if (rdp_buf_put_u8(&ib, 1) != 0) return -1;
+		if (rdp_buf_put_u8(&ib, 0) != 0) return -1;
+		if (rdp_buf_put_u8(&ib, 1) != 0) return -1;
+		if (rdp_per_write_choice(&ib, 0xC0) != 0) return -1;
+		if (rdp_buf_put_u8(&ib, 0x00) != 0) return -1;
+		if (rdp_per_write_h221_key(&ib, "McDn") != 0) return -1;
+		if (rdp_per_write_length(&ib, rdp_buf_used(&sb)) != 0) return -1;
+		if (rdp_buf_put(&ib, sc, rdp_buf_used(&sb)) != 0) return -1;
+		inner_len = rdp_buf_used(&ib);
+
+		rdp_buf_init(&gb, gcc, sizeof gcc);
+		if (rdp_per_write_choice(&gb, 0) != 0) return -1;
+		{
+			static const uint8_t t124_oid[] =
+				{0x00, 0x14, 0x7c, 0x00, 0x01};
+			if (rdp_buf_put_u8(&gb, 0x05) != 0) return -1;
+			if (rdp_buf_put(&gb, t124_oid, sizeof t124_oid) != 0)
+				return -1;
+		}
+		if (rdp_per_write_length(&gb, inner_len) != 0) return -1;
+		if (rdp_buf_put(&gb, inner, inner_len) != 0) return -1;
 	}
-	if (rdp_per_write_length(&gb, 0x2A) != 0) return -1;
-	if (rdp_per_write_choice(&gb, 0x14) != 0) return -1;
-	{
-		uint16_t node_id = 0x79F3 - 1001;
-		if (rdp_buf_put_u8(&gb, (uint8_t)((node_id >> 8) & 0xff)) != 0) return -1;
-		if (rdp_buf_put_u8(&gb, (uint8_t)(node_id & 0xff)) != 0) return -1;
-	}
-	/* tag = per_write_integer(1): length(1) + value(1) */
-	if (rdp_buf_put_u8(&gb, 1) != 0) return -1;
-	if (rdp_buf_put_u8(&gb, 1) != 0) return -1;
-	/* result = per_write_enumerated(0) */
-	if (rdp_buf_put_u8(&gb, 0) != 0) return -1;
-	/* number_of_sets(1) */
-	if (rdp_buf_put_u8(&gb, 1) != 0) return -1;
-	if (rdp_per_write_choice(&gb, 0xC0) != 0) return -1;
-	/* h221NonStandard: per_write_octet_string("McDn", 4, min=4) → length=0 + key */
-	if (rdp_buf_put_u8(&gb, 0x00) != 0) return -1;
-	if (rdp_per_write_h221_key(&gb, "McDn") != 0) return -1;
-	if (rdp_per_write_length(&gb, rdp_buf_used(&sb)) != 0) return -1;
-	if (rdp_buf_put(&gb, sc, rdp_buf_used(&sb)) != 0) return -1;
 
 	/* BER Connect Response envelope: application tag 102 + body. */
 	rdp_buf_init(&eb, envelope, sizeof envelope);
