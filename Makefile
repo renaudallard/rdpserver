@@ -140,15 +140,15 @@ src/session/wayland_comp.o: src/session/wayland_comp.c
 	$(CC) $(CFLAGS) $(WLROOTS_CFLAGS) -Isrc/session/protocols -c -o $@ src/session/wayland_comp.c
 
 src/session/rdp_session.o: src/session/rdp_session.c
-	$(CC) $(CFLAGS) $(X11_CFLAGS) -DRDP_XVFB_PATH=\"$(XVFB_PATH)\" \
+	$(CC) $(CFLAGS) $(X11_CFLAGS) $(X264_CFLAGS) -DRDP_XVFB_PATH=\"$(XVFB_PATH)\" \
 		-c -o $@ src/session/rdp_session.c
 
 src/session/clip_x11.o: src/session/clip_x11.c
 	$(CC) $(CFLAGS) $(X11_CFLAGS) -c -o $@ src/session/clip_x11.c
 
-$(SESSION_PROG): $(SESSION_OBJS) $(BACKEND_LIB) $(COMMON_LIB)
-	$(CC) $(LDFLAGS) -o $@ $(SESSION_OBJS) $(BACKEND_LIB) $(COMMON_LIB) \
-		$(X11_LIBS) $(AUDIO_LIBS) $(WLROOTS_LIBS)
+$(SESSION_PROG): $(SESSION_OBJS) $(BACKEND_LIB) $(WIRE_LIB) $(COMMON_LIB)
+	$(CC) $(LDFLAGS) -o $@ $(SESSION_OBJS) $(BACKEND_LIB) $(WIRE_LIB) $(COMMON_LIB) \
+		$(X11_LIBS) $(X264_LIBS) $(AUDIO_LIBS) $(WLROOTS_LIBS)
 
 .c.o:
 	$(CC) $(CFLAGS) -c -o $@ $<

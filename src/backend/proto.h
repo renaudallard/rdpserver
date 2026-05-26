@@ -48,6 +48,8 @@
  *   FRAME       rdp-session -> worker.  Carries a rectangular pixel
  *               update in 24-bit BGR, bottom-up rows.  Worker tiles
  *               this into RDP fast-path bitmap updates.
+ *   H264_FRAME  rdp-session -> worker.  Pre-encoded H.264 bitstream.
+ *               Worker wraps it into RDPGFX AVC420 PDUs directly.
  *   INPUT_KEY   worker -> rdp-session.  Translated PC/AT scancode +
  *               down/up flag + extended flag.
  *   INPUT_MOUSE worker -> rdp-session.  Absolute pixel coordinates,
@@ -80,6 +82,8 @@
 /* File system operations (session <-> worker for RDPDR drives).
  * Request: session sends FS_REQ with an rdp_be_fs_req header.
  * Response: worker sends FS_RSP with an rdp_be_fs_rsp header + data. */
+#define RDP_BE_H264_FRAME  13u
+
 #define RDP_BE_FS_REQ      11u
 #define RDP_BE_FS_RSP      12u
 
@@ -121,6 +125,16 @@ struct rdp_be_frame_hdr {
 	uint16_t y;
 	uint16_t w;
 	uint16_t h;
+};
+
+/* H.264-encoded frame payload header (12 bytes) followed by h264_len
+ * bytes of compressed H.264 bitstream. */
+struct rdp_be_h264_frame_hdr {
+	uint16_t x;
+	uint16_t y;
+	uint16_t w;
+	uint16_t h;
+	uint32_t h264_len;
 };
 
 /* Key event payload (8 bytes). */

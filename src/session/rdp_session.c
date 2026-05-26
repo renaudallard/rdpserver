@@ -56,6 +56,7 @@
 #include "../common/io.h"
 #include "../backend/proto.h"
 #include "../backend/proto_api.h"
+#include "../wire/h264enc.h"
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -370,6 +371,42 @@ send_frame(int fd, int w, int h, const uint8_t *pixels)
 		memcpy(buf, hdr, RDP_BE_HEADER + sizeof fhdr);
 		memcpy(buf + RDP_BE_HEADER + sizeof fhdr,
 			pixels, (size_t)w * h * 3);
+		rc = (rdp_write_full(fd, buf, RDP_BE_HEADER + total)
+			== (ssize_t)(RDP_BE_HEADER + total)) ? 0 : -1;
+		free(buf);
+		return rc;
+	}
+}
+
+static int
+send_h264_frame(int fd, int w, int h, const uint8_t *h264_data,
+    size_t h264_len)
+{
+	struct rdp_be_h264_frame_hdr fhdr;
+	uint8_t hdr[RDP_BE_HEADER + sizeof fhdr];
+	uint32_t total = (uint32_t)sizeof fhdr + (uint32_t)h264_len;
+
+	hdr[0] = RDP_BE_H264_FRAME;
+	hdr[1] = 0; hdr[2] = 0; hdr[3] = 0;
+	hdr[4] = (uint8_t)(total & 0xff);
+	hdr[5] = (uint8_t)((total >> 8) & 0xff);
+	hdr[6] = (uint8_t)((total >> 16) & 0xff);
+	hdr[7] = (uint8_t)((total >> 24) & 0xff);
+
+	fhdr.x = 0;
+	fhdr.y = 0;
+	fhdr.w = (uint16_t)w;
+	fhdr.h = (uint16_t)h;
+	fhdr.h264_len = (uint32_t)h264_len;
+	memcpy(hdr + RDP_BE_HEADER, &fhdr, sizeof fhdr);
+
+	{
+		uint8_t *buf = malloc(RDP_BE_HEADER + total);
+		int rc;
+		if (buf == NULL) return -1;
+		memcpy(buf, hdr, RDP_BE_HEADER + sizeof fhdr);
+		memcpy(buf + RDP_BE_HEADER + sizeof fhdr,
+			h264_data, h264_len);
 		rc = (rdp_write_full(fd, buf, RDP_BE_HEADER + total)
 			== (ssize_t)(RDP_BE_HEADER + total)) ? 0 : -1;
 		free(buf);
@@ -1083,6 +1120,12 @@ main(int argc, char *argv[])
 		return 1;
 	}
 
+	struct rdp_h264 *h264 = rdp_h264_open(w, h);
+	if (h264 != NULL)
+		rdp_info("session H.264 encoder active (%dx%d)", w, h);
+	else
+		rdp_info("session H.264 encoder unavailable; raw frames");
+
 	/* Greet the worker with our mode. */
 	{
 		int sndbuf = 2 * 1024 * 1024;
@@ -1205,6 +1248,9 @@ main(int argc, char *argv[])
 					free(frame_buf);
 					frame_buf = malloc((size_t)w * h * 3);
 					if (frame_buf == NULL) break;
+					if (h264 != NULL)
+						(void)rdp_h264_resize(h264,
+						    w, h);
 				}
 			} else if (type == RDP_BE_BYE) {
 				break;
@@ -1227,8 +1273,22 @@ main(int argc, char *argv[])
 			+ (now.tv_nsec - last_send.tv_nsec) / 1000000;
 		if (elapsed_ms >= FRAME_INTERVAL_MS && dirty) {
 			if (capture_grab(&cap, frame_buf) == 0) {
-				if (send_frame(BE_FD, w, h, frame_buf) != 0)
-					break;
+				if (h264 != NULL) {
+					const uint8_t *enc;
+					size_t enc_len;
+					int kf;
+					if (rdp_h264_encode(h264, frame_buf,
+					    w, h, &enc, &enc_len, &kf) == 0
+					    && enc != NULL && enc_len > 0) {
+						if (send_h264_frame(BE_FD, w, h,
+						    enc, enc_len) != 0)
+							break;
+					}
+				} else {
+					if (send_frame(BE_FD, w, h,
+					    frame_buf) != 0)
+						break;
+				}
 			}
 			if (dmg != None) {
 				XDamageSubtract(dpy, dmg, None, None);
@@ -1245,6 +1305,7 @@ main(int argc, char *argv[])
 	}
 
 	rdp_info("rdp-session shutting down");
+	rdp_h264_close(h264);
 	rdp_audio_close(audio);
 	free(audio_buf);
 	if (clip_ok) rdp_clip_close(&clip);

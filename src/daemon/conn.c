@@ -1279,6 +1279,53 @@ run_proxy(struct rdp_tls *t, int be_fd,
 						frame_buf) != 0)
 						break;
 				}
+			} else if (type == RDP_BE_H264_FRAME) {
+				struct rdp_be_h264_frame_hdr fhdr;
+				uint8_t *h264_data;
+				if (rdp_read_full(be_fd, &fhdr,
+					sizeof fhdr) != sizeof fhdr)
+					break;
+				if (fhdr.h264_len == 0
+				    || fhdr.h264_len > 0x1000000)
+					break;
+				h264_data = malloc(fhdr.h264_len);
+				if (h264_data == NULL) break;
+				if (rdp_read_full(be_fd, h264_data,
+				    fhdr.h264_len)
+				    != (ssize_t)fhdr.h264_len) {
+					free(h264_data);
+					break;
+				}
+				if (gfx.active
+				    && dv->dv.gfx_channel_id >= 0) {
+					uint8_t *gpdu;
+					size_t gpdu_cap = fhdr.h264_len
+						+ 256;
+					gpdu = malloc(gpdu_cap);
+					if (gpdu != NULL) {
+						ssize_t gn;
+						gfx.frame_id++;
+						gn = rdp_rdpgfx_build_avc420_frame(
+							gpdu, gpdu_cap,
+							gfx.surface_id,
+							gfx.frame_id,
+							fhdr.w, fhdr.h,
+							h264_data,
+							fhdr.h264_len);
+						if (gn > 0)
+							(void)send_gfx_pdu(
+								t, user_id,
+								dv->channel_id,
+								dv->dv.gfx_channel_id,
+								gpdu,
+								(size_t)gn);
+						free(gpdu);
+					}
+				} else {
+					/* GFX not active yet; drop
+					 * pre-encoded frame. */
+				}
+				free(h264_data);
 			} else if (type == RDP_BE_HELLO_S2W) {
 				uint8_t junk[64];
 				size_t left = len;

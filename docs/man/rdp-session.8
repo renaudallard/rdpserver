@@ -24,6 +24,18 @@ to the
 .Sy CLIPRDR
 RDP channel.
 .Pp
+Captured frames are encoded to H.264 with
+.Sy libx264
+before being sent over the backend socket.
+This reduces per-frame data from several megabytes of raw pixels to
+a few kilobytes of compressed bitstream.
+The
+.Xr rdpd 8
+proxy wraps the pre-encoded data in RDPGFX AVC420 PDUs for the
+client.
+If the H.264 encoder is unavailable, raw pixel frames are sent
+as a fallback.
+.Pp
 Audio from applications in the session is captured and forwarded to
 the RDP client via the backend protocol.
 The audio capture backend is selected at compile time:

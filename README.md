@@ -39,9 +39,10 @@ TCP/3389 ── TLS ──> rdpd (root)
 ```
 
 The greeter is painted with RDP fast-path bitmap updates over a CPU
-framebuffer; an embedded 8×16 PSF font renders the labels and typed
-text. After auth, a backend RPC shuttles pixel frames from
-`rdp-session` to `rdpd` and input events the other way.
+framebuffer; an embedded 8x16 PSF font renders the labels and typed
+text. After auth, `rdp-session` encodes frames with H.264 (libx264)
+and sends compressed data over the backend RPC socket to `rdpd`,
+which wraps them in RDPGFX AVC420 PDUs for the client.
 
 > **Status: alpha.** Verified end-to-end against `xfreerdp`,
 > Microsoft `mstsc.exe` (Windows 11), Microsoft Remote Desktop
@@ -74,7 +75,7 @@ text. After auth, a backend RPC shuttles pixel frames from
 | CLIPRDR clipboard, bidirectional, text formats | ✓ | |
 | Clean disconnect, Shutdown Request, TCP keepalive | ✓ | |
 | NLA / CredSSP / NTLMv2 | ✓ | Full CredSSP v6 flow with NTLMv2 verification.  NT hashes are auto-cached by the session manager on first successful authentication, so no manual setup is needed.  Microsoft clients (mstsc, macOS, Android) connect via NLA directly.  Credentials are extracted from TSPasswordCreds and verified via PAM/bsd_auth. |
-| RDPGFX / H.264 (AVC420) | ✓ | Server opens the GraphicsPipeline DRDYNVC channel, exchanges RDPGFX caps (v8.1), creates a surface, and streams frames as AVC420 WireToSurface1 PDUs encoded via libx264 (ultrafast/zerolatency, CRF 32).  Large frames are split across ZGFX segments and channel PDU fragments.  Verified end-to-end with xfreerdp 3.x on Linux and OpenBSD. |
+| RDPGFX / H.264 (AVC420) | ✓ | H.264 encoding runs in rdp-session (the per-user helper), sending compressed frames (~5-50 KB) over the backend socket instead of raw pixels (~4.6 MB).  The rdpd proxy wraps pre-encoded bitstreams in RDPGFX AVC420 WireToSurface1 PDUs.  Large frames are split across ZGFX segments and channel PDU fragments.  Verified end-to-end with xfreerdp 3.x on Linux and OpenBSD. |
 | Audio output (RDPSND / MS-RDPEA) | ✓ | PCM 16-bit stereo 44.1 kHz streamed via SNDC_WAVE2 PDUs.  PulseAudio on Linux (auto-creates a per-session null sink), sndio on OpenBSD.  Audio from apps playing in the session is captured and forwarded to the RDP client in real time. |
 | Drive / printer / serial redirection | ✓ | RDPDR channel with capability exchange, device enumeration, and IRP dispatch for drive file I/O.  Supports Create, Read, Close, and QueryDirectory IRPs with completion tracking.  The session can request file operations on client drives via the backend protocol; the worker relays them as IRPs and forwards completions back. |
 | Session reconnect (auto-reconnect cookie) | ✓ | Save Session Info PDU with ARC cookie, sessmgr SUSPEND/RESUME ops with fd passing.  Sessmgr retains a dup of the backend fd at spawn time and auto-suspends on worker death, so sessions survive worker SIGKILL.  Dead fds are validated at resume and reaped by sweep. |
