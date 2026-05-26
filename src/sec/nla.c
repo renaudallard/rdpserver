@@ -159,6 +159,9 @@ rdp_nla_server(struct rdp_tls *t,
 	memset(pass, 0, pass_size);
 
 	/* 1. Read NEGOTIATE. */
+	uint8_t saved_nonce[32];
+	size_t saved_nonce_len = 0;
+
 	if (read_tsrequest(t, in_buf, sizeof in_buf, &in_len) != 0) {
 		rdp_warn("nla: read NEGOTIATE failed");
 		return -1;
@@ -169,6 +172,10 @@ rdp_nla_server(struct rdp_tls *t,
 		&neg) != 0) {
 		rdp_warn("nla: bad NEGOTIATE");
 		return -1;
+	}
+	if (req.client_nonce != NULL && req.client_nonce_len >= 32) {
+		memcpy(saved_nonce, req.client_nonce, 32);
+		saved_nonce_len = 32;
 	}
 
 	/* 2. Send CHALLENGE. */
@@ -268,8 +275,7 @@ rdp_nla_server(struct rdp_tls *t,
 		rdp_debug("nla: pubkey len=%zd first=%02x%02x%02x%02x ver=%u",
 			pklen, pubkey[0], pubkey[1], pubkey[2], pubkey[3],
 			req.version);
-		if (req.version >= 5 && req.client_nonce != NULL
-		    && req.client_nonce_len >= 32) {
+		if (req.version >= 5 && saved_nonce_len >= 32) {
 			/* CredSSP v5+: seal SHA-256(magic + nonce + pubkey) */
 			static const uint8_t magic[] =
 				"CredSSP Server-To-Client Binding Hash";
@@ -279,8 +285,7 @@ rdp_nla_server(struct rdp_tls *t,
 			if (sha == NULL) return -1;
 			EVP_DigestInit_ex(sha, EVP_sha256(), NULL);
 			EVP_DigestUpdate(sha, magic, sizeof magic);
-			EVP_DigestUpdate(sha, req.client_nonce,
-			    req.client_nonce_len);
+			EVP_DigestUpdate(sha, saved_nonce, 32);
 			EVP_DigestUpdate(sha, pubkey, (size_t)pklen);
 			EVP_DigestFinal_ex(sha, hash, &hlen);
 			EVP_MD_CTX_free(sha);
@@ -315,6 +320,9 @@ rdp_nla_server(struct rdp_tls *t,
 		resp.pub_key_auth_len = (size_t)sealed_len;
 		bn = rdp_cssp_build(out_buf, sizeof out_buf, &resp);
 		if (bn <= 0) return -1;
+		rdp_debug("nla: TSReq %zd: %02x%02x%02x%02x %02x%02x%02x%02x",
+			bn, out_buf[0], out_buf[1], out_buf[2], out_buf[3],
+			out_buf[4], out_buf[5], out_buf[6], out_buf[7]);
 		if (rdp_tls_write_full(t, out_buf, (size_t)bn)
 		    != (ssize_t)bn) return -1;
 		explicit_bzero(stsc_seal, sizeof stsc_seal);
