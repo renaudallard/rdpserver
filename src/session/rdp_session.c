@@ -200,8 +200,15 @@ spawn_xterm(void)
 	if (pid < 0)
 		return -1;
 	if (pid == 0) {
-		/* Try xterm; if it's missing, fall back to xclock to at
-		 * least have something on the root window. */
+		const char *home = getenv("HOME");
+		if (home != NULL) {
+			char xs[256];
+			(void)snprintf(xs, sizeof xs, "%s/.xsession", home);
+			if (access(xs, X_OK) == 0) {
+				execl("/bin/sh", "sh", xs, (char *)NULL);
+				_exit(127);
+			}
+		}
 		execlp("xterm", "xterm", "-bg", "black", "-fg", "white",
 			(char *)NULL);
 		execlp("xclock", "xclock", (char *)NULL);
