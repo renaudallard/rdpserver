@@ -98,19 +98,25 @@ rdp_rdpgfx_select_caps(const struct rdpgfx_caps_advertise *adv,
 	};
 	uint16_t i;
 	size_t p;
-	int client_has_avc = 0;
+	int any_avc_disabled = 0;
 
-	/* Check v8.1 for explicit AVC420 support as ground truth. */
+	/*
+	 * If any v10+ cap explicitly sets AVC_DISABLED, the client
+	 * signals it cannot decode AVC. Some clients (macOS RD) omit
+	 * the flag on one version while setting it on others; treat
+	 * that as "no AVC". If no v10+ cap has AVC_DISABLED (like
+	 * mstsc), trust the flags and enable AVC.
+	 */
 	for (i = 0; i < adv->count; i++) {
-		if (adv->sets[i].version == RDPGFX_CAPVERSION_81
+		if (adv->sets[i].version >= RDPGFX_CAPVERSION_10
 		    && (adv->sets[i].flags
-			& RDPGFX_CAPS_FLAG_AVC420_ENABLED)) {
-			client_has_avc = 1;
+			& RDPGFX_CAPS_FLAG_AVC_DISABLED)) {
+			any_avc_disabled = 1;
 			break;
 		}
 	}
 
-	if (client_has_avc) {
+	if (!any_avc_disabled) {
 		for (p = 0; p < sizeof pref / sizeof pref[0]; p++) {
 			for (i = 0; i < adv->count; i++) {
 				if (adv->sets[i].version != pref[p])
@@ -123,18 +129,21 @@ rdp_rdpgfx_select_caps(const struct rdpgfx_caps_advertise *adv,
 				return 0;
 			}
 		}
-		for (i = 0; i < adv->count; i++) {
-			if (adv->sets[i].version != RDPGFX_CAPVERSION_81)
-				continue;
-			if (!(adv->sets[i].flags
-			    & RDPGFX_CAPS_FLAG_AVC420_ENABLED))
-				continue;
-			*out_version = RDPGFX_CAPVERSION_81;
-			*out_flags = adv->sets[i].flags
-				& RDPGFX_CAPS_FLAG_AVC420_ENABLED;
-			return 0;
-		}
 	}
+
+	/* v8.1 with explicit AVC420 support. */
+	for (i = 0; i < adv->count; i++) {
+		if (adv->sets[i].version != RDPGFX_CAPVERSION_81)
+			continue;
+		if (!(adv->sets[i].flags
+		    & RDPGFX_CAPS_FLAG_AVC420_ENABLED))
+			continue;
+		*out_version = RDPGFX_CAPVERSION_81;
+		*out_flags = adv->sets[i].flags
+			& RDPGFX_CAPS_FLAG_AVC420_ENABLED;
+		return 0;
+	}
+
 	return -1;
 }
 
