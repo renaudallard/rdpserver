@@ -46,43 +46,86 @@ put_gfx_header(struct rdp_buf *b, uint16_t cmdId, uint32_t pduLen)
 	return 0;
 }
 
-int
-rdp_rdpgfx_parse_caps_advertise(const uint8_t *pdu, size_t len)
+static uint32_t
+ld32le(const uint8_t *p)
 {
-	uint16_t cmdId;
+	return (uint32_t)p[0] | ((uint32_t)p[1] << 8)
+		| ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+int
+rdp_rdpgfx_parse_caps_advertise(const uint8_t *pdu, size_t len,
+		struct rdpgfx_caps_advertise *out)
+{
+	uint16_t cmdId, cnt, i;
+	size_t off;
+
 	if (len < RDPGFX_HEADER_SIZE + 2) return -1;
 	cmdId = (uint16_t)pdu[0] | ((uint16_t)pdu[1] << 8);
 	if (cmdId != RDPGFX_CMDID_CAPSADVERTISE) return -1;
-	{
-		uint16_t cnt = (uint16_t)pdu[8] | ((uint16_t)pdu[9] << 8);
-		size_t off = 10;
-		uint16_t i;
-		rdp_info("rdpgfx: caps advertise, %u cap sets", (unsigned)cnt);
-		for (i = 0; i < cnt && off + 8 <= len; i++) {
-			uint32_t ver = (uint32_t)pdu[off]
-				| ((uint32_t)pdu[off+1] << 8)
-				| ((uint32_t)pdu[off+2] << 16)
-				| ((uint32_t)pdu[off+3] << 24);
-			uint32_t dlen = (uint32_t)pdu[off+4]
-				| ((uint32_t)pdu[off+5] << 8)
-				| ((uint32_t)pdu[off+6] << 16)
-				| ((uint32_t)pdu[off+7] << 24);
-			uint32_t flags = 0;
-			if (dlen >= 4 && off + 8 + 4 <= len)
-				flags = (uint32_t)pdu[off+8]
-					| ((uint32_t)pdu[off+9] << 8)
-					| ((uint32_t)pdu[off+10] << 16)
-					| ((uint32_t)pdu[off+11] << 24);
-			rdp_info("rdpgfx:   [%u] ver=0x%08x flags=0x%08x",
-				(unsigned)i, ver, flags);
-			off += 8 + dlen;
+
+	cnt = (uint16_t)pdu[8] | ((uint16_t)pdu[9] << 8);
+	out->count = 0;
+	off = 10;
+	rdp_info("rdpgfx: caps advertise, %u cap sets", (unsigned)cnt);
+	for (i = 0; i < cnt && off + 8 <= len; i++) {
+		uint32_t ver = ld32le(pdu + off);
+		uint32_t dlen = ld32le(pdu + off + 4);
+		uint32_t flags = 0;
+		if (dlen >= 4 && off + 8 + 4 <= len)
+			flags = ld32le(pdu + off + 8);
+		rdp_info("rdpgfx:   [%u] ver=0x%08x flags=0x%08x",
+			(unsigned)i, ver, flags);
+		if (out->count < RDPGFX_MAX_CAPSETS) {
+			out->sets[out->count].version = ver;
+			out->sets[out->count].length = dlen;
+			out->sets[out->count].flags = flags;
+			out->count++;
 		}
+		off += 8 + dlen;
 	}
 	return 0;
 }
 
+int
+rdp_rdpgfx_select_caps(const struct rdpgfx_caps_advertise *adv,
+		uint32_t *out_version, uint32_t *out_flags)
+{
+	static const uint32_t pref[] = {
+		0x000A0700, 0x000A0600, 0x000A0502,
+		0x000A0400, 0x000A0301, 0x000A0200,
+		0x000A0100, RDPGFX_CAPVERSION_10,
+	};
+	uint16_t i;
+	size_t p;
+
+	for (p = 0; p < sizeof pref / sizeof pref[0]; p++) {
+		for (i = 0; i < adv->count; i++) {
+			if (adv->sets[i].version != pref[p])
+				continue;
+			if (adv->sets[i].flags
+			    & RDPGFX_CAPS_FLAG_AVC_DISABLED)
+				continue;
+			*out_version = adv->sets[i].version;
+			*out_flags = adv->sets[i].flags;
+			return 0;
+		}
+	}
+	for (i = 0; i < adv->count; i++) {
+		if (adv->sets[i].version != RDPGFX_CAPVERSION_81)
+			continue;
+		if (!(adv->sets[i].flags & RDPGFX_CAPS_FLAG_AVC420_ENABLED))
+			continue;
+		*out_version = RDPGFX_CAPVERSION_81;
+		*out_flags = adv->sets[i].flags;
+		return 0;
+	}
+	return -1;
+}
+
 ssize_t
-rdp_rdpgfx_build_caps_confirm(uint8_t *out, size_t cap)
+rdp_rdpgfx_build_caps_confirm(uint8_t *out, size_t cap,
+		uint32_t version, uint32_t flags)
 {
 	struct rdp_buf b;
 	uint32_t bodyLen = 12;
@@ -90,10 +133,22 @@ rdp_rdpgfx_build_caps_confirm(uint8_t *out, size_t cap)
 	rdp_buf_init(&b, out, cap);
 	if (put_gfx_header(&b, RDPGFX_CMDID_CAPSCONFIRM,
 		RDPGFX_HEADER_SIZE + bodyLen) != 0) return -1;
-	if (rdp_buf_put_u32le(&b, 0x00080105) != 0) return -1;
+	if (rdp_buf_put_u32le(&b, version) != 0) return -1;
 	if (rdp_buf_put_u32le(&b, 4) != 0) return -1;
-	if (rdp_buf_put_u32le(&b, 0) != 0) return -1;
+	if (rdp_buf_put_u32le(&b, flags) != 0) return -1;
 	return (ssize_t)rdp_buf_used(&b);
+}
+
+int
+rdp_rdpgfx_parse_frame_ack(const uint8_t *pdu, size_t len,
+		uint32_t *queue_depth, uint32_t *frame_id,
+		uint32_t *total_decoded)
+{
+	if (len < RDPGFX_HEADER_SIZE + 12) return -1;
+	*queue_depth = ld32le(pdu + 8);
+	*frame_id = ld32le(pdu + 12);
+	*total_decoded = ld32le(pdu + 16);
+	return 0;
 }
 
 ssize_t
@@ -135,7 +190,7 @@ rdp_rdpgfx_build_create_surface(uint8_t *out, size_t cap,
 	if (rdp_buf_put_u16le(&b, surface_id) != 0) return -1;
 	if (rdp_buf_put_u16le(&b, w) != 0) return -1;
 	if (rdp_buf_put_u16le(&b, h) != 0) return -1;
-	if (rdp_buf_put_u8(&b, RDPGFX_PIXELFORMAT_XRGB_8888) != 0) return -1;
+	if (rdp_buf_put_u8(&b, RDPGFX_PIXELFORMAT_ARGB_8888) != 0) return -1;
 	return (ssize_t)rdp_buf_used(&b);
 }
 

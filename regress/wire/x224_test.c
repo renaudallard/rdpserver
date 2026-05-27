@@ -157,9 +157,10 @@ test_cc_success(void)
 	n = rdp_x224_build_cc(cc, sizeof cc, 0, RDP_PROTO_SSL, 0);
 	if (n != 15)
 		FAIL("cc success len = %lld", (long long)n);
-	/* LI=14, code=0xD0, dst,src=0,0, class=0, neg_rsp=02 00 0800 01000000 */
+	/* LI=14, code=0xD0, dst,src=0,0, class=0, neg_rsp type+flags+len+proto */
 	if (cc[0] != 14 || cc[1] != 0xD0 || cc[7] != 0x02 ||
-	    cc[8] != 0 || cc[9] != 8 || cc[10] != 0 ||
+	    cc[8] != (RDP_NEG_RSP_EXTENDED_CLIENT_DATA | RDP_NEG_RSP_DYNVC_GFX) ||
+	    cc[9] != 8 || cc[10] != 0 ||
 	    cc[11] != 1 || cc[12] != 0 || cc[13] != 0 || cc[14] != 0)
 		FAIL("cc wire bytes: %02x..", cc[0]);
 }

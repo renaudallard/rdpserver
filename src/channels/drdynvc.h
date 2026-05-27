@@ -60,6 +60,11 @@ struct drdynvc_state {
 	int      disp_channel_id;  /* -1 if not yet created */
 	int      gfx_channel_id;  /* -1 if not yet created */
 	int      gfx_create_pending; /* waiting for Create Response */
+	uint8_t *reasm_buf;
+	size_t   reasm_cap;
+	size_t   reasm_len;
+	uint32_t reasm_total;
+	int      reasm_chan;       /* channel being reassembled */
 };
 
 /* Build DRDYNVC Capabilities Request (version 1). */
@@ -86,5 +91,8 @@ int rdp_drdynvc_handle(struct drdynvc_state *st,
 		uint8_t *resp_out, size_t resp_cap, size_t *resp_len,
 		uint16_t *new_w, uint16_t *new_h,
 		const uint8_t **gfx_data, size_t *gfx_len);
+
+/* Free reassembly buffer and reset state. */
+void rdp_drdynvc_cleanup(struct drdynvc_state *st);
 
 #endif /* RDP_DRDYNVC_H */

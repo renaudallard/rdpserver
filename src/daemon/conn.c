@@ -598,7 +598,8 @@ maybe_dispatch_clip(struct rdp_tls *t, int be_fd,
 		struct clip_state *cs, struct dynvc_state *dv,
 		struct snd_state *ss, struct dr_state *dr,
 		const uint8_t *frame, size_t frame_len, const char *peer,
-		uint16_t *new_w, uint16_t *new_h)
+		uint16_t *new_w, uint16_t *new_h,
+		const uint8_t **out_gfx, size_t *out_gfx_len)
 {
 	const uint8_t *mcs_p;
 	size_t mcs_len;
@@ -657,7 +658,7 @@ maybe_dispatch_clip(struct rdp_tls *t, int be_fd,
 					(void)send_clip_pdu(t, cs->user_id,
 						dv->channel_id, gc, (size_t)gn);
 			}
-			if (rc == 2) return 2;
+			if (rc == 1) return 2;
 			if (rc == 3 && gfx_data != NULL && gfx_len > 0) {
 				const uint8_t *gp = gfx_data;
 				size_t gl = gfx_len;
@@ -666,12 +667,14 @@ maybe_dispatch_clip(struct rdp_tls *t, int be_fd,
 				cmdId = (uint16_t)gp[0]
 					| ((uint16_t)gp[1] << 8);
 				if (cmdId == RDPGFX_CMDID_CAPSADVERTISE) {
-					(void)rdp_rdpgfx_parse_caps_advertise(
-						gp, gl);
+					if (out_gfx) *out_gfx = gp;
+					if (out_gfx_len) *out_gfx_len = gl;
 					return 4;
 				}
 				if (cmdId == RDPGFX_CMDID_FRAMEACKNOWLEDGE) {
-					rdp_debug("rdpgfx: frame ack");
+					if (out_gfx) *out_gfx = gp;
+					if (out_gfx_len) *out_gfx_len = gl;
+					return 6;
 				}
 			}
 		}
@@ -991,7 +994,7 @@ run_proxy(struct rdp_tls *t, int be_fd,
 	size_t   frame_cap = 0;
 	struct rdpgfx_state gfx = {0};
 	struct rdp_h264 *h264 = NULL;
-	gfx.surface_id = 1;
+	gfx.surface_id = 0;
 	gfx.frame_id = 0;
 	gfx.desktop_w = desktop_w;
 	gfx.desktop_h = desktop_h;
@@ -1056,15 +1059,6 @@ run_proxy(struct rdp_tls *t, int be_fd,
 			(void)send_clip_pdu(t, user_id, dv->channel_id,
 				dvcaps, (size_t)cn);
 		}
-		cn = rdp_drdynvc_build_create_gfx(&dv->dv,
-			dvcaps, sizeof dvcaps);
-		if (cn > 0) {
-			rdp_debug("conn[%s]: drdynvc CREATE tx %zd: %02x %02x %02x",
-				peer, cn, dvcaps[0], cn>1?dvcaps[1]:0,
-				cn>2?dvcaps[2]:0);
-			(void)send_clip_pdu(t, user_id, dv->channel_id,
-				dvcaps, (size_t)cn);
-		}
 	}
 	if (ss->enabled) {
 		uint8_t fmts[128];
@@ -1123,10 +1117,13 @@ run_proxy(struct rdp_tls *t, int be_fd,
 			if (n <= 0) break;
 			if (kind == 1) {
 				uint16_t rw = 0, rh = 0;
+				const uint8_t *gfx_pdu = NULL;
+				size_t gfx_pdu_len = 0;
 				int r = maybe_dispatch_clip(t, be_fd,
 					cs, dv, ss, dr,
 					pdu, (size_t)n, peer,
-					&rw, &rh);
+					&rw, &rh,
+					&gfx_pdu, &gfx_pdu_len);
 				if (r < 0) break;
 				if (r == 2 && rw > 0 && rh > 0) {
 					if (do_reactivate(t, be_fd, user_id,
@@ -1142,51 +1139,78 @@ run_proxy(struct rdp_tls *t, int be_fd,
 				}
 				if (r == 4 && !gfx.active
 				    && dv->dv.gfx_channel_id >= 0
-				    && 0) {
-					uint8_t gbuf[512];
-					ssize_t gn;
-					gn = rdp_rdpgfx_build_caps_confirm(
-						gbuf, sizeof gbuf);
-					if (gn > 0)
-						(void)send_gfx_pdu(t,
-							user_id,
-							dv->channel_id,
-							dv->dv.gfx_channel_id,
-							gbuf, (size_t)gn);
-					gn = rdp_rdpgfx_build_reset(
-						gbuf, sizeof gbuf,
-						desktop_w, desktop_h);
-					if (gn > 0)
-						(void)send_gfx_pdu(t,
-							user_id,
-							dv->channel_id,
-							dv->dv.gfx_channel_id,
-							gbuf, (size_t)gn);
-					gn = rdp_rdpgfx_build_create_surface(
-						gbuf, sizeof gbuf,
-						gfx.surface_id,
-						desktop_w, desktop_h);
-					if (gn > 0)
-						(void)send_gfx_pdu(t,
-							user_id,
-							dv->channel_id,
-							dv->dv.gfx_channel_id,
-							gbuf, (size_t)gn);
-					gn = rdp_rdpgfx_build_map_surface(
-						gbuf, sizeof gbuf,
-						gfx.surface_id,
-						desktop_w, desktop_h);
-					if (gn > 0)
-						(void)send_gfx_pdu(t,
-							user_id,
-							dv->channel_id,
-							dv->dv.gfx_channel_id,
-							gbuf, (size_t)gn);
-					gfx.active = 1;
-					rdp_info("conn[%s]: GFX pipeline active",
-						peer);
-					h264 = rdp_h264_open(desktop_w,
-						desktop_h);
+				    && gfx_pdu != NULL) {
+					struct rdpgfx_caps_advertise adv;
+					uint32_t sel_ver, sel_flags;
+					memset(&adv, 0, sizeof adv);
+					if (rdp_rdpgfx_parse_caps_advertise(
+						gfx_pdu, gfx_pdu_len,
+						&adv) == 0
+					    && rdp_rdpgfx_select_caps(
+						&adv, &sel_ver,
+						&sel_flags) == 0) {
+						uint8_t gbuf[512];
+						ssize_t gn;
+						rdp_info("conn[%s]: GFX caps "
+							"ver=0x%08x flags=0x%08x",
+							peer, sel_ver,
+							sel_flags);
+						gn = rdp_rdpgfx_build_caps_confirm(
+							gbuf, sizeof gbuf,
+							sel_ver, sel_flags);
+						if (gn > 0)
+							(void)send_gfx_pdu(t,
+								user_id,
+								dv->channel_id,
+								dv->dv.gfx_channel_id,
+								gbuf, (size_t)gn);
+						gn = rdp_rdpgfx_build_reset(
+							gbuf, sizeof gbuf,
+							desktop_w, desktop_h);
+						if (gn > 0)
+							(void)send_gfx_pdu(t,
+								user_id,
+								dv->channel_id,
+								dv->dv.gfx_channel_id,
+								gbuf, (size_t)gn);
+						gn = rdp_rdpgfx_build_create_surface(
+							gbuf, sizeof gbuf,
+							gfx.surface_id,
+							desktop_w, desktop_h);
+						if (gn > 0)
+							(void)send_gfx_pdu(t,
+								user_id,
+								dv->channel_id,
+								dv->dv.gfx_channel_id,
+								gbuf, (size_t)gn);
+						gn = rdp_rdpgfx_build_map_surface(
+							gbuf, sizeof gbuf,
+							gfx.surface_id,
+							desktop_w, desktop_h);
+						if (gn > 0)
+							(void)send_gfx_pdu(t,
+								user_id,
+								dv->channel_id,
+								dv->dv.gfx_channel_id,
+								gbuf, (size_t)gn);
+						gfx.active = 1;
+						rdp_info("conn[%s]: GFX pipeline "
+							"active", peer);
+						h264 = rdp_h264_open(desktop_w,
+							desktop_h);
+					} else {
+						rdp_info("conn[%s]: no AVC caps, "
+							"bitmap mode", peer);
+					}
+				}
+				if (r == 6 && gfx_pdu != NULL) {
+					uint32_t aq, af, at;
+					if (rdp_rdpgfx_parse_frame_ack(
+						gfx_pdu, gfx_pdu_len,
+						&aq, &af, &at) == 0) {
+						gfx.last_ack_frame = af;
+						gfx.queue_depth = aq;
+					}
 				}
 				/* Untouched TPKTs (Shutdown, etc.) silently
 				 * ignored.  MCS Disconnect already handled. */
@@ -1225,37 +1249,47 @@ run_proxy(struct rdp_tls *t, int be_fd,
 					break;
 				if (gfx.active && h264 != NULL
 				    && dv->dv.gfx_channel_id >= 0) {
-					const uint8_t *h264_out;
-					size_t h264_len;
-					int keyframe;
-					if (rdp_h264_encode(h264,
-						frame_buf, fhdr.w, fhdr.h,
-						&h264_out, &h264_len,
-						&keyframe) == 0
-					    && h264_out != NULL
-					    && h264_len > 0) {
-						uint8_t *gpdu;
-						size_t gpdu_cap = h264_len
-							+ 256;
-						gpdu = malloc(gpdu_cap);
-						if (gpdu != NULL) {
-							ssize_t gn;
-							gfx.frame_id++;
-							gn = rdp_rdpgfx_build_avc420_frame(
-								gpdu, gpdu_cap,
-								gfx.surface_id,
-								gfx.frame_id,
-								fhdr.w, fhdr.h,
-								h264_out,
-								h264_len);
-							if (gn > 0)
-								(void)send_gfx_pdu(
-									t, user_id,
-									dv->channel_id,
-									dv->dv.gfx_channel_id,
+					uint32_t pending = gfx.frame_id
+						- gfx.last_ack_frame;
+					if (pending < 2
+					    || gfx.queue_depth == 0xFFFFFFFF
+					    || gfx.last_ack_frame == 0) {
+						const uint8_t *h264_out;
+						size_t h264_len;
+						int keyframe;
+						if (rdp_h264_encode(h264,
+							frame_buf, fhdr.w,
+							fhdr.h,
+							&h264_out, &h264_len,
+							&keyframe) == 0
+						    && h264_out != NULL
+						    && h264_len > 0) {
+							uint8_t *gpdu;
+							size_t gpdu_cap =
+								h264_len + 256;
+							gpdu = malloc(gpdu_cap);
+							if (gpdu != NULL) {
+								ssize_t gn;
+								gfx.frame_id++;
+								gn = rdp_rdpgfx_build_avc420_frame(
 									gpdu,
-									(size_t)gn);
-							free(gpdu);
+									gpdu_cap,
+									gfx.surface_id,
+									gfx.frame_id,
+									fhdr.w,
+									fhdr.h,
+									h264_out,
+									h264_len);
+								if (gn > 0)
+									(void)send_gfx_pdu(
+										t,
+										user_id,
+										dv->channel_id,
+										dv->dv.gfx_channel_id,
+										gpdu,
+										(size_t)gn);
+								free(gpdu);
+							}
 						}
 					}
 				} else {
@@ -1283,28 +1317,37 @@ run_proxy(struct rdp_tls *t, int be_fd,
 				}
 				if (gfx.active
 				    && dv->dv.gfx_channel_id >= 0) {
-					uint8_t *gpdu;
-					size_t gpdu_cap = fhdr.h264_len
-						+ 256;
-					gpdu = malloc(gpdu_cap);
-					if (gpdu != NULL) {
-						ssize_t gn;
-						gfx.frame_id++;
-						gn = rdp_rdpgfx_build_avc420_frame(
-							gpdu, gpdu_cap,
-							gfx.surface_id,
-							gfx.frame_id,
-							fhdr.w, fhdr.h,
-							h264_data,
-							fhdr.h264_len);
-						if (gn > 0)
-							(void)send_gfx_pdu(
-								t, user_id,
-								dv->channel_id,
-								dv->dv.gfx_channel_id,
+					uint32_t pending = gfx.frame_id
+						- gfx.last_ack_frame;
+					if (pending < 2
+					    || gfx.queue_depth == 0xFFFFFFFF
+					    || gfx.last_ack_frame == 0) {
+						uint8_t *gpdu;
+						size_t gpdu_cap =
+							fhdr.h264_len + 256;
+						gpdu = malloc(gpdu_cap);
+						if (gpdu != NULL) {
+							ssize_t gn;
+							gfx.frame_id++;
+							gn = rdp_rdpgfx_build_avc420_frame(
 								gpdu,
-								(size_t)gn);
-						free(gpdu);
+								gpdu_cap,
+								gfx.surface_id,
+								gfx.frame_id,
+								fhdr.w,
+								fhdr.h,
+								h264_data,
+								fhdr.h264_len);
+							if (gn > 0)
+								(void)send_gfx_pdu(
+									t,
+									user_id,
+									dv->channel_id,
+									dv->dv.gfx_channel_id,
+									gpdu,
+									(size_t)gn);
+							free(gpdu);
+						}
 					}
 				} else {
 					/* GFX not active yet; drop
@@ -1482,6 +1525,7 @@ run_proxy(struct rdp_tls *t, int be_fd,
 out:
 	if (h264 != NULL) rdp_h264_close(h264);
 	free(frame_buf);
+	rdp_drdynvc_cleanup(&dv->dv);
 }
 
 struct sessmgr_auth_ctx {
@@ -1667,7 +1711,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 				cr2.channel_ids[i] = (uint16_t)(1004 + i);
 			cr2.requested_protocols = cr.have_neg_req
 			? cr.requested_protocols : 0;
-			cr2.early_capability_flags = 0;
+			cr2.early_capability_flags = 0x0e;
 			if (ci.has_msgchannel)
 				cr2.msgchannel_id =
 					(uint16_t)(1004 + ci.channel_count);

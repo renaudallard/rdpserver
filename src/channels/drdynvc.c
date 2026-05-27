@@ -34,17 +34,22 @@
 
 #include "../include/rdp_log.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 ssize_t
 rdp_drdynvc_build_caps(uint8_t *out, size_t cap)
 {
-	if (cap < 4) return -1;
-	out[0] = (DRDYNVC_CMD_CAPS << 4);  /* Cmd=5, Sp=0, cbId=0 */
+	if (cap < 12) return -1;
+	out[0] = (DRDYNVC_CMD_CAPS << 4) | (1 << 2);  /* Cmd=5, Sp=1, cbId=0 */
 	out[1] = 0;                         /* pad */
-	out[2] = 1;                         /* version LE low (v1) */
+	out[2] = 3;                         /* version LE low (v3) */
 	out[3] = 0;                         /* version LE high */
-	return 4;
+	out[4] = 0; out[5] = 0;            /* PriorityCharge0 (2 bytes LE) */
+	out[6] = 0; out[7] = 0;            /* PriorityCharge1 (2 bytes LE) */
+	out[8] = 0; out[9] = 0;            /* PriorityCharge2 (2 bytes LE) */
+	out[10] = 0; out[11] = 0;          /* PriorityCharge3 (2 bytes LE) */
+	return 12;
 }
 
 static int
@@ -107,7 +112,7 @@ rdp_drdynvc_handle(struct drdynvc_state *st,
 			cli_ver = (uint16_t)pdu[2] | ((uint16_t)pdu[3] << 8);
 		st->caps_exchanged = 1;
 		rdp_info("drdynvc: client caps ver=%u", cli_ver);
-		return 0;
+		return 5;
 	}
 
 	case DRDYNVC_CMD_CREATE: {
@@ -165,30 +170,87 @@ rdp_drdynvc_handle(struct drdynvc_state *st,
 		size_t id_len;
 		const uint8_t *data;
 		size_t data_len;
+		uint32_t total_len = 0;
 
 		if (read_channel_id(pdu + 1, len - 1, cbId,
 			&chan_id, &id_len) != 0) return -1;
 		data = pdu + 1 + id_len;
 		data_len = len - 1 - id_len;
 
-		/* Data First carries a length prefix before the data. */
 		if (cmd == DRDYNVC_CMD_DATA_FIRST) {
-			/* Length field uses the Sp bits (bits 2-3 of hdr)
-			 * to indicate its size: 0=1byte, 1=2byte, 2=4byte */
 			uint8_t lenSz = (uint8_t)((hdr >> 2) & 0x03);
 			size_t skip = 0;
 			switch (lenSz) {
-			case 0: skip = 1; break;
-			case 1: skip = 2; break;
-			case 2: skip = 4; break;
+			case 0:
+				if (data_len < 1) return -1;
+				total_len = data[0];
+				skip = 1;
+				break;
+			case 1:
+				if (data_len < 2) return -1;
+				total_len = (uint32_t)data[0]
+					| ((uint32_t)data[1] << 8);
+				skip = 2;
+				break;
+			case 2:
+				if (data_len < 4) return -1;
+				total_len = ld32(data);
+				skip = 4;
+				break;
 			}
-			if (data_len < skip) return -1;
 			data += skip;
 			data_len -= skip;
 		}
 
+		/* GFX channel: handle reassembly for fragmented PDUs. */
 		if ((int)chan_id == st->gfx_channel_id
 		    && gfx_data != NULL && gfx_len != NULL) {
+			if (cmd == DRDYNVC_CMD_DATA_FIRST) {
+				if (total_len == 0 || total_len > 0x400000)
+					return -1;
+				if (total_len > st->reasm_cap) {
+					free(st->reasm_buf);
+					st->reasm_buf = malloc(total_len);
+					if (st->reasm_buf == NULL) {
+						st->reasm_cap = 0;
+						return -1;
+					}
+					st->reasm_cap = total_len;
+				}
+				st->reasm_total = total_len;
+				st->reasm_len = 0;
+				st->reasm_chan = (int)chan_id;
+				if (data_len > total_len)
+					data_len = total_len;
+				memcpy(st->reasm_buf, data, data_len);
+				st->reasm_len = data_len;
+				if (st->reasm_len >= st->reasm_total) {
+					*gfx_data = st->reasm_buf;
+					*gfx_len = st->reasm_len;
+					st->reasm_len = 0;
+					st->reasm_total = 0;
+					return 3;
+				}
+				return 0;
+			}
+			if (st->reasm_len > 0
+			    && st->reasm_chan == (int)chan_id) {
+				size_t remain = st->reasm_total
+					- st->reasm_len;
+				if (data_len > remain)
+					data_len = remain;
+				memcpy(st->reasm_buf + st->reasm_len,
+					data, data_len);
+				st->reasm_len += data_len;
+				if (st->reasm_len >= st->reasm_total) {
+					*gfx_data = st->reasm_buf;
+					*gfx_len = st->reasm_len;
+					st->reasm_len = 0;
+					st->reasm_total = 0;
+					return 3;
+				}
+				return 0;
+			}
 			*gfx_data = data;
 			*gfx_len = data_len;
 			return 3;
@@ -261,10 +323,20 @@ rdp_drdynvc_build_create_gfx(struct drdynvc_state *st,
 	size_t total = 1 + 1 + name_len;
 
 	if (cap < total) return -1;
-	out[0] = (uint8_t)((DRDYNVC_CMD_CREATE << 4) | 0);
+	out[0] = (uint8_t)((DRDYNVC_CMD_CREATE << 4) | (2 << 2) | 0);
 	out[1] = GFX_SERVER_CHAN_ID;
 	memcpy(out + 2, GFX_CHANNEL_NAME, name_len);
 	st->gfx_channel_id = GFX_SERVER_CHAN_ID;
 	st->gfx_create_pending = 1;
 	return (ssize_t)total;
+}
+
+void
+rdp_drdynvc_cleanup(struct drdynvc_state *st)
+{
+	free(st->reasm_buf);
+	st->reasm_buf = NULL;
+	st->reasm_cap = 0;
+	st->reasm_len = 0;
+	st->reasm_total = 0;
 }

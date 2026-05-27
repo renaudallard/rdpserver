@@ -311,6 +311,23 @@ write_cap_largepointer(struct rdp_buf *b)
 	return write_cap_simple(b, RDP_CAP_LARGEPOINTER, body, sizeof body);
 }
 
+static int
+write_cap_surface_commands(struct rdp_buf *b)
+{
+	uint8_t body[8];
+	memset(body, 0, sizeof body);
+	body[0] = 0x52; /* SET_SURFACE_BITS | FRAME_MARKER | STREAM_SURFACE_BITS */
+	return write_cap_simple(b, RDP_CAP_SURFACECOMMANDS, body, sizeof body);
+}
+
+static int
+write_cap_frame_acknowledge(struct rdp_buf *b)
+{
+	uint8_t body[4];
+	body[0] = 2; body[1] = 0; body[2] = 0; body[3] = 0;
+	return write_cap_simple(b, 0x001E, body, sizeof body);
+}
+
 ssize_t
 rdp_capset_build_demand_active(uint8_t *out, size_t cap,
 		uint32_t share_id, uint16_t desktop_w, uint16_t desktop_h)
@@ -335,7 +352,9 @@ rdp_capset_build_demand_active(uint8_t *out, size_t cap,
 	if (write_cap_vc(&cb)        != 0) return -1;
 	if (write_cap_multifragment(&cb) != 0) return -1;
 	if (write_cap_largepointer(&cb)  != 0) return -1;
-	cap_count = 9;
+	if (write_cap_surface_commands(&cb) != 0) return -1;
+	if (write_cap_frame_acknowledge(&cb) != 0) return -1;
+	cap_count = 11;
 
 	rdp_buf_init(&b, out, cap);
 	if (rdp_buf_put_u32le(&b, share_id) != 0) return -1;

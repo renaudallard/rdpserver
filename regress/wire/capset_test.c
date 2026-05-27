@@ -62,7 +62,7 @@ test_demand_active(void)
 	if (memcmp(buf + 8, "RDP\0", 4) != 0) FAIL("src descriptor");
 	/* numberCapabilities follows at offset 12 (LE). */
 	cap_count = (uint16_t)buf[12] | ((uint16_t)buf[13] << 8);
-	if (cap_count != 9) FAIL("cap_count = %u", cap_count);
+	if (cap_count != 11) FAIL("cap_count = %u", cap_count);
 }
 
 int

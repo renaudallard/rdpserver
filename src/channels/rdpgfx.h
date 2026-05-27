@@ -58,21 +58,51 @@
 
 #define RDPGFX_HEADER_SIZE 8
 
+#define RDPGFX_CAPS_FLAG_AVC420_ENABLED   0x00000010u
+#define RDPGFX_CAPS_FLAG_AVC_DISABLED     0x00000020u
+
+#define RDPGFX_MAX_CAPSETS 16
+
+struct rdpgfx_capset {
+	uint32_t version;
+	uint32_t length;
+	uint32_t flags;
+};
+
+struct rdpgfx_caps_advertise {
+	uint16_t count;
+	struct rdpgfx_capset sets[RDPGFX_MAX_CAPSETS];
+};
+
 struct rdpgfx_state {
 	int      active;         /* 1 after GFX pipeline fully set up */
 	int      caps_received;  /* 1 after client caps advertise */
 	int      dv_chan_id;     /* DRDYNVC channel ID for GFX */
 	uint16_t surface_id;
 	uint32_t frame_id;
+	uint32_t last_ack_frame;
+	uint32_t queue_depth;
 	uint16_t desktop_w;
 	uint16_t desktop_h;
 };
 
-/* Parse RDPGFX_CMDID_CAPSADVERTISE.  Returns 0 on success. */
-int rdp_rdpgfx_parse_caps_advertise(const uint8_t *pdu, size_t len);
+/* Parse RDPGFX_CMDID_CAPSADVERTISE into structured output. */
+int rdp_rdpgfx_parse_caps_advertise(const uint8_t *pdu, size_t len,
+		struct rdpgfx_caps_advertise *out);
 
-/* Build RDPGFX_CMDID_CAPSCONFIRM selecting version 8.1 AVC420. */
-ssize_t rdp_rdpgfx_build_caps_confirm(uint8_t *out, size_t cap);
+/* Select best AVC-capable caps from client's advertise.
+ * Returns 0 on success (out_version/out_flags set), -1 if none found. */
+int rdp_rdpgfx_select_caps(const struct rdpgfx_caps_advertise *adv,
+		uint32_t *out_version, uint32_t *out_flags);
+
+/* Build RDPGFX_CMDID_CAPSCONFIRM with specified version and flags. */
+ssize_t rdp_rdpgfx_build_caps_confirm(uint8_t *out, size_t cap,
+		uint32_t version, uint32_t flags);
+
+/* Parse RDPGFX_CMDID_FRAMEACKNOWLEDGE. */
+int rdp_rdpgfx_parse_frame_ack(const uint8_t *pdu, size_t len,
+		uint32_t *queue_depth, uint32_t *frame_id,
+		uint32_t *total_decoded);
 
 /* Build RDPGFX_CMDID_RESETGRAPHICS. */
 ssize_t rdp_rdpgfx_build_reset(uint8_t *out, size_t cap,
