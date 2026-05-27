@@ -98,24 +98,35 @@ rdp_rdpgfx_select_caps(const struct rdpgfx_caps_advertise *adv,
 	};
 	uint16_t i;
 	size_t p;
-	int client_has_avc = 0;
+	int has_avc420 = 0;
+	int has_v10 = 0;
+	int has_avc_disabled = 0;
 
-	/*
-	 * v8.1 AVC420_ENABLED is the authoritative signal that the
-	 * client can decode H.264. mstsc verifies that its own
-	 * CapsAdvertise included AVC420 before accepting an AVC-
-	 * enabled CapsConfirm; confirming AVC without it causes 0xd06.
-	 */
 	for (i = 0; i < adv->count; i++) {
 		if (adv->sets[i].version == RDPGFX_CAPVERSION_81
 		    && (adv->sets[i].flags
-			& RDPGFX_CAPS_FLAG_AVC420_ENABLED)) {
-			client_has_avc = 1;
-			break;
+			& RDPGFX_CAPS_FLAG_AVC420_ENABLED))
+			has_avc420 = 1;
+		if (adv->sets[i].version >= RDPGFX_CAPVERSION_10) {
+			has_v10 = 1;
+			if (adv->sets[i].flags
+			    & RDPGFX_CAPS_FLAG_AVC_DISABLED)
+				has_avc_disabled = 1;
 		}
 	}
 
-	if (client_has_avc) {
+	/*
+	 * v8.1 AVC420_ENABLED is the safest signal. mstsc checks it
+	 * internally and rejects AVC CapsConfirm without it.
+	 *
+	 * When v8.1 lacks AVC420_ENABLED but some v10+ versions omit
+	 * AVC_DISABLED while others set it (macOS pattern), the client
+	 * supports AVC only on those specific versions.
+	 *
+	 * When all v10+ have flags=0 and v8.1 lacks AVC420_ENABLED
+	 * (mstsc without GPU), the client cannot do AVC at all.
+	 */
+	if (has_avc420 || (has_v10 && has_avc_disabled)) {
 		for (p = 0; p < sizeof pref / sizeof pref[0]; p++) {
 			for (i = 0; i < adv->count; i++) {
 				if (adv->sets[i].version != pref[p])
@@ -128,9 +139,11 @@ rdp_rdpgfx_select_caps(const struct rdpgfx_caps_advertise *adv,
 				return 0;
 			}
 		}
-		*out_version = RDPGFX_CAPVERSION_81;
-		*out_flags = RDPGFX_CAPS_FLAG_AVC420_ENABLED;
-		return 0;
+		if (has_avc420) {
+			*out_version = RDPGFX_CAPVERSION_81;
+			*out_flags = RDPGFX_CAPS_FLAG_AVC420_ENABLED;
+			return 0;
+		}
 	}
 
 	return -1;
