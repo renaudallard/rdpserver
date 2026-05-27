@@ -98,25 +98,24 @@ rdp_rdpgfx_select_caps(const struct rdpgfx_caps_advertise *adv,
 	};
 	uint16_t i;
 	size_t p;
-	int any_avc_disabled = 0;
+	int client_has_avc = 0;
 
 	/*
-	 * If any v10+ cap explicitly sets AVC_DISABLED, the client
-	 * signals it cannot decode AVC. Some clients (macOS RD) omit
-	 * the flag on one version while setting it on others; treat
-	 * that as "no AVC". If no v10+ cap has AVC_DISABLED (like
-	 * mstsc), trust the flags and enable AVC.
+	 * v8.1 AVC420_ENABLED is the authoritative signal that the
+	 * client can decode H.264. mstsc verifies that its own
+	 * CapsAdvertise included AVC420 before accepting an AVC-
+	 * enabled CapsConfirm; confirming AVC without it causes 0xd06.
 	 */
 	for (i = 0; i < adv->count; i++) {
-		if (adv->sets[i].version >= RDPGFX_CAPVERSION_10
+		if (adv->sets[i].version == RDPGFX_CAPVERSION_81
 		    && (adv->sets[i].flags
-			& RDPGFX_CAPS_FLAG_AVC_DISABLED)) {
-			any_avc_disabled = 1;
+			& RDPGFX_CAPS_FLAG_AVC420_ENABLED)) {
+			client_has_avc = 1;
 			break;
 		}
 	}
 
-	if (!any_avc_disabled) {
+	if (client_has_avc) {
 		for (p = 0; p < sizeof pref / sizeof pref[0]; p++) {
 			for (i = 0; i < adv->count; i++) {
 				if (adv->sets[i].version != pref[p])
@@ -129,18 +128,8 @@ rdp_rdpgfx_select_caps(const struct rdpgfx_caps_advertise *adv,
 				return 0;
 			}
 		}
-	}
-
-	/* v8.1 with explicit AVC420 support. */
-	for (i = 0; i < adv->count; i++) {
-		if (adv->sets[i].version != RDPGFX_CAPVERSION_81)
-			continue;
-		if (!(adv->sets[i].flags
-		    & RDPGFX_CAPS_FLAG_AVC420_ENABLED))
-			continue;
 		*out_version = RDPGFX_CAPVERSION_81;
-		*out_flags = adv->sets[i].flags
-			& RDPGFX_CAPS_FLAG_AVC420_ENABLED;
+		*out_flags = RDPGFX_CAPS_FLAG_AVC420_ENABLED;
 		return 0;
 	}
 
