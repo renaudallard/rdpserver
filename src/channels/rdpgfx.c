@@ -98,27 +98,42 @@ rdp_rdpgfx_select_caps(const struct rdpgfx_caps_advertise *adv,
 	};
 	uint16_t i;
 	size_t p;
+	int client_has_avc = 0;
 
-	for (p = 0; p < sizeof pref / sizeof pref[0]; p++) {
-		for (i = 0; i < adv->count; i++) {
-			if (adv->sets[i].version != pref[p])
-				continue;
-			if (adv->sets[i].flags
-			    & RDPGFX_CAPS_FLAG_AVC_DISABLED)
-				continue;
-			*out_version = adv->sets[i].version;
-			*out_flags = adv->sets[i].flags;
-			return 0;
+	/* Check v8.1 for explicit AVC420 support as ground truth. */
+	for (i = 0; i < adv->count; i++) {
+		if (adv->sets[i].version == RDPGFX_CAPVERSION_81
+		    && (adv->sets[i].flags
+			& RDPGFX_CAPS_FLAG_AVC420_ENABLED)) {
+			client_has_avc = 1;
+			break;
 		}
 	}
-	for (i = 0; i < adv->count; i++) {
-		if (adv->sets[i].version != RDPGFX_CAPVERSION_81)
-			continue;
-		if (!(adv->sets[i].flags & RDPGFX_CAPS_FLAG_AVC420_ENABLED))
-			continue;
-		*out_version = RDPGFX_CAPVERSION_81;
-		*out_flags = adv->sets[i].flags;
-		return 0;
+
+	if (client_has_avc) {
+		for (p = 0; p < sizeof pref / sizeof pref[0]; p++) {
+			for (i = 0; i < adv->count; i++) {
+				if (adv->sets[i].version != pref[p])
+					continue;
+				if (adv->sets[i].flags
+				    & RDPGFX_CAPS_FLAG_AVC_DISABLED)
+					continue;
+				*out_version = adv->sets[i].version;
+				*out_flags = 0;
+				return 0;
+			}
+		}
+		for (i = 0; i < adv->count; i++) {
+			if (adv->sets[i].version != RDPGFX_CAPVERSION_81)
+				continue;
+			if (!(adv->sets[i].flags
+			    & RDPGFX_CAPS_FLAG_AVC420_ENABLED))
+				continue;
+			*out_version = RDPGFX_CAPVERSION_81;
+			*out_flags = adv->sets[i].flags
+				& RDPGFX_CAPS_FLAG_AVC420_ENABLED;
+			return 0;
+		}
 	}
 	return -1;
 }
