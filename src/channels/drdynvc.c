@@ -39,14 +39,12 @@
 ssize_t
 rdp_drdynvc_build_caps(uint8_t *out, size_t cap)
 {
-	if (cap < 8) return -1;
+	if (cap < 4) return -1;
 	out[0] = (DRDYNVC_CMD_CAPS << 4);  /* Cmd=5, Sp=0, cbId=0 */
 	out[1] = 0;                         /* pad */
-	out[2] = 3;                         /* version LE low (v3) */
+	out[2] = 1;                         /* version LE low (v1) */
 	out[3] = 0;                         /* version LE high */
-	out[4] = 0; out[5] = 0;            /* PriorityCharge0/1 */
-	out[6] = 0; out[7] = 0;            /* PriorityCharge2/3 */
-	return 8;
+	return 4;
 }
 
 static int
@@ -263,7 +261,7 @@ rdp_drdynvc_build_create_gfx(struct drdynvc_state *st,
 	size_t total = 1 + 1 + name_len;
 
 	if (cap < total) return -1;
-	out[0] = (uint8_t)((DRDYNVC_CMD_CREATE << 4) | (2 << 2) | 0);
+	out[0] = (uint8_t)((DRDYNVC_CMD_CREATE << 4) | 0);
 	out[1] = GFX_SERVER_CHAN_ID;
 	memcpy(out + 2, GFX_CHANNEL_NAME, name_len);
 	st->gfx_channel_id = GFX_SERVER_CHAN_ID;

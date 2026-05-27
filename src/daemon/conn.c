@@ -662,11 +662,6 @@ maybe_dispatch_clip(struct rdp_tls *t, int be_fd,
 				const uint8_t *gp = gfx_data;
 				size_t gl = gfx_len;
 				uint16_t cmdId;
-				/* Strip ZGFX envelope (0xE0 single + 0x00 uncompressed) */
-				if (gl >= 2 && gp[0] == 0xE0) {
-					gp += 2;
-					gl -= 2;
-				}
 				if (gl < 2) return 1;
 				cmdId = (uint16_t)gp[0]
 					| ((uint16_t)gp[1] << 8);
@@ -951,60 +946,36 @@ send_gfx_pdu(struct rdp_tls *t, uint16_t user_id,
 		uint16_t drdynvc_mcs_chan, int dv_chan,
 		const uint8_t *data, size_t len)
 {
-	uint8_t *wrapped;
+	uint8_t *buf;
+	size_t zgfx_len = 2 + len;
+	size_t hdr_off;
+	uint8_t cb;
 	int rc;
 
-	if (len <= ZGFX_SEG_MAX) {
-		size_t total = 2 + len;
-		wrapped = malloc(total);
-		if (wrapped == NULL) return -1;
-		wrapped[0] = 0xE0;
-		wrapped[1] = 0x00;
-		memcpy(wrapped + 2, data, len);
-		rc = send_drdynvc_data(t, user_id, drdynvc_mcs_chan, dv_chan,
-			wrapped, total);
-		free(wrapped);
-		return rc;
+	if (dv_chan <= 0xff) cb = 0;
+	else if (dv_chan <= 0xffff) cb = 1;
+	else cb = 2;
+	hdr_off = 1 + (cb == 0 ? 1 : (cb == 1 ? 2 : 4));
+	buf = malloc(hdr_off + zgfx_len);
+	if (buf == NULL) return -1;
+	buf[0] = (uint8_t)((DRDYNVC_CMD_DATA << 4) | cb);
+	if (cb == 0) buf[1] = (uint8_t)dv_chan;
+	else if (cb == 1) {
+		buf[1] = (uint8_t)(dv_chan & 0xff);
+		buf[2] = (uint8_t)((dv_chan >> 8) & 0xff);
+	} else {
+		buf[1] = (uint8_t)(dv_chan & 0xff);
+		buf[2] = (uint8_t)((dv_chan >> 8) & 0xff);
+		buf[3] = (uint8_t)((dv_chan >> 16) & 0xff);
+		buf[4] = (uint8_t)((dv_chan >> 24) & 0xff);
 	}
-
-	{
-		uint16_t seg_count = (uint16_t)((len + ZGFX_SEG_MAX - 1)
-			/ ZGFX_SEG_MAX);
-		size_t hdr_sz = 1 + 2 + 4 + (size_t)seg_count * 4;
-		size_t total = hdr_sz + (size_t)seg_count + len;
-		size_t off = 0, woff;
-		uint16_t i;
-
-		wrapped = malloc(total);
-		if (wrapped == NULL) return -1;
-		woff = 0;
-		wrapped[woff++] = 0xE1;
-		wrapped[woff++] = (uint8_t)(seg_count & 0xff);
-		wrapped[woff++] = (uint8_t)((seg_count >> 8) & 0xff);
-		wrapped[woff++] = (uint8_t)(len & 0xff);
-		wrapped[woff++] = (uint8_t)((len >> 8) & 0xff);
-		wrapped[woff++] = (uint8_t)((len >> 16) & 0xff);
-		wrapped[woff++] = (uint8_t)((len >> 24) & 0xff);
-		for (i = 0; i < seg_count; i++) {
-			size_t chunk = len - off;
-			uint32_t ss;
-			if (chunk > ZGFX_SEG_MAX)
-				chunk = ZGFX_SEG_MAX;
-			ss = (uint32_t)(1 + chunk);
-			wrapped[woff++] = (uint8_t)(ss & 0xff);
-			wrapped[woff++] = (uint8_t)((ss >> 8) & 0xff);
-			wrapped[woff++] = (uint8_t)((ss >> 16) & 0xff);
-			wrapped[woff++] = (uint8_t)((ss >> 24) & 0xff);
-			wrapped[woff++] = 0x00;
-			memcpy(wrapped + woff, data + off, chunk);
-			woff += chunk;
-			off += chunk;
-		}
-		rc = send_drdynvc_data(t, user_id, drdynvc_mcs_chan, dv_chan,
-			wrapped, woff);
-		free(wrapped);
-		return rc;
-	}
+	buf[hdr_off] = 0xE0;
+	buf[hdr_off + 1] = 0x04;
+	memcpy(buf + hdr_off + 2, data, len);
+	rc = send_clip_pdu(t, user_id, drdynvc_mcs_chan,
+		buf, hdr_off + zgfx_len);
+	free(buf);
+	return rc;
 }
 
 static void
@@ -1172,7 +1143,6 @@ run_proxy(struct rdp_tls *t, int be_fd,
 				if (r == 4 && !gfx.active
 				    && dv->dv.gfx_channel_id >= 0
 				    && 0) {
-					/* GFX caps received; init the pipeline. */
 					uint8_t gbuf[512];
 					ssize_t gn;
 					gn = rdp_rdpgfx_build_caps_confirm(
