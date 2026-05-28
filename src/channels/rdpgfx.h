@@ -75,7 +75,8 @@ struct rdpgfx_caps_advertise {
 };
 
 struct rdpgfx_state {
-	int      active;         /* 1 after GFX pipeline fully set up */
+	int      active;         /* 1 after CapsConfirm sent */
+	int      surface_created;/* 1 after ResetGraphics+CreateSurface */
 	int      caps_received;  /* 1 after client caps advertise */
 	int      dv_chan_id;     /* DRDYNVC channel ID for GFX */
 	uint16_t surface_id;

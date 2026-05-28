@@ -99,54 +99,41 @@ rdp_rdpgfx_select_caps(const struct rdpgfx_caps_advertise *adv,
 	uint16_t i;
 	size_t p;
 	int has_avc420 = 0;
-	int has_v10 = 0;
-	int has_avc_disabled = 0;
 
+	/*
+	 * Only enable AVC when the client explicitly advertises
+	 * v8.1 AVC420_ENABLED. macOS Microsoft Remote Desktop
+	 * advertises v10.4 without AVC_DISABLED but actually rejects
+	 * an AVC CapsConfirm; the v8.1 AVC420 flag is the only
+	 * reliable cross-client signal.
+	 */
 	for (i = 0; i < adv->count; i++) {
 		if (adv->sets[i].version == RDPGFX_CAPVERSION_81
 		    && (adv->sets[i].flags
-			& RDPGFX_CAPS_FLAG_AVC420_ENABLED))
+			& RDPGFX_CAPS_FLAG_AVC420_ENABLED)) {
 			has_avc420 = 1;
-		if (adv->sets[i].version >= RDPGFX_CAPVERSION_10) {
-			has_v10 = 1;
-			if (adv->sets[i].flags
-			    & RDPGFX_CAPS_FLAG_AVC_DISABLED)
-				has_avc_disabled = 1;
+			break;
 		}
 	}
 
-	/*
-	 * v8.1 AVC420_ENABLED is the safest signal. mstsc checks it
-	 * internally and rejects AVC CapsConfirm without it.
-	 *
-	 * When v8.1 lacks AVC420_ENABLED but some v10+ versions omit
-	 * AVC_DISABLED while others set it (macOS pattern), the client
-	 * supports AVC only on those specific versions.
-	 *
-	 * When all v10+ have flags=0 and v8.1 lacks AVC420_ENABLED
-	 * (mstsc without GPU), the client cannot do AVC at all.
-	 */
-	if (has_avc420 || (has_v10 && has_avc_disabled)) {
-		for (p = 0; p < sizeof pref / sizeof pref[0]; p++) {
-			for (i = 0; i < adv->count; i++) {
-				if (adv->sets[i].version != pref[p])
-					continue;
-				if (adv->sets[i].flags
-				    & RDPGFX_CAPS_FLAG_AVC_DISABLED)
-					continue;
-				*out_version = adv->sets[i].version;
-				*out_flags = 0;
-				return 0;
-			}
-		}
-		if (has_avc420) {
-			*out_version = RDPGFX_CAPVERSION_81;
-			*out_flags = RDPGFX_CAPS_FLAG_AVC420_ENABLED;
+	if (!has_avc420)
+		return -1;
+
+	for (p = 0; p < sizeof pref / sizeof pref[0]; p++) {
+		for (i = 0; i < adv->count; i++) {
+			if (adv->sets[i].version != pref[p])
+				continue;
+			if (adv->sets[i].flags
+			    & RDPGFX_CAPS_FLAG_AVC_DISABLED)
+				continue;
+			*out_version = adv->sets[i].version;
+			*out_flags = 0;
 			return 0;
 		}
 	}
-
-	return -1;
+	*out_version = RDPGFX_CAPVERSION_81;
+	*out_flags = RDPGFX_CAPS_FLAG_AVC420_ENABLED;
+	return 0;
 }
 
 ssize_t
@@ -216,7 +203,7 @@ rdp_rdpgfx_build_create_surface(uint8_t *out, size_t cap,
 	if (rdp_buf_put_u16le(&b, surface_id) != 0) return -1;
 	if (rdp_buf_put_u16le(&b, w) != 0) return -1;
 	if (rdp_buf_put_u16le(&b, h) != 0) return -1;
-	if (rdp_buf_put_u8(&b, RDPGFX_PIXELFORMAT_ARGB_8888) != 0) return -1;
+	if (rdp_buf_put_u8(&b, RDPGFX_PIXELFORMAT_XRGB_8888) != 0) return -1;
 	return (ssize_t)rdp_buf_used(&b);
 }
 
@@ -269,7 +256,7 @@ rdp_rdpgfx_build_avc420_frame(uint8_t *out, size_t cap,
 		(uint32_t)wire_len) != 0) return -1;
 	if (rdp_buf_put_u16le(&b, surface_id) != 0) return -1;
 	if (rdp_buf_put_u16le(&b, RDPGFX_CODECID_AVC420) != 0) return -1;
-	if (rdp_buf_put_u8(&b, RDPGFX_PIXELFORMAT_ARGB_8888) != 0) return -1;
+	if (rdp_buf_put_u8(&b, RDPGFX_PIXELFORMAT_XRGB_8888) != 0) return -1;
 	/* destRect: left=0, top=0, right=w, bottom=h */
 	if (rdp_buf_put_u16le(&b, 0) != 0) return -1;
 	if (rdp_buf_put_u16le(&b, 0) != 0) return -1;

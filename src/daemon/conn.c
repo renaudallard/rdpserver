@@ -982,6 +982,33 @@ send_gfx_pdu(struct rdp_tls *t, uint16_t user_id,
 }
 
 static void
+ensure_gfx_surface(struct rdp_tls *t, uint16_t user_id,
+		struct dynvc_state *dv, struct rdpgfx_state *gfx,
+		uint16_t desktop_w, uint16_t desktop_h)
+{
+	uint8_t gbuf[512];
+	ssize_t gn;
+
+	if (gfx->surface_created || dv->dv.gfx_channel_id < 0)
+		return;
+	gn = rdp_rdpgfx_build_reset(gbuf, sizeof gbuf, desktop_w, desktop_h);
+	if (gn > 0)
+		(void)send_gfx_pdu(t, user_id, dv->channel_id,
+			dv->dv.gfx_channel_id, gbuf, (size_t)gn);
+	gn = rdp_rdpgfx_build_create_surface(gbuf, sizeof gbuf,
+		gfx->surface_id, desktop_w, desktop_h);
+	if (gn > 0)
+		(void)send_gfx_pdu(t, user_id, dv->channel_id,
+			dv->dv.gfx_channel_id, gbuf, (size_t)gn);
+	gn = rdp_rdpgfx_build_map_surface(gbuf, sizeof gbuf,
+		gfx->surface_id, desktop_w, desktop_h);
+	if (gn > 0)
+		(void)send_gfx_pdu(t, user_id, dv->channel_id,
+			dv->dv.gfx_channel_id, gbuf, (size_t)gn);
+	gfx->surface_created = 1;
+}
+
+static void
 run_proxy(struct rdp_tls *t, int be_fd,
 		struct clip_state *cs, struct dynvc_state *dv,
 		struct snd_state *ss, struct dr_state *dr,
@@ -1164,38 +1191,9 @@ run_proxy(struct rdp_tls *t, int be_fd,
 								dv->channel_id,
 								dv->dv.gfx_channel_id,
 								gbuf, (size_t)gn);
-						gn = rdp_rdpgfx_build_reset(
-							gbuf, sizeof gbuf,
-							desktop_w, desktop_h);
-						if (gn > 0)
-							(void)send_gfx_pdu(t,
-								user_id,
-								dv->channel_id,
-								dv->dv.gfx_channel_id,
-								gbuf, (size_t)gn);
-						gn = rdp_rdpgfx_build_create_surface(
-							gbuf, sizeof gbuf,
-							gfx.surface_id,
-							desktop_w, desktop_h);
-						if (gn > 0)
-							(void)send_gfx_pdu(t,
-								user_id,
-								dv->channel_id,
-								dv->dv.gfx_channel_id,
-								gbuf, (size_t)gn);
-						gn = rdp_rdpgfx_build_map_surface(
-							gbuf, sizeof gbuf,
-							gfx.surface_id,
-							desktop_w, desktop_h);
-						if (gn > 0)
-							(void)send_gfx_pdu(t,
-								user_id,
-								dv->channel_id,
-								dv->dv.gfx_channel_id,
-								gbuf, (size_t)gn);
 						gfx.active = 1;
-						rdp_info("conn[%s]: GFX pipeline "
-							"active", peer);
+						rdp_info("conn[%s]: GFX caps "
+							"confirmed", peer);
 						h264 = rdp_h264_open(desktop_w,
 							desktop_h);
 					} else {
@@ -1251,6 +1249,8 @@ run_proxy(struct rdp_tls *t, int be_fd,
 				    && dv->dv.gfx_channel_id >= 0) {
 					uint32_t pending = gfx.frame_id
 						- gfx.last_ack_frame;
+					ensure_gfx_surface(t, user_id, dv,
+						&gfx, desktop_w, desktop_h);
 					if (pending < 2
 					    || gfx.queue_depth == 0xFFFFFFFF
 					    || gfx.last_ack_frame == 0) {
@@ -1319,6 +1319,8 @@ run_proxy(struct rdp_tls *t, int be_fd,
 				    && dv->dv.gfx_channel_id >= 0) {
 					uint32_t pending = gfx.frame_id
 						- gfx.last_ack_frame;
+					ensure_gfx_surface(t, user_id, dv,
+						&gfx, desktop_w, desktop_h);
 					if (pending < 2
 					    || gfx.queue_depth == 0xFFFFFFFF
 					    || gfx.last_ack_frame == 0) {
