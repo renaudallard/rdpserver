@@ -142,23 +142,17 @@ rdp_rdpgfx_select_caps(const struct rdpgfx_caps_advertise *adv,
 	}
 
 	/*
-	 * Fallback: client supports GFX but not AVC. macOS Windows App
-	 * advertises v10.x with AVC_DISABLED on some versions; confirm
-	 * one of those and use CAPROGRESSIVE for frame data.
+	 * Non-AVC GFX clients exist in theory.  macOS Windows App
+	 * advertises CAPROGRESSIVE decoder support in its binary but
+	 * its libtermsrv connection-control layer immediately closes
+	 * the GFX channel when AVC is not enabled, so confirming
+	 * CAPROGRESSIVE would just break the connection.  Fall back
+	 * to bitmap mode instead.  Re-enable if a non-AVC client that
+	 * actually accepts CAPROGRESSIVE shows up.
 	 */
-	if (has_v10_noavc) {
-		*out_version = v10_avc_disabled_ver;
-		*out_flags = RDPGFX_CAPS_FLAG_AVC_DISABLED;
-		*out_codec = RDPGFX_CODEC_CAPROGRESSIVE;
-		return 0;
-	}
-	if (has_v8) {
-		*out_version = RDPGFX_CAPVERSION_81;
-		*out_flags = 0;
-		*out_codec = RDPGFX_CODEC_CAPROGRESSIVE;
-		return 0;
-	}
-
+	(void)has_v10_noavc;
+	(void)v10_avc_disabled_ver;
+	(void)has_v8;
 	return -1;
 }
 
