@@ -101,68 +101,57 @@ rdp_rdpgfx_select_caps(const struct rdpgfx_caps_advertise *adv,
 	size_t p;
 	int has_avc420 = 0;
 	int has_v10_noavc = 0;
-	int has_v8 = 0;
-	uint32_t v10_avc_disabled_ver = 0;
+	int has_v10_avc = 0;
 
 	for (i = 0; i < adv->count; i++) {
 		if (adv->sets[i].version == RDPGFX_CAPVERSION_81
 		    && (adv->sets[i].flags
 			& RDPGFX_CAPS_FLAG_AVC420_ENABLED))
 			has_avc420 = 1;
-		if (adv->sets[i].version >= RDPGFX_CAPVERSION_10
-		    && (adv->sets[i].flags
-			& RDPGFX_CAPS_FLAG_AVC_DISABLED)) {
-			has_v10_noavc = 1;
-			v10_avc_disabled_ver = adv->sets[i].version;
+		if (adv->sets[i].version >= RDPGFX_CAPVERSION_10) {
+			if (adv->sets[i].flags
+			    & RDPGFX_CAPS_FLAG_AVC_DISABLED)
+				has_v10_noavc = 1;
+			else
+				has_v10_avc = 1;
 		}
-		if (adv->sets[i].version == 0x00080004
-		    || adv->sets[i].version == RDPGFX_CAPVERSION_81)
-			has_v8 = 1;
-	}
-
-	/* Prefer AVC420 when v8.1 AVC420_ENABLED is advertised. */
-	if (has_avc420) {
-		for (p = 0; p < sizeof pref / sizeof pref[0]; p++) {
-			for (i = 0; i < adv->count; i++) {
-				if (adv->sets[i].version != pref[p])
-					continue;
-				if (adv->sets[i].flags
-				    & RDPGFX_CAPS_FLAG_AVC_DISABLED)
-					continue;
-				*out_version = adv->sets[i].version;
-				*out_flags = 0;
-				*out_codec = RDPGFX_CODEC_AVC420;
-				return 0;
-			}
-		}
-		*out_version = RDPGFX_CAPVERSION_81;
-		*out_flags = RDPGFX_CAPS_FLAG_AVC420_ENABLED;
-		*out_codec = RDPGFX_CODEC_AVC420;
-		return 0;
 	}
 
 	/*
-	 * CAPROGRESSIVE is implemented and wired up but unusable for
-	 * any current Microsoft RDP client.  Empirically:
+	 * Only the classic xfreerdp signal works in practice:
+	 * v8.1 with AVC420_ENABLED set in client's CapsAdvertise.
 	 *
-	 *   mstsc (Windows 11):       confirmed v8.1 flags=0,
-	 *                             confirmed v10.6 AVC_DISABLED;
-	 *                             both rejected with cmd=4 close
-	 *                             and 0xd06.
-	 *   macOS Windows App 11.3.5: confirmed v10.3 AVC_DISABLED;
-	 *                             rejected with cmd=4 close and
-	 *                             0x200d.
-	 *
-	 * All three share the same libtermsrv connection-control
-	 * code that requires AVC over GFX.  The CAPROGRESSIVE decoder
-	 * is present in the binary but gated off at a higher layer.
-	 * Keep the encoder code so a future non-AVC GFX client (e.g.,
-	 * a test harness or a non-Microsoft client) can use it.
+	 * macOS Windows App and mstsc both advertise v10.4+ without
+	 * AVC_DISABLED but reject any AVC CapsConfirm with cmd=4
+	 * close + 0xd06/0x200d.  Setting AvcSupportLevel=avc420 in
+	 * NSUserDefaults on macOS does not change this protocol
+	 * behavior despite the value flowing through
+	 * SetAVCSupportLevel -> property store -> StartIO.  There is
+	 * an unidentified additional gate in the connection-control
+	 * layer.
 	 */
-	(void)v10_avc_disabled_ver;
 	(void)has_v10_noavc;
-	(void)has_v8;
-	return -1;
+	(void)has_v10_avc;
+	if (!has_avc420)
+		return -1;
+
+	for (p = 0; p < sizeof pref / sizeof pref[0]; p++) {
+		for (i = 0; i < adv->count; i++) {
+			if (adv->sets[i].version != pref[p])
+				continue;
+			if (adv->sets[i].flags
+			    & RDPGFX_CAPS_FLAG_AVC_DISABLED)
+				continue;
+			*out_version = adv->sets[i].version;
+			*out_flags = 0;
+			*out_codec = RDPGFX_CODEC_AVC420;
+			return 0;
+		}
+	}
+	*out_version = RDPGFX_CAPVERSION_81;
+	*out_flags = RDPGFX_CAPS_FLAG_AVC420_ENABLED;
+	*out_codec = RDPGFX_CODEC_AVC420;
+	return 0;
 }
 
 ssize_t
