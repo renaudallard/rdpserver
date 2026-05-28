@@ -51,7 +51,9 @@
 #define RDPGFX_CAPVERSION_81              0x00080105
 #define RDPGFX_CAPVERSION_10              0x000A0002
 
+#define RDPGFX_CODECID_CAPROGRESSIVE      0x0009
 #define RDPGFX_CODECID_AVC420             0x000B
+#define RDPGFX_CODECID_CAPROGRESSIVE_V2   0x000C
 
 #define RDPGFX_PIXELFORMAT_XRGB_8888     0x20
 #define RDPGFX_PIXELFORMAT_ARGB_8888     0x21
@@ -62,6 +64,12 @@
 #define RDPGFX_CAPS_FLAG_AVC_DISABLED     0x00000020u
 
 #define RDPGFX_MAX_CAPSETS 16
+
+enum rdpgfx_codec {
+	RDPGFX_CODEC_NONE = 0,
+	RDPGFX_CODEC_AVC420,
+	RDPGFX_CODEC_CAPROGRESSIVE,
+};
 
 struct rdpgfx_capset {
 	uint32_t version;
@@ -79,6 +87,7 @@ struct rdpgfx_state {
 	int      surface_created;/* 1 after ResetGraphics+CreateSurface */
 	int      caps_received;  /* 1 after client caps advertise */
 	int      dv_chan_id;     /* DRDYNVC channel ID for GFX */
+	enum rdpgfx_codec codec;
 	uint16_t surface_id;
 	uint32_t frame_id;
 	uint32_t last_ack_frame;
@@ -91,10 +100,11 @@ struct rdpgfx_state {
 int rdp_rdpgfx_parse_caps_advertise(const uint8_t *pdu, size_t len,
 		struct rdpgfx_caps_advertise *out);
 
-/* Select best AVC-capable caps from client's advertise.
- * Returns 0 on success (out_version/out_flags set), -1 if none found. */
+/* Select best GFX codec from client's advertise.
+ * Returns 0 on success (out_version/out_flags/out_codec set), -1 if no GFX. */
 int rdp_rdpgfx_select_caps(const struct rdpgfx_caps_advertise *adv,
-		uint32_t *out_version, uint32_t *out_flags);
+		uint32_t *out_version, uint32_t *out_flags,
+		enum rdpgfx_codec *out_codec);
 
 /* Build RDPGFX_CMDID_CAPSCONFIRM with specified version and flags. */
 ssize_t rdp_rdpgfx_build_caps_confirm(uint8_t *out, size_t cap,

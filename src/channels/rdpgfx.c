@@ -89,7 +89,8 @@ rdp_rdpgfx_parse_caps_advertise(const uint8_t *pdu, size_t len,
 
 int
 rdp_rdpgfx_select_caps(const struct rdpgfx_caps_advertise *adv,
-		uint32_t *out_version, uint32_t *out_flags)
+		uint32_t *out_version, uint32_t *out_flags,
+		enum rdpgfx_codec *out_codec)
 {
 	static const uint32_t pref[] = {
 		0x000A0700, 0x000A0600, 0x000A0502,
@@ -99,41 +100,66 @@ rdp_rdpgfx_select_caps(const struct rdpgfx_caps_advertise *adv,
 	uint16_t i;
 	size_t p;
 	int has_avc420 = 0;
+	int has_v10_noavc = 0;
+	int has_v8 = 0;
+	uint32_t v10_avc_disabled_ver = 0;
 
-	/*
-	 * Only enable AVC when the client explicitly advertises
-	 * v8.1 AVC420_ENABLED. macOS Microsoft Remote Desktop
-	 * advertises v10.4 without AVC_DISABLED but actually rejects
-	 * an AVC CapsConfirm; the v8.1 AVC420 flag is the only
-	 * reliable cross-client signal.
-	 */
 	for (i = 0; i < adv->count; i++) {
 		if (adv->sets[i].version == RDPGFX_CAPVERSION_81
 		    && (adv->sets[i].flags
-			& RDPGFX_CAPS_FLAG_AVC420_ENABLED)) {
+			& RDPGFX_CAPS_FLAG_AVC420_ENABLED))
 			has_avc420 = 1;
-			break;
+		if (adv->sets[i].version >= RDPGFX_CAPVERSION_10
+		    && (adv->sets[i].flags
+			& RDPGFX_CAPS_FLAG_AVC_DISABLED)) {
+			has_v10_noavc = 1;
+			v10_avc_disabled_ver = adv->sets[i].version;
 		}
+		if (adv->sets[i].version == 0x00080004
+		    || adv->sets[i].version == RDPGFX_CAPVERSION_81)
+			has_v8 = 1;
 	}
 
-	if (!has_avc420)
-		return -1;
-
-	for (p = 0; p < sizeof pref / sizeof pref[0]; p++) {
-		for (i = 0; i < adv->count; i++) {
-			if (adv->sets[i].version != pref[p])
-				continue;
-			if (adv->sets[i].flags
-			    & RDPGFX_CAPS_FLAG_AVC_DISABLED)
-				continue;
-			*out_version = adv->sets[i].version;
-			*out_flags = 0;
-			return 0;
+	/* Prefer AVC420 when v8.1 AVC420_ENABLED is advertised. */
+	if (has_avc420) {
+		for (p = 0; p < sizeof pref / sizeof pref[0]; p++) {
+			for (i = 0; i < adv->count; i++) {
+				if (adv->sets[i].version != pref[p])
+					continue;
+				if (adv->sets[i].flags
+				    & RDPGFX_CAPS_FLAG_AVC_DISABLED)
+					continue;
+				*out_version = adv->sets[i].version;
+				*out_flags = 0;
+				*out_codec = RDPGFX_CODEC_AVC420;
+				return 0;
+			}
 		}
+		*out_version = RDPGFX_CAPVERSION_81;
+		*out_flags = RDPGFX_CAPS_FLAG_AVC420_ENABLED;
+		*out_codec = RDPGFX_CODEC_AVC420;
+		return 0;
 	}
-	*out_version = RDPGFX_CAPVERSION_81;
-	*out_flags = RDPGFX_CAPS_FLAG_AVC420_ENABLED;
-	return 0;
+
+	/*
+	 * Fallback: client supports GFX but not AVC. macOS Windows App
+	 * advertises v10.x with AVC_DISABLED on some versions; confirm
+	 * one of those and use CAPROGRESSIVE for frame data.
+	 */
+	if (has_v10_noavc) {
+		*out_version = v10_avc_disabled_ver;
+		*out_flags = RDPGFX_CAPS_FLAG_AVC_DISABLED;
+		*out_codec = RDPGFX_CODEC_CAPROGRESSIVE;
+		return 0;
+	}
+	if (has_v8) {
+		*out_version = RDPGFX_CAPVERSION_81;
+		*out_flags = 0;
+		*out_codec = RDPGFX_CODEC_CAPROGRESSIVE;
+		return 0;
+	}
+
+	return -1;
 }
 
 ssize_t

@@ -1169,19 +1169,23 @@ run_proxy(struct rdp_tls *t, int be_fd,
 				    && gfx_pdu != NULL) {
 					struct rdpgfx_caps_advertise adv;
 					uint32_t sel_ver, sel_flags;
+					enum rdpgfx_codec sel_codec;
 					memset(&adv, 0, sizeof adv);
 					if (rdp_rdpgfx_parse_caps_advertise(
 						gfx_pdu, gfx_pdu_len,
 						&adv) == 0
 					    && rdp_rdpgfx_select_caps(
 						&adv, &sel_ver,
-						&sel_flags) == 0) {
+						&sel_flags,
+						&sel_codec) == 0) {
 						uint8_t gbuf[512];
 						ssize_t gn;
 						rdp_info("conn[%s]: GFX caps "
-							"ver=0x%08x flags=0x%08x",
+							"ver=0x%08x flags=0x%08x "
+							"codec=%d",
 							peer, sel_ver,
-							sel_flags);
+							sel_flags,
+							(int)sel_codec);
 						gn = rdp_rdpgfx_build_caps_confirm(
 							gbuf, sizeof gbuf,
 							sel_ver, sel_flags);
@@ -1192,12 +1196,16 @@ run_proxy(struct rdp_tls *t, int be_fd,
 								dv->dv.gfx_channel_id,
 								gbuf, (size_t)gn);
 						gfx.active = 1;
+						gfx.codec = sel_codec;
 						rdp_info("conn[%s]: GFX caps "
 							"confirmed", peer);
-						h264 = rdp_h264_open(desktop_w,
-							desktop_h);
+						if (sel_codec
+						    == RDPGFX_CODEC_AVC420)
+							h264 = rdp_h264_open(
+								desktop_w,
+								desktop_h);
 					} else {
-						rdp_info("conn[%s]: no AVC caps, "
+						rdp_info("conn[%s]: no GFX caps, "
 							"bitmap mode", peer);
 					}
 				}

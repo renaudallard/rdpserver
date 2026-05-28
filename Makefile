@@ -31,7 +31,8 @@ WIRE_OBJS = \
 	src/wire/rdp_pdu.o \
 	src/wire/fastpath.o \
 	src/wire/input.o \
-	src/wire/h264enc.o
+	src/wire/h264enc.o \
+	src/wire/progressive.o
 
 WIRE_LIB = src/wire/libwire.a
 

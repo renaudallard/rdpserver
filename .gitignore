@@ -19,6 +19,10 @@ regress/fuzz/fuzz_parsers
 tmp/*
 !tmp/.gitkeep
 
+# reverse-engineering scratch
+tmp_ghidra/
+Windows App.app/
+
 # editor / tagger
 tags
 TAGS
