@@ -142,16 +142,25 @@ rdp_rdpgfx_select_caps(const struct rdpgfx_caps_advertise *adv,
 	}
 
 	/*
-	 * Non-AVC GFX clients exist in theory.  macOS Windows App
-	 * advertises CAPROGRESSIVE decoder support in its binary but
-	 * its libtermsrv connection-control layer immediately closes
-	 * the GFX channel when AVC is not enabled, so confirming
-	 * CAPROGRESSIVE would just break the connection.  Fall back
-	 * to bitmap mode instead.  Re-enable if a non-AVC client that
-	 * actually accepts CAPROGRESSIVE shows up.
+	 * CAPROGRESSIVE is implemented and wired up but unusable for
+	 * any current Microsoft RDP client.  Empirically:
+	 *
+	 *   mstsc (Windows 11):       confirmed v8.1 flags=0,
+	 *                             confirmed v10.6 AVC_DISABLED;
+	 *                             both rejected with cmd=4 close
+	 *                             and 0xd06.
+	 *   macOS Windows App 11.3.5: confirmed v10.3 AVC_DISABLED;
+	 *                             rejected with cmd=4 close and
+	 *                             0x200d.
+	 *
+	 * All three share the same libtermsrv connection-control
+	 * code that requires AVC over GFX.  The CAPROGRESSIVE decoder
+	 * is present in the binary but gated off at a higher layer.
+	 * Keep the encoder code so a future non-AVC GFX client (e.g.,
+	 * a test harness or a non-Microsoft client) can use it.
 	 */
-	(void)has_v10_noavc;
 	(void)v10_avc_disabled_ver;
+	(void)has_v10_noavc;
 	(void)has_v8;
 	return -1;
 }
