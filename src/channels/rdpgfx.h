@@ -38,6 +38,7 @@
 #include <sys/types.h>
 
 #define RDPGFX_CMDID_WIRETOSURFACE_1      0x0001
+#define RDPGFX_CMDID_WIRETOSURFACE_2      0x0002
 #define RDPGFX_CMDID_CREATESURFACE        0x0009
 #define RDPGFX_CMDID_DELETESURFACE        0x000A
 #define RDPGFX_CMDID_STARTFRAME           0x000B
@@ -131,5 +132,10 @@ ssize_t rdp_rdpgfx_build_avc420_frame(uint8_t *out, size_t cap,
 		uint16_t surface_id, uint32_t frame_id,
 		uint16_t w, uint16_t h,
 		const uint8_t *h264_data, size_t h264_len);
+
+/* Build StartFrame + WireToSurface2 (CAPROGRESSIVE) + EndFrame. */
+ssize_t rdp_rdpgfx_build_progressive_frame(uint8_t *out, size_t cap,
+		uint16_t surface_id, uint32_t frame_id,
+		const uint8_t *prog_data, size_t prog_len);
 
 #endif /* RDP_RDPGFX_H */

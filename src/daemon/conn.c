@@ -78,6 +78,7 @@
 #include "../channels/rdpsnd.h"
 #include "../channels/rdpgfx.h"
 #include "../wire/h264enc.h"
+#include "../wire/progressive.h"
 #include "../common/utf16.h"
 
 #include <sys/socket.h>
@@ -1021,6 +1022,7 @@ run_proxy(struct rdp_tls *t, int be_fd,
 	size_t   frame_cap = 0;
 	struct rdpgfx_state gfx = {0};
 	struct rdp_h264 *h264 = NULL;
+	struct rdp_progressive *prog = NULL;
 	gfx.surface_id = 0;
 	gfx.frame_id = 0;
 	gfx.desktop_w = desktop_w;
@@ -1163,6 +1165,9 @@ run_proxy(struct rdp_tls *t, int be_fd,
 					if (h264)
 						(void)rdp_h264_resize(h264,
 							rw, rh);
+					if (prog)
+						(void)rdp_progressive_resize(prog,
+							rw, rh);
 				}
 				if (r == 4 && !gfx.active
 				    && dv->dv.gfx_channel_id >= 0
@@ -1202,6 +1207,11 @@ run_proxy(struct rdp_tls *t, int be_fd,
 						if (sel_codec
 						    == RDPGFX_CODEC_AVC420)
 							h264 = rdp_h264_open(
+								desktop_w,
+								desktop_h);
+						else if (sel_codec
+						    == RDPGFX_CODEC_CAPROGRESSIVE)
+							prog = rdp_progressive_open(
 								desktop_w,
 								desktop_h);
 					} else {
@@ -1300,6 +1310,48 @@ run_proxy(struct rdp_tls *t, int be_fd,
 							}
 						}
 					}
+				} else if (gfx.active && prog != NULL
+				    && dv->dv.gfx_channel_id >= 0) {
+					uint32_t pending = gfx.frame_id
+						- gfx.last_ack_frame;
+					ensure_gfx_surface(t, user_id, dv,
+						&gfx, desktop_w, desktop_h);
+					if (pending < 2
+					    || gfx.queue_depth == 0xFFFFFFFF
+					    || gfx.last_ack_frame == 0) {
+						const uint8_t *prog_out;
+						size_t prog_len;
+						if (rdp_progressive_encode(prog,
+							frame_buf, fhdr.w,
+							fhdr.h,
+							&prog_out, &prog_len)
+							== 0) {
+							uint8_t *gpdu;
+							size_t gpdu_cap =
+								prog_len + 256;
+							gpdu = malloc(gpdu_cap);
+							if (gpdu != NULL) {
+								ssize_t gn;
+								gfx.frame_id++;
+								gn = rdp_rdpgfx_build_progressive_frame(
+									gpdu,
+									gpdu_cap,
+									gfx.surface_id,
+									gfx.frame_id,
+									prog_out,
+									prog_len);
+								if (gn > 0)
+									(void)send_gfx_pdu(
+										t,
+										user_id,
+										dv->channel_id,
+										dv->dv.gfx_channel_id,
+										gpdu,
+										(size_t)gn);
+								free(gpdu);
+							}
+						}
+					}
 				} else {
 					if (push_frame_tiled(t, fhdr.x,
 						fhdr.y, fhdr.w, fhdr.h,
@@ -1324,6 +1376,7 @@ run_proxy(struct rdp_tls *t, int be_fd,
 					break;
 				}
 				if (gfx.active
+				    && gfx.codec == RDPGFX_CODEC_AVC420
 				    && dv->dv.gfx_channel_id >= 0) {
 					uint32_t pending = gfx.frame_id
 						- gfx.last_ack_frame;
@@ -1534,6 +1587,7 @@ run_proxy(struct rdp_tls *t, int be_fd,
 	}
 out:
 	if (h264 != NULL) rdp_h264_close(h264);
+	if (prog != NULL) rdp_progressive_close(prog);
 	free(frame_buf);
 	rdp_drdynvc_cleanup(&dv->dv);
 }

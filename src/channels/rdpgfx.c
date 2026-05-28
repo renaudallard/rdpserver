@@ -316,3 +316,44 @@ rdp_rdpgfx_build_avc420_frame(uint8_t *out, size_t cap,
 	(void)off;
 	return (ssize_t)rdp_buf_used(&b);
 }
+
+ssize_t
+rdp_rdpgfx_build_progressive_frame(uint8_t *out, size_t cap,
+		uint16_t surface_id, uint32_t frame_id,
+		const uint8_t *prog_data, size_t prog_len)
+{
+	struct rdp_buf b;
+	/* StartFrame(8+8) + WireToSurface2(8+body) + EndFrame(8+4)
+	 * Wire body: surfaceId(2)+codecId(2)+codecContextId(4)
+	 *            +pixelFormat(1)+bitmapDataLength(4)+data */
+	size_t start_len = RDPGFX_HEADER_SIZE + 8;
+	size_t wire_body = 2 + 2 + 4 + 1 + 4 + prog_len;
+	size_t wire_len  = RDPGFX_HEADER_SIZE + wire_body;
+	size_t end_len   = RDPGFX_HEADER_SIZE + 4;
+	size_t total     = start_len + wire_len + end_len;
+
+	if (total > cap) return -1;
+	rdp_buf_init(&b, out, cap);
+
+	if (put_gfx_header(&b, RDPGFX_CMDID_STARTFRAME,
+		(uint32_t)start_len) != 0) return -1;
+	if (rdp_buf_put_u32le(&b, 0) != 0) return -1;     /* timestamp */
+	if (rdp_buf_put_u32le(&b, frame_id) != 0) return -1;
+
+	if (put_gfx_header(&b, RDPGFX_CMDID_WIRETOSURFACE_2,
+		(uint32_t)wire_len) != 0) return -1;
+	if (rdp_buf_put_u16le(&b, surface_id) != 0) return -1;
+	if (rdp_buf_put_u16le(&b, RDPGFX_CODECID_CAPROGRESSIVE) != 0)
+		return -1;
+	if (rdp_buf_put_u32le(&b, 0) != 0) return -1;     /* codecContextId */
+	if (rdp_buf_put_u8(&b, RDPGFX_PIXELFORMAT_XRGB_8888) != 0)
+		return -1;
+	if (rdp_buf_put_u32le(&b, (uint32_t)prog_len) != 0) return -1;
+	if (rdp_buf_put(&b, prog_data, prog_len) != 0) return -1;
+
+	if (put_gfx_header(&b, RDPGFX_CMDID_ENDFRAME,
+		(uint32_t)end_len) != 0) return -1;
+	if (rdp_buf_put_u32le(&b, frame_id) != 0) return -1;
+
+	return (ssize_t)rdp_buf_used(&b);
+}
