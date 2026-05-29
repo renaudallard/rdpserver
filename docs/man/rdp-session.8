@@ -1,5 +1,5 @@
 .\" Manual page for rdp-session(8).  mdoc format.
-.Dd May 25, 2026
+.Dd May 29, 2026
 .Dt RDP-SESSION 8
 .Os
 .Sh NAME
@@ -24,17 +24,14 @@ to the
 .Sy CLIPRDR
 RDP channel.
 .Pp
-Captured frames are encoded to H.264 with
-.Sy libx264
-before being sent over the backend socket.
-This reduces per-frame data from several megabytes of raw pixels to
-a few kilobytes of compressed bitstream.
+Captured frames are sent as raw pixels over the backend socket.
 The
 .Xr rdpd 8
-proxy wraps the pre-encoded data in RDPGFX AVC420 PDUs for the
-client.
-If the H.264 encoder is unavailable, raw pixel frames are sent
-as a fallback.
+proxy encodes them to H.264 with
+.Sy libx264
+and wraps the bitstream in RDPGFX AVC420 PDUs when the client
+negotiated the graphics pipeline; otherwise it sends fast-path
+bitmap updates.
 .Pp
 Audio from applications in the session is captured and forwarded to
 the RDP client via the backend protocol.

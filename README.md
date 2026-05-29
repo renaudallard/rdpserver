@@ -40,9 +40,11 @@ TCP/3389 ── TLS ──> rdpd (root)
 
 The greeter is painted with RDP fast-path bitmap updates over a CPU
 framebuffer; an embedded 8x16 PSF font renders the labels and typed
-text. After auth, `rdp-session` encodes frames with H.264 (libx264)
-and sends compressed data over the backend RPC socket to `rdpd`,
-which wraps them in RDPGFX AVC420 PDUs for the client.
+text. After auth, `rdp-session` captures frames and streams raw
+pixels over the backend RPC socket to `rdpd`, which encodes them
+with H.264 (libx264) and wraps the bitstream in RDPGFX AVC420 PDUs
+when the client negotiated the graphics pipeline (otherwise it
+sends fast-path bitmap updates).
 
 > **Status: alpha.** Verified end-to-end against `xfreerdp`,
 > Microsoft `mstsc.exe` (Windows 11), Microsoft Remote Desktop
@@ -75,7 +77,7 @@ which wraps them in RDPGFX AVC420 PDUs for the client.
 | CLIPRDR clipboard, bidirectional, text formats | ✓ | |
 | Clean disconnect, Shutdown Request, TCP keepalive | ✓ | |
 | NLA / CredSSP / NTLMv2 | ✓ | Full CredSSP v6 flow with NTLMv2 verification.  NT hashes are auto-cached by the session manager on first successful authentication, so no manual setup is needed.  Microsoft clients (mstsc, macOS, Android) connect via NLA directly.  Credentials are extracted from TSPasswordCreds and verified via PAM/bsd_auth. |
-| RDPGFX / H.264 (AVC420) | ✓ | H.264 encoding runs in rdp-session (the per-user helper), sending compressed frames (~5-50 KB) over the backend socket instead of raw pixels (~4.6 MB).  The rdpd proxy wraps pre-encoded bitstreams in RDPGFX AVC420 WireToSurface1 PDUs.  CapsAdvertise negotiation selects the best AVC-capable version the client supports (v10.x preferred, v8.1 fallback).  FrameAcknowledge flow control prevents overwhelming the client decoder.  Falls back to bitmap mode when no AVC caps match.  Fragmented DRDYNVC messages are reassembled. |
+| RDPGFX / H.264 (AVC420) | ✓ | `rdp-session` sends raw frames over the backend socket; the `rdpd` worker encodes them with libx264 and wraps the bitstream in RDPGFX AVC420 WireToSurface1 PDUs.  CapsAdvertise negotiation selects the best AVC-capable version the client supports (v10.x preferred, v8.1 fallback).  FrameAcknowledge flow control prevents overwhelming the client decoder.  AVC is only offered to clients that advertise it (in practice only xfreerdp); every other client uses bitmap mode.  Fragmented DRDYNVC messages are reassembled. |
 | Audio output (RDPSND / MS-RDPEA) | ✓ | PCM 16-bit stereo 44.1 kHz streamed via SNDC_WAVE2 PDUs.  PulseAudio on Linux (auto-creates a per-session null sink), sndio on OpenBSD.  Audio from apps playing in the session is captured and forwarded to the RDP client in real time. |
 | Drive / printer / serial redirection | ✓ | RDPDR channel with capability exchange, device enumeration, and IRP dispatch for drive file I/O.  Supports Create, Read, Close, and QueryDirectory IRPs with completion tracking.  The session can request file operations on client drives via the backend protocol; the worker relays them as IRPs and forwards completions back. |
 | Session reconnect (auto-reconnect cookie) | ✓ | Save Session Info PDU with ARC cookie, sessmgr SUSPEND/RESUME ops with fd passing.  Sessmgr retains a dup of the backend fd at spawn time and auto-suspends on worker death, so sessions survive worker SIGKILL.  Dead fds are validated at resume and reaped by sweep. |
