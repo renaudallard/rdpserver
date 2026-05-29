@@ -94,7 +94,7 @@ RDP client should work.  Live-tested against:
 | Client | Notes |
 | --- | --- |
 | `xfreerdp` (FreeRDP 3.x) | Primary test client.  `xfreerdp /v:host:3389 /cert:ignore /size:1024x768 +clipboard /sec:nla`. |
-| Microsoft `mstsc.exe` (Windows 11) | Verified working via NLA.  Bitmap mode and H.264/GFX. |
+| Microsoft `mstsc.exe` (Windows 11) | Verified working via NLA.  Bitmap mode only; does not accept AVC/GFX from a non-RDS server. |
 | Microsoft Remote Desktop (macOS) | Verified working via NLA.  Connects directly without greeter. |
 | Microsoft Remote Desktop (Android) | Verified working via NLA. |
 | Remmina | Uses FreeRDP under the hood; should work. |

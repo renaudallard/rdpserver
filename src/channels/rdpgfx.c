@@ -119,16 +119,20 @@ rdp_rdpgfx_select_caps(const struct rdpgfx_caps_advertise *adv,
 
 	/*
 	 * Only the classic xfreerdp signal works in practice:
-	 * v8.1 with AVC420_ENABLED set in client's CapsAdvertise.
+	 * v8.1 with AVC420_ENABLED set in the client's CapsAdvertise.
 	 *
-	 * macOS Windows App and mstsc both advertise v10.4+ without
-	 * AVC_DISABLED but reject any AVC CapsConfirm with cmd=4
-	 * close + 0xd06/0x200d.  Setting AvcSupportLevel=avc420 in
-	 * NSUserDefaults on macOS does not change this protocol
-	 * behavior despite the value flowing through
-	 * SetAVCSupportLevel -> property store -> StartIO.  There is
-	 * an unidentified additional gate in the connection-control
-	 * layer.
+	 * Microsoft clients advertise v8.1 and v10.x with flags=0 (no
+	 * AVC420_ENABLED), so has_avc420 stays 0 and they fall back to
+	 * bitmap cleanly. That is correct: the mstscax CapsConfirm
+	 * handler forces its own client-advertised-AVC flag to 0 on
+	 * the v8.1 path and aborts ("Client did not advertise AVC but
+	 * server enabled it") if we confirm AVC the client never
+	 * advertised. There is no server-identity check there, so the
+	 * gate is the client config, not our cert or product id.
+	 *
+	 * Still unexplained: the macOS Windows App ignores
+	 * AvcSupportLevel=avc420 and never advertises AVC (its StartIO
+	 * writer of that flag was not traced).
 	 */
 	(void)has_v10_noavc;
 	(void)has_v10_avc;
