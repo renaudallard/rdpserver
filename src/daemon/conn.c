@@ -943,42 +943,77 @@ send_drdynvc_data(struct rdp_tls *t, uint16_t user_id,
 	}
 }
 
-#define ZGFX_SEG_MAX 65535
+/* RDP8 bulk segment descriptors (MS-RDPEGFX 2.2.5.1 / FreeRDP zgfx.h). */
+#define ZGFX_SEGMENTED_SINGLE       0xE0
+#define ZGFX_SEGMENTED_MULTIPART    0xE1
+#define ZGFX_PACKET_COMPR_TYPE_RDP8 0x04
+/* Max payload per segment: stay at/under the client's 64 KiB buffer. */
+#define ZGFX_SEG_MAX                65535
 
+/* Wrap a GFX PDU in the RDP8 bulk-encoded (uncompressed) framing and
+ * send it on the DRDYNVC sub-channel.  PDUs up to ZGFX_SEG_MAX go in a
+ * single segment; larger ones are split into a multipart series so the
+ * client's 64 KiB per-segment decode buffer is never overrun. */
 static int
 send_gfx_pdu(struct rdp_tls *t, uint16_t user_id,
 		uint16_t drdynvc_mcs_chan, int dv_chan,
 		const uint8_t *data, size_t len)
 {
-	uint8_t *buf;
-	size_t zgfx_len = 2 + len;
-	size_t hdr_off;
-	uint8_t cb;
+	uint8_t *zbuf;
+	size_t zlen;
 	int rc;
 
-	if (dv_chan <= 0xff) cb = 0;
-	else if (dv_chan <= 0xffff) cb = 1;
-	else cb = 2;
-	hdr_off = 1 + (cb == 0 ? 1 : (cb == 1 ? 2 : 4));
-	buf = malloc(hdr_off + zgfx_len);
-	if (buf == NULL) return -1;
-	buf[0] = (uint8_t)((DRDYNVC_CMD_DATA << 4) | cb);
-	if (cb == 0) buf[1] = (uint8_t)dv_chan;
-	else if (cb == 1) {
-		buf[1] = (uint8_t)(dv_chan & 0xff);
-		buf[2] = (uint8_t)((dv_chan >> 8) & 0xff);
+	if (len <= ZGFX_SEG_MAX) {
+		/* Single uncompressed RDP8 segment. */
+		zlen = 2 + len;
+		zbuf = malloc(zlen);
+		if (zbuf == NULL)
+			return -1;
+		zbuf[0] = ZGFX_SEGMENTED_SINGLE;
+		zbuf[1] = ZGFX_PACKET_COMPR_TYPE_RDP8;
+		memcpy(zbuf + 2, data, len);
 	} else {
-		buf[1] = (uint8_t)(dv_chan & 0xff);
-		buf[2] = (uint8_t)((dv_chan >> 8) & 0xff);
-		buf[3] = (uint8_t)((dv_chan >> 16) & 0xff);
-		buf[4] = (uint8_t)((dv_chan >> 24) & 0xff);
+		/* Multipart: descriptor + segmentCount + uncompressedSize,
+		 * then per chunk a segmentSize + flags byte + data.  Each
+		 * chunk payload is capped at ZGFX_SEG_MAX so the client's
+		 * 64 KiB segment buffer is never overrun. */
+		size_t nseg = (len + ZGFX_SEG_MAX - 1) / ZGFX_SEG_MAX;
+		size_t i, off = 0;
+		uint8_t *p;
+
+		zlen = 7 + nseg * 5 + len;
+		zbuf = malloc(zlen);
+		if (zbuf == NULL)
+			return -1;
+		p = zbuf;
+		*p++ = ZGFX_SEGMENTED_MULTIPART;
+		*p++ = (uint8_t)(nseg & 0xff);
+		*p++ = (uint8_t)((nseg >> 8) & 0xff);
+		*p++ = (uint8_t)(len & 0xff);
+		*p++ = (uint8_t)((len >> 8) & 0xff);
+		*p++ = (uint8_t)((len >> 16) & 0xff);
+		*p++ = (uint8_t)((len >> 24) & 0xff);
+		for (i = 0; i < nseg; i++) {
+			size_t chunk = len - off;
+			uint32_t segsz;
+
+			if (chunk > ZGFX_SEG_MAX)
+				chunk = ZGFX_SEG_MAX;
+			segsz = (uint32_t)(chunk + 1);  /* incl. flags byte */
+			*p++ = (uint8_t)(segsz & 0xff);
+			*p++ = (uint8_t)((segsz >> 8) & 0xff);
+			*p++ = (uint8_t)((segsz >> 16) & 0xff);
+			*p++ = (uint8_t)((segsz >> 24) & 0xff);
+			*p++ = ZGFX_PACKET_COMPR_TYPE_RDP8;
+			memcpy(p, data + off, chunk);
+			p += chunk;
+			off += chunk;
+		}
 	}
-	buf[hdr_off] = 0xE0;
-	buf[hdr_off + 1] = 0x04;
-	memcpy(buf + hdr_off + 2, data, len);
-	rc = send_clip_pdu(t, user_id, drdynvc_mcs_chan,
-		buf, hdr_off + zgfx_len);
-	free(buf);
+
+	rc = send_drdynvc_data(t, user_id, drdynvc_mcs_chan, dv_chan,
+		zbuf, zlen);
+	free(zbuf);
 	return rc;
 }
 
