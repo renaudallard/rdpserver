@@ -72,7 +72,7 @@ BACKEND_LIB  = src/backend/libbackend.a
 
 # Per-user session helper (X11).
 SESSION_OBJS = src/session/rdp_session.o src/session/clip_x11.o \
-	src/session/wayland_comp.o $(AUDIO_OBJ)
+	$(WAYLAND_OBJ) $(AUDIO_OBJ)
 SESSION_PROG = src/session/rdp-session
 
 # Daemon objects.

@@ -256,8 +256,8 @@ for _wlpc in wlroots-0.19 wlroots-0.18 wlroots; do
 				| sed "s|\${prefix}|${_wlprefix}|g")
 			_wllibdir=$(sed -n 's/^libdir=//p' "$_wldir/$_wlpc.pc" \
 				| sed "s|\${prefix}|${_wlprefix}|g")
-			_wlcf="-I${_wlincdir}/wlroots-0.19"
-			_wllf="-L${_wllibdir} -lwlroots-0.19"
+			_wlcf="-I${_wlincdir}/$_wlpc"
+			_wllf="-L${_wllibdir} -l$_wlpc"
 			break
 		fi
 	done

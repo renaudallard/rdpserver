@@ -66,7 +66,9 @@
 
 #include "clip_x11.h"
 #include "audio.h"
+#if HAVE_WLROOTS
 #include "wayland_comp.h"
+#endif
 
 #include <sys/ipc.h>
 #include <sys/shm.h>
@@ -849,6 +851,7 @@ out:
 	return 0;
 }
 
+#if HAVE_WLROOTS
 static int
 run_wayland_mode(int w, int h)
 {
@@ -982,6 +985,7 @@ wl_out:
 	rdp_wl_comp_destroy(wl);
 	return 0;
 }
+#endif /* HAVE_WLROOTS */
 
 static void
 usage(const char *prog)
@@ -1036,9 +1040,15 @@ main(int argc, char *argv[])
 	install_signals();
 
 	if (use_wayland) {
+#if HAVE_WLROOTS
 		int rc = run_wayland_mode(w, h);
 		rdp_log_close();
 		return rc;
+#else
+		rdp_err("rdp-session: built without Wayland support");
+		rdp_log_close();
+		return 1;
+#endif
 	}
 
 	if (use_ddx) {
