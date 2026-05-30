@@ -118,25 +118,21 @@ rdp_rdpgfx_select_caps(const struct rdpgfx_caps_advertise *adv,
 	}
 
 	/*
-	 * Only the classic xfreerdp signal works in practice:
-	 * v8.1 with AVC420_ENABLED set in the client's CapsAdvertise.
+	 * Accept AVC if the client advertised either v8.1 with
+	 * AVC420_ENABLED (the classic xfreerdp signal) or any v10.x
+	 * capset without AVC_DISABLED.
 	 *
-	 * Microsoft clients advertise v8.1 and v10.x with flags=0 (no
-	 * AVC420_ENABLED), so has_avc420 stays 0 and they fall back to
-	 * bitmap cleanly. That is correct: the mstscax CapsConfirm
-	 * handler forces its own client-advertised-AVC flag to 0 on
-	 * the v8.1 path and aborts ("Client did not advertise AVC but
-	 * server enabled it") if we confirm AVC the client never
-	 * advertised. There is no server-identity check there, so the
-	 * gate is the client config, not our cert or product id.
-	 *
-	 * Still unexplained: the macOS Windows App ignores
-	 * AvcSupportLevel=avc420 and never advertises AVC (its StartIO
-	 * writer of that flag was not traced).
+	 * Decompiling the macOS Windows App showed it signals AVC only
+	 * via v10.4+ by omitting AVC_DISABLED, enabled by default, and it
+	 * never sets the v8.1 AVC420_ENABLED bit. mstscax and macOS share
+	 * a CapsConfirm gate that aborts ("Client did not advertise AVC
+	 * but server enabled it") if we confirm AVC the client did not
+	 * advertise, so the pref loop below only ever echoes a version
+	 * the client offered. If a client still rejects the confirm and
+	 * closes the GFX channel, the proxy loop reverts to bitmap.
 	 */
 	(void)has_v10_noavc;
-	(void)has_v10_avc;
-	if (!has_avc420)
+	if (!has_avc420 && !has_v10_avc)
 		return -1;
 
 	for (p = 0; p < sizeof pref / sizeof pref[0]; p++) {
