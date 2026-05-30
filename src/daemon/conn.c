@@ -1337,14 +1337,17 @@ run_proxy(struct rdp_tls *t, int be_fd,
 							gpdu = malloc(gpdu_cap);
 							if (gpdu != NULL) {
 								ssize_t gn;
+								int gw, gh;
+								rdp_h264_dims(h264,
+									&gw, &gh);
 								gfx.frame_id++;
 								gn = rdp_rdpgfx_build_avc420_frame(
 									gpdu,
 									gpdu_cap,
 									gfx.surface_id,
 									gfx.frame_id,
-									fhdr.w,
-									fhdr.h,
+									gw,
+									gh,
 									h264_out,
 									h264_len);
 								if (gn > 0)

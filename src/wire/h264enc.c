@@ -53,6 +53,13 @@ struct rdp_h264 {
 static int
 init_encoder(struct rdp_h264 *e, int w, int h)
 {
+	/* Free any frame buffer from a previous geometry (on resize),
+	 * then round down to even: H.264 4:2:0 requires even dimensions. */
+	free(e->pic_in.img.plane[0]);
+	e->pic_in.img.plane[0] = NULL;
+	w &= ~1;
+	h &= ~1;
+
 	x264_param_default_preset(&e->param, "ultrafast", "zerolatency");
 	e->param.i_width  = w;
 	e->param.i_height = h;
@@ -102,20 +109,30 @@ rdp_h264_resize(struct rdp_h264 *e, int width, int height)
 	return init_encoder(e, width, height);
 }
 
-/* BGR24 top-down -> YUV420P.  Allocates planes inside pic_in. */
+void
+rdp_h264_dims(const struct rdp_h264 *e, int *w, int *h)
+{
+	if (w != NULL) *w = e->width;
+	if (h != NULL) *h = e->height;
+}
+
+/* BGR24 top-down (row stride src_w*3) -> YUV420P at the encoder's
+ * even geometry (e->width x e->height).  Both are even, so the chroma
+ * planes size exactly and there is no overrun; src_w is only the
+ * source row stride and may be larger or odd, so reads stay in bounds
+ * (we copy ew <= src_w columns and eh <= src_h rows). */
 static void
-bgr_to_yuv420(struct rdp_h264 *e, const uint8_t *bgr, int w, int h)
+bgr_to_yuv420(struct rdp_h264 *e, const uint8_t *bgr, int src_w)
 {
 	int x, y;
-	int luma_stride = w;
-	int chroma_stride = w / 2;
-	size_t ysz = (size_t)w * h;
-	size_t uvsz = (size_t)(w / 2) * (h / 2);
+	int ew = e->width, eh = e->height;
+	int luma_stride = ew;
+	int chroma_stride = ew / 2;
+	size_t ysz = (size_t)ew * eh;
+	size_t uvsz = (size_t)(ew / 2) * (eh / 2);
 	uint8_t *Y, *U, *V;
 
-	if (e->pic_in.img.plane[0] == NULL
-	    || e->width != w || e->height != h) {
-		free(e->pic_in.img.plane[0]);
+	if (e->pic_in.img.plane[0] == NULL) {
 		e->pic_in.img.plane[0] = malloc(ysz + uvsz * 2);
 		if (e->pic_in.img.plane[0] == NULL) return;
 	}
@@ -128,9 +145,9 @@ bgr_to_yuv420(struct rdp_h264 *e, const uint8_t *bgr, int w, int h)
 	e->pic_in.img.i_stride[1] = chroma_stride;
 	e->pic_in.img.i_stride[2] = chroma_stride;
 
-	for (y = 0; y < h; y++) {
-		const uint8_t *row = bgr + (size_t)y * w * 3;
-		for (x = 0; x < w; x++) {
+	for (y = 0; y < eh; y++) {
+		const uint8_t *row = bgr + (size_t)y * src_w * 3;
+		for (x = 0; x < ew; x++) {
 			uint8_t b = row[x * 3 + 0];
 			uint8_t g = row[x * 3 + 1];
 			uint8_t r = row[x * 3 + 2];
@@ -160,7 +177,8 @@ rdp_h264_encode(struct rdp_h264 *e,
 	int i;
 	size_t total = 0;
 
-	bgr_to_yuv420(e, bgr, width, height);
+	if (width < e->width || height < e->height) return -1;
+	bgr_to_yuv420(e, bgr, width);
 	e->pic_in.i_pts = e->pts++;
 	frame_size = x264_encoder_encode(e->enc, &nals, &i_nals,
 		&e->pic_in, &e->pic_out);

@@ -50,6 +50,11 @@ struct rdp_h264 *rdp_h264_open(int width, int height);
  * on success. */
 int rdp_h264_resize(struct rdp_h264 *e, int width, int height);
 
+/* Encoded geometry, rounded down to even (H.264 4:2:0 needs even
+ * dimensions).  Use these for the RDPGFX AVC420 destRect/regionRect so
+ * the surface region matches the H.264 frame. */
+void rdp_h264_dims(const struct rdp_h264 *e, int *w, int *h);
+
 /* Encode one frame.  `bgr` is width*height*3 bytes, top-down,
  * packed BGR (the same format rdp-session sends).  On success the
  * encoded H.264 bitstream is in `*out_buf` / `*out_len`; the
