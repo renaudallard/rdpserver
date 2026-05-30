@@ -306,8 +306,19 @@ rdp_drdynvc_handle(struct drdynvc_state *st,
 		return 0;
 	}
 
-	case DRDYNVC_CMD_CLOSE:
+	case DRDYNVC_CMD_CLOSE: {
+		uint32_t chan_id;
+		size_t id_len;
+		if (read_channel_id(pdu + 1, len - 1, cbId,
+			&chan_id, &id_len) == 0
+		    && (int)chan_id == st->gfx_channel_id) {
+			rdp_info("drdynvc: GFX channel %u closed by client",
+				(unsigned)chan_id);
+			st->gfx_channel_id = -1;
+			return 7;
+		}
 		return 0;
+	}
 	}
 	return 0;
 }

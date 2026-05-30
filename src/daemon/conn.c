@@ -659,6 +659,7 @@ maybe_dispatch_clip(struct rdp_tls *t, int be_fd,
 					(void)send_clip_pdu(t, cs->user_id,
 						dv->channel_id, gc, (size_t)gn);
 			}
+			if (rc == 7) return 7;
 			if (rc == 1) return 2;
 			if (rc == 3 && gfx_data != NULL && gfx_len > 0) {
 				const uint8_t *gp = gfx_data;
@@ -1189,6 +1190,19 @@ run_proxy(struct rdp_tls *t, int be_fd,
 					&rw, &rh,
 					&gfx_pdu, &gfx_pdu_len);
 				if (r < 0) break;
+				if (r == 7 && gfx.active) {
+					rdp_info("conn[%s]: GFX closed, "
+						"reverting to bitmap", peer);
+					gfx.active = 0;
+					if (h264) {
+						rdp_h264_close(h264);
+						h264 = NULL;
+					}
+					if (prog) {
+						rdp_progressive_close(prog);
+						prog = NULL;
+					}
+				}
 				if (r == 2 && rw > 0 && rh > 0) {
 					if (do_reactivate(t, be_fd, user_id,
 						io_channel, rw, rh, peer) != 0)
