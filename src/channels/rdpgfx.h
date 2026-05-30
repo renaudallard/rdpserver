@@ -105,7 +105,7 @@ int rdp_rdpgfx_parse_caps_advertise(const uint8_t *pdu, size_t len,
  * Returns 0 on success (out_version/out_flags/out_codec set), -1 if no GFX. */
 int rdp_rdpgfx_select_caps(const struct rdpgfx_caps_advertise *adv,
 		uint32_t *out_version, uint32_t *out_flags,
-		enum rdpgfx_codec *out_codec);
+		enum rdpgfx_codec *out_codec, int allow_v10_avc);
 
 /* Build RDPGFX_CMDID_CAPSCONFIRM with specified version and flags. */
 ssize_t rdp_rdpgfx_build_caps_confirm(uint8_t *out, size_t cap,

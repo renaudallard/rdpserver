@@ -90,12 +90,22 @@ rdp_rdpgfx_parse_caps_advertise(const uint8_t *pdu, size_t len,
 int
 rdp_rdpgfx_select_caps(const struct rdpgfx_caps_advertise *adv,
 		uint32_t *out_version, uint32_t *out_flags,
-		enum rdpgfx_codec *out_codec)
+		enum rdpgfx_codec *out_codec, int allow_v10_avc)
 {
+	/*
+	 * Prefer versions inside the common client CapsConfirm accept
+	 * whitelist.  mstsc only accepts a confirm of <= v10.2, so pick
+	 * v10.2 first; macOS only drops AVC_DISABLED on v10.4+, so it
+	 * skips the lower ones and lands on v10.4.  The loop below only
+	 * ever confirms a version the client actually advertised.
+	 */
 	static const uint32_t pref[] = {
-		0x000A0700, 0x000A0600, 0x000A0502,
-		0x000A0400, 0x000A0301, 0x000A0200,
-		0x000A0100, RDPGFX_CAPVERSION_10,
+		0x000A0200,            /* v10.2 */
+		0x000A0100,            /* v10.1 */
+		RDPGFX_CAPVERSION_10,  /* v10.0 (0xA0002) */
+		0x000A0400,            /* v10.4 */
+		0x000A0301, 0x000A0502,
+		0x000A0600, 0x000A0700,
 	};
 	uint16_t i;
 	size_t p;
@@ -118,21 +128,23 @@ rdp_rdpgfx_select_caps(const struct rdpgfx_caps_advertise *adv,
 	}
 
 	/*
-	 * Accept AVC if the client advertised either v8.1 with
-	 * AVC420_ENABLED (the classic xfreerdp signal) or any v10.x
-	 * capset without AVC_DISABLED.
+	 * Accept AVC if the client advertised v8.1 with AVC420_ENABLED
+	 * (the classic xfreerdp signal), or, when allow_v10_avc is set, a
+	 * v10.x capset without AVC_DISABLED.
 	 *
-	 * Decompiling the macOS Windows App showed it signals AVC only
-	 * via v10.4+ by omitting AVC_DISABLED, enabled by default, and it
-	 * never sets the v8.1 AVC420_ENABLED bit. mstscax and macOS share
-	 * a CapsConfirm gate that aborts ("Client did not advertise AVC
-	 * but server enabled it") if we confirm AVC the client did not
-	 * advertise, so the pref loop below only ever echoes a version
-	 * the client offered. If a client still rejects the confirm and
-	 * closes the GFX channel, the proxy loop reverts to bitmap.
+	 * Microsoft clients signal AVC only via v10.x by omitting
+	 * AVC_DISABLED (the decompiled macOS Windows App enables it by
+	 * default and never sets the v8.1 AVC420_ENABLED bit; mstsc is the
+	 * same).  But a client can advertise AVC and still be unable to
+	 * decode it (for example a GPU-less mstsc, which then tears down
+	 * the whole GFX connection with 0xd06 rather than fall back), so
+	 * offering AVC to such clients is off by default and enabled with
+	 * rdpd -V.  xfreerdp, which advertises AVC420_ENABLED, is always
+	 * offered AVC.  The pref loop only ever echoes a version the
+	 * client advertised.
 	 */
 	(void)has_v10_noavc;
-	if (!has_avc420 && !has_v10_avc)
+	if (!has_avc420 && !(allow_v10_avc && has_v10_avc))
 		return -1;
 
 	for (p = 0; p < sizeof pref / sizeof pref[0]; p++) {

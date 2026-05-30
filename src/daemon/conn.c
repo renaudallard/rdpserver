@@ -1045,6 +1045,10 @@ ensure_gfx_surface(struct rdp_tls *t, uint16_t user_id,
 	gfx->surface_created = 1;
 }
 
+/* Set per worker from rdp_conn_cfg; gates whether GFX AVC is offered to
+ * clients that advertise v10.x without AVC_DISABLED (mstsc, macOS). */
+static int g_allow_v10_avc;
+
 static void
 run_proxy(struct rdp_tls *t, int be_fd,
 		struct clip_state *cs, struct dynvc_state *dv,
@@ -1231,7 +1235,8 @@ run_proxy(struct rdp_tls *t, int be_fd,
 					    && rdp_rdpgfx_select_caps(
 						&adv, &sel_ver,
 						&sel_flags,
-						&sel_codec) == 0) {
+						&sel_codec,
+						g_allow_v10_avc) == 0) {
 						uint8_t gbuf[512];
 						ssize_t gn;
 						rdp_info("conn[%s]: GFX caps "
@@ -1675,6 +1680,8 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 	size_t ci_pw_len = 0;
 	struct rdp_tls_ctx *tls = cfg->tls;
 	struct clip_state clip = {0};
+
+	g_allow_v10_avc = cfg->allow_v10_avc;
 	struct dynvc_state dynvc = {0};
 	struct snd_state snd = {0};
 	struct dr_state devr = {0};

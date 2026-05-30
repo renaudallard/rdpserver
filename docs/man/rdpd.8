@@ -7,7 +7,7 @@
 .Nd Remote Desktop Protocol server
 .Sh SYNOPSIS
 .Nm
-.Op Fl Adf
+.Op Fl AdfV
 .Op Fl h Ar host
 .Op Fl p Ar port
 .Op Fl S Ar socket
@@ -66,6 +66,23 @@ Path to the
 AF_UNIX socket.
 When omitted, the built-in stub authenticator accepts any non-empty
 username/password pair.
+.It Fl V
+Offer RDPGFX AVC
+.Pq H.264
+graphics to v10.x clients
+.Pq mstsc , macOS
+that advertise it by omitting the
+.Sy AVC_DISABLED
+capability flag.
+This is off by default: a client may advertise AVC yet be unable to
+decode it
+.Pq for example a Microsoft client on a host without a GPU ,
+in which case it tears down the graphics channel instead of falling
+back, ending the session.
+.Xr xfreerdp 1 ,
+which advertises the v8.1
+.Sy AVC420_ENABLED
+flag, is always offered AVC regardless of this option.
 .El
 .Sh FILES
 .Bl -tag -width Ds
