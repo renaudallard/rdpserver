@@ -100,6 +100,28 @@ RDP client should work.  Live-tested against:
 | Remmina | Uses FreeRDP under the hood; should work. |
 | `rdesktop` (legacy) | Older PDU shapes; not yet exercised. |
 
+## Acceleration conditions
+
+Graphics are sent as H.264 / AVC420 frames over the RDPGFX graphics pipeline when the client negotiates it; otherwise the server falls back to fast-path bitmap updates.  Whether AVC is offered depends on what the client advertises in its GFX `CapsAdvertise` and on the `rdpd -V` flag:
+
+| Client GFX advertise | `rdpd -V` | Server offers | Result |
+| --- | --- | --- | --- |
+| v8.1 with `AVC420_ENABLED` (xfreerdp) | off or on | AVC420 (always) | H.264 accelerated |
+| v10.x without `AVC_DISABLED` (mstsc, macOS) | off (default) | nothing | fast-path bitmap |
+| v10.x without `AVC_DISABLED` (mstsc, macOS) | on | AVC420 (v10.2) | accelerated only if the client can decode H.264 |
+| v10.x with `AVC_DISABLED` (e.g. Android) | off or on | nothing | fast-path bitmap |
+| no GFX channel advertised | n/a | n/a | fast-path bitmap |
+
+`xfreerdp` sets the v8.1 `AVC420_ENABLED` flag, so it is always offered AVC.  Microsoft clients (mstsc, macOS) signal AVC only by omitting `AVC_DISABLED` from a v10.x capset; offering them AVC is opt-in via `rdpd -V` and **off by default**.  A v10.x client can advertise AVC yet be unable to decode it (for example a Microsoft client on a host with no GPU), in which case it tears down the graphics channel with a `0xd06` error and ends the session instead of falling back to bitmap.  With the default off, those clients get bitmap and render normally; only xfreerdp, which keeps the session alive when the GFX channel closes, recovers gracefully when AVC is declined mid-session.
+
+For an accelerated session to work end to end:
+
+- The server encodes with **libx264** on the CPU; there is no GPU encode path.  Frames are rounded to even dimensions for 4:2:0.
+- Large keyframes (GFX PDUs over 64 KB) are split into ZGFX multipart segments, without which the client decoder tears down the channel.
+- The client must have a working H.264 decoder.  `xfreerdp` uses libavcodec (and can GPU-decode via VA-API/VDPAU/NVDEC or VideoToolbox); Microsoft clients need a GPU decoder.
+
+See [`rdpd(8)`](./docs/man/rdpd.8) for the `-V` flag.
+
 ## Build
 
 ```sh
