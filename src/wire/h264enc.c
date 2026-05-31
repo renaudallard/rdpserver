@@ -116,6 +116,13 @@ rdp_h264_dims(const struct rdp_h264 *e, int *w, int *h)
 	if (h != NULL) *h = e->height;
 }
 
+void
+rdp_h264_force_idr(struct rdp_h264 *e)
+{
+	if (e != NULL)
+		e->pic_in.i_type = X264_TYPE_IDR;
+}
+
 /* BGR24 top-down (row stride src_w*3) -> YUV420P at the encoder's
  * even geometry (e->width x e->height).  Both are even, so the chroma
  * planes size exactly and there is no overrun; src_w is only the
@@ -182,6 +189,7 @@ rdp_h264_encode(struct rdp_h264 *e,
 	e->pic_in.i_pts = e->pts++;
 	frame_size = x264_encoder_encode(e->enc, &nals, &i_nals,
 		&e->pic_in, &e->pic_out);
+	e->pic_in.i_type = X264_TYPE_AUTO;  /* a forced IDR applies once */
 	if (frame_size < 0) return -1;
 	if (frame_size == 0 || i_nals == 0) {
 		*out_buf = NULL;

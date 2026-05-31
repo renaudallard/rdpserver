@@ -1321,8 +1321,11 @@ run_proxy(struct rdp_tls *t, int be_fd,
 				    && dv->dv.gfx_channel_id >= 0) {
 					uint32_t pending = gfx.frame_id
 						- gfx.last_ack_frame;
+					int fresh = !gfx.surface_created;
 					ensure_gfx_surface(t, user_id, dv,
 						&gfx, desktop_w, desktop_h);
+					if (fresh && gfx.surface_created)
+						rdp_h264_force_idr(h264);
 					if (pending < 2
 					    || gfx.queue_depth == 0xFFFFFFFF
 					    || gfx.last_ack_frame == 0) {

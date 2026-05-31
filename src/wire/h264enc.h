@@ -31,7 +31,7 @@
  *
  * Configured for low-latency RDP: ultrafast preset, zerolatency
  * tune, single thread, Annex B NAL output, no B-frames, keyframe
- * every 30 frames.
+ * every 60 frames or on demand (see rdp_h264_force_idr).
  */
 
 #ifndef RDP_H264ENC_H
@@ -54,6 +54,11 @@ int rdp_h264_resize(struct rdp_h264 *e, int width, int height);
  * dimensions).  Use these for the RDPGFX AVC420 destRect/regionRect so
  * the surface region matches the H.264 frame. */
 void rdp_h264_dims(const struct rdp_h264 *e, int *w, int *h);
+
+/* Force the next encoded frame to be an IDR keyframe.  Use on a client
+ * resync (e.g. a freshly created RDPGFX surface) so recovery does not
+ * have to wait for the periodic keyframe interval. */
+void rdp_h264_force_idr(struct rdp_h264 *e);
 
 /* Encode one frame.  `bgr` is width*height*3 bytes, top-down,
  * packed BGR (the same format rdp-session sends).  On success the
