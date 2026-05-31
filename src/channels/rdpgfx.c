@@ -72,7 +72,9 @@ rdp_rdpgfx_parse_caps_advertise(const uint8_t *pdu, size_t len,
 		uint32_t ver = ld32le(pdu + off);
 		uint32_t dlen = ld32le(pdu + off + 4);
 		uint32_t flags = 0;
-		if (dlen >= 4 && off + 8 + 4 <= len)
+		if (off + 8 + (size_t)dlen > len)
+			break;   /* capsData runs past the PDU; malformed */
+		if (dlen >= 4)
 			flags = ld32le(pdu + off + 8);
 		rdp_info("rdpgfx:   [%u] ver=0x%08x flags=0x%08x",
 			(unsigned)i, ver, flags);
