@@ -114,10 +114,13 @@ Graphics are sent as H.264 / AVC420 frames over the RDPGFX graphics pipeline whe
 
 `xfreerdp` sets the v8.1 `AVC420_ENABLED` flag, so it is always offered AVC.  Microsoft clients (mstsc, macOS) signal AVC only by omitting `AVC_DISABLED` from a v10.x capset; offering them AVC is opt-in via `rdpd -V` and **off by default**.  A v10.x client can advertise AVC yet be unable to decode it (for example a Microsoft client on a host with no GPU), in which case it tears down the graphics channel with a `0xd06` error and ends the session instead of falling back to bitmap.  With the default off, those clients get bitmap and render normally; only xfreerdp, which keeps the session alive when the GFX channel closes, recovers gracefully when AVC is declined mid-session.
 
+Whichever version is chosen, the server confirms only a version the client actually advertised, and only after its libx264 encoder opens.  If no advertised version is usable, or the encoder cannot start, it sends no `CapsConfirm` and the client falls back to bitmap rather than waiting for frames that never arrive.
+
 For an accelerated session to work end to end:
 
 - The server encodes with **libx264** on the CPU; there is no GPU encode path.  Frames are rounded to even dimensions for 4:2:0.
 - Large keyframes (GFX PDUs over 64 KB) are split into ZGFX multipart segments, without which the client decoder tears down the channel.
+- The first frame to a freshly created RDPGFX surface is forced to an IDR keyframe (rather than waiting for the periodic 60-frame keyframe), so the client never has to decode a P-frame referencing surface data it discarded on reset.
 - The client must have a working H.264 decoder.  `xfreerdp` uses libavcodec (and can GPU-decode via VA-API/VDPAU/NVDEC or VideoToolbox); Microsoft clients need a GPU decoder.
 
 See [`rdpd(8)`](./docs/man/rdpd.8) for the `-V` flag.
