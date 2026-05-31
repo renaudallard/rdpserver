@@ -1237,29 +1237,14 @@ run_proxy(struct rdp_tls *t, int be_fd,
 						&sel_flags,
 						&sel_codec,
 						g_allow_v10_avc) == 0) {
-						uint8_t gbuf[512];
-						ssize_t gn;
-						rdp_info("conn[%s]: GFX caps "
-							"ver=0x%08x flags=0x%08x "
-							"codec=%d",
-							peer, sel_ver,
-							sel_flags,
-							(int)sel_codec);
-						gn = rdp_rdpgfx_build_caps_confirm(
-							gbuf, sizeof gbuf,
-							sel_ver, sel_flags);
-						if (gn > 0)
-							(void)send_gfx_pdu(t,
-								user_id,
-								dv->channel_id,
-								dv->dv.gfx_channel_id,
-								gbuf, (size_t)gn);
-						gfx.active = 1;
-						gfx.codec = sel_codec;
-						rdp_info("conn[%s]: GFX caps "
-							"confirmed", peer);
-						if (sel_codec
-						    == RDPGFX_CODEC_AVC420)
+						/*
+						 * Probe the encoder before confirming
+						 * the codec. If it will not open, send
+						 * no CapsConfirm so the client falls
+						 * back to bitmap instead of waiting for
+						 * frames that never arrive.
+						 */
+						if (sel_codec == RDPGFX_CODEC_AVC420)
 							h264 = rdp_h264_open(
 								desktop_w,
 								desktop_h);
@@ -1268,6 +1253,33 @@ run_proxy(struct rdp_tls *t, int be_fd,
 							prog = rdp_progressive_open(
 								desktop_w,
 								desktop_h);
+						if (h264 != NULL || prog != NULL) {
+							uint8_t gbuf[512];
+							ssize_t gn;
+							rdp_info("conn[%s]: GFX caps "
+								"ver=0x%08x flags=0x%08x "
+								"codec=%d",
+								peer, sel_ver,
+								sel_flags,
+								(int)sel_codec);
+							gn = rdp_rdpgfx_build_caps_confirm(
+								gbuf, sizeof gbuf,
+								sel_ver, sel_flags);
+							if (gn > 0)
+								(void)send_gfx_pdu(t,
+									user_id,
+									dv->channel_id,
+									dv->dv.gfx_channel_id,
+									gbuf, (size_t)gn);
+							gfx.active = 1;
+							gfx.codec = sel_codec;
+							rdp_info("conn[%s]: GFX caps "
+								"confirmed", peer);
+						} else {
+							rdp_warn("conn[%s]: GFX codec "
+								"unavailable, bitmap mode",
+								peer);
+						}
 					} else {
 						rdp_info("conn[%s]: no GFX caps, "
 							"bitmap mode", peer);
