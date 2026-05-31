@@ -763,6 +763,19 @@ maybe_dispatch_clip(struct rdp_tls *t, int be_fd,
 						fm, (size_t)fn);
 				return 1;
 			}
+			if (pdu_type2 == RDP_PDU2_SUPPRESS_OUTPUT) {
+				/* allowDisplayUpdates is the first body
+				 * byte (payload[18]): 0 = suppress output,
+				 * else allow.  Pause or resume the stream. */
+				if (payload_len >= 19 && payload[18] == 0)
+					return 8;
+				return 9;
+			}
+			if (pdu_type2 == RDP_PDU2_REFRESH_RECT) {
+				/* Client wants a region redrawn; make sure
+				 * output is flowing again. */
+				return 9;
+			}
 			if (pdu_type2 == RDP_PDU2_SHUTDOWN_REQUEST) {
 				/* Build a Shutdown Denied PDU and send back.
 				 * The client should follow up with MCS
@@ -1064,6 +1077,7 @@ run_proxy(struct rdp_tls *t, int be_fd,
 	struct rdpgfx_state gfx = {0};
 	struct rdp_h264 *h264 = NULL;
 	struct rdp_progressive *prog = NULL;
+	int output_suppressed = 0;
 	gfx.surface_id = 0;
 	gfx.frame_id = 0;
 	gfx.desktop_w = desktop_w;
@@ -1195,6 +1209,8 @@ run_proxy(struct rdp_tls *t, int be_fd,
 					&rw, &rh,
 					&gfx_pdu, &gfx_pdu_len);
 				if (r < 0) break;
+				if (r == 8) output_suppressed = 1;
+				if (r == 9) output_suppressed = 0;
 				if (r == 7 && gfx.active) {
 					rdp_info("conn[%s]: GFX closed, "
 						"reverting to bitmap", peer);
@@ -1331,6 +1347,10 @@ run_proxy(struct rdp_tls *t, int be_fd,
 				if (rdp_read_full(be_fd, frame_buf, pix_bytes)
 				    != (ssize_t)pix_bytes)
 					break;
+				/* Client suppressed output (minimized): drain
+				 * the frame but neither encode nor send it. */
+				if (output_suppressed)
+					continue;
 				if (gfx.active && h264 != NULL
 				    && dv->dv.gfx_channel_id >= 0) {
 					uint32_t pending = gfx.frame_id
@@ -1448,6 +1468,10 @@ run_proxy(struct rdp_tls *t, int be_fd,
 				    != (ssize_t)fhdr.h264_len) {
 					free(h264_data);
 					break;
+				}
+				if (output_suppressed) {
+					free(h264_data);
+					continue;
 				}
 				if (gfx.active
 				    && gfx.codec == RDPGFX_CODEC_AVC420

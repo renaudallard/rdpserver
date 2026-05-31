@@ -68,6 +68,7 @@
 #define RDP_PDU2_INPUT              28
 #define RDP_PDU2_SYNCHRONIZE       31
 #define RDP_PDU2_REFRESH_RECT      33
+#define RDP_PDU2_SUPPRESS_OUTPUT   35
 #define RDP_PDU2_FONTLIST          39
 #define RDP_PDU2_FONTMAP           40
 #define RDP_PDU2_SHUTDOWN_REQUEST  36
