@@ -1078,6 +1078,7 @@ run_proxy(struct rdp_tls *t, int be_fd,
 	struct rdp_h264 *h264 = NULL;
 	struct rdp_progressive *prog = NULL;
 	int output_suppressed = 0;
+	int backend_lost = 0;
 	gfx.surface_id = 0;
 	gfx.frame_id = 0;
 	gfx.desktop_w = desktop_w;
@@ -1191,6 +1192,7 @@ run_proxy(struct rdp_tls *t, int be_fd,
 		if (pfd[1].revents & (POLLHUP | POLLERR)) {
 			rdp_debug("conn[%s]: backend gone (rev=0x%x)",
 				peer, pfd[1].revents);
+			backend_lost = 1;
 			break;
 		}
 
@@ -1326,7 +1328,7 @@ run_proxy(struct rdp_tls *t, int be_fd,
 			uint32_t len;
 
 			hr = rdp_read_full(be_fd, hdr, RDP_BE_HEADER);
-			if (hr <= 0) break;
+			if (hr <= 0) { backend_lost = 1; break; }
 			type = (uint32_t)hdr[0] | ((uint32_t)hdr[1] << 8)
 				| ((uint32_t)hdr[2] << 16) | ((uint32_t)hdr[3] << 24);
 			len = (uint32_t)hdr[4] | ((uint32_t)hdr[5] << 8)
@@ -1684,6 +1686,16 @@ run_proxy(struct rdp_tls *t, int be_fd,
 		}
 	}
 out:
+	/* If the session backend died (process exit or crash), tell the
+	 * client why so it shows a reason instead of a silent drop. */
+	if (backend_lost) {
+		uint8_t ei[64];
+		ssize_t en = rdp_pdu_build_set_error_info(ei, sizeof ei,
+			user_id, RDP_CONN_SHARE_ID, ERRINFO_LOGOFF_BY_USER);
+		if (en > 0)
+			(void)send_send_data(t, user_id, io_channel,
+				ei, (size_t)en);
+	}
 	if (h264 != NULL) rdp_h264_close(h264);
 	if (prog != NULL) rdp_progressive_close(prog);
 	free(frame_buf);

@@ -76,6 +76,10 @@
 #define RDP_PDU2_SAVE_SESSION_INFO  38
 #define RDP_PDU2_SET_ERROR_INFO     47
 
+/* SET_ERROR_INFO codes (MS-RDPBCGR 2.2.5.1.1). */
+#define ERRINFO_NONE                    0x00000000
+#define ERRINFO_LOGOFF_BY_USER          0x0000000C
+
 #define RDP_INFOTYPE_LOGON              0
 #define RDP_INFOTYPE_LOGON_LONG         1
 #define RDP_INFOTYPE_LOGON_PLAINNOTIFY  2
