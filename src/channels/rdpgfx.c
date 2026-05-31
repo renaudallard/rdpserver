@@ -105,7 +105,7 @@ rdp_rdpgfx_select_caps(const struct rdpgfx_caps_advertise *adv,
 		RDPGFX_CAPVERSION_10,  /* v10.0 (0xA0002) */
 		0x000A0400,            /* v10.4 */
 		0x000A0301, 0x000A0502,
-		0x000A0600, 0x000A0700,
+		0x000A0600, 0x000A0701,  /* v10.7 is 0xA0701, not 0xA0700 */
 	};
 	uint16_t i;
 	size_t p;
