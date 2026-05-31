@@ -39,9 +39,10 @@
  *   u8  flags
  *   u16 user_len
  *   u16 pass_len
- *   u16 reserved (0)
+ *   u16 reserved (0)     [AUTH: client IP length, ip_len]
  *   user_bytes (user_len)
  *   pass_bytes (pass_len)
+ *   ip_bytes   (ip_len)  [AUTH only: client source IP, for rate-limiting]
  *
  * Response layout:
  *
@@ -50,9 +51,9 @@
  *   u16 errno_hint    libc errno that hints at the underlying issue
  *   u32 reserved (0)
  *
- * Length caps: user up to 256, pass up to 1024.  A whole request is
- * therefore at most 8 + 256 + 1024 = 1288 bytes, well under any
- * SEQPACKET frame size the kernel will accept.
+ * Length caps: user up to 256, pass up to 1024, AUTH client IP up to
+ * 64.  A whole request is therefore at most 8 + 256 + 1024 + 64 = 1352
+ * bytes, well under any SEQPACKET frame size the kernel will accept.
  */
 
 #ifndef RDP_SESSMGR_PROTOCOL_H
@@ -74,7 +75,9 @@
 
 #define RDP_SESSMGR_USER_MAX  256
 #define RDP_SESSMGR_PASS_MAX  1024
-#define RDP_SESSMGR_FRAME_MAX (8 + RDP_SESSMGR_USER_MAX + RDP_SESSMGR_PASS_MAX)
+#define RDP_SESSMGR_IP_MAX    64   /* AUTH client-IP field, for rate-limiting */
+#define RDP_SESSMGR_FRAME_MAX (8 + RDP_SESSMGR_USER_MAX + RDP_SESSMGR_PASS_MAX \
+				+ RDP_SESSMGR_IP_MAX)
 
 #define RDP_SESSMGR_DEFAULT_SOCK "/var/run/rdpserver/sessmgr.sock"
 

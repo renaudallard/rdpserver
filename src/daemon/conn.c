@@ -1666,9 +1666,32 @@ out:
 	rdp_drdynvc_cleanup(&dv->dv);
 }
 
+/* Extract the bare IP (no port) from a peer string formatted as
+ * "host:port" or "[host]:port", for per-source-IP auth rate-limiting. */
+static void
+peer_to_ip(const char *peer, char *ip, size_t cap)
+{
+	const char *start, *end;
+	size_t n;
+	if (cap == 0) return;
+	if (peer == NULL) { ip[0] = '\0'; return; }
+	if (peer[0] == '[') {
+		start = peer + 1;
+		end = strchr(start, ']');
+	} else {
+		start = peer;
+		end = strrchr(peer, ':');
+	}
+	n = end != NULL ? (size_t)(end - start) : strlen(start);
+	if (n >= cap) n = cap - 1;
+	memcpy(ip, start, n);
+	ip[n] = '\0';
+}
+
 struct sessmgr_auth_ctx {
 	const char         *sock;
 	struct rdp_sessmgr *sm;       /* opened on success */
+	const char         *ip;       /* client source IP for rate-limiting */
 };
 
 static int
@@ -1677,7 +1700,7 @@ sessmgr_auth_thunk(const char *user, const char *pass, void *ctx)
 	struct sessmgr_auth_ctx *c = ctx;
 	if (c->sm->fd >= 0)
 		rdp_sessmgr_close(c->sm);
-	return rdp_sessmgr_open_auth(c->sm, c->sock, user, pass);
+	return rdp_sessmgr_open_auth(c->sm, c->sock, user, pass, c->ip);
 }
 
 void
@@ -1693,6 +1716,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 	uint16_t desktop_w = 0, desktop_h = 0;
 	int use_nla = 0;
 	char nla_user[256] = {0}, nla_pass[256] = {0};
+	char client_ip[RDP_SESSMGR_IP_MAX];
 	const uint8_t *ci_pw = NULL;
 	size_t ci_pw_len = 0;
 	struct rdp_tls_ctx *tls = cfg->tls;
@@ -1710,6 +1734,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 	dynvc.dv.disp_channel_id = -1;
 	dynvc.dv.gfx_channel_id = -1;
 	memset(&client_info, 0, sizeof client_info);
+	peer_to_ip(peer, client_ip, sizeof client_ip);
 
 	rdp_debug("conn[%s]: starting", peer);
 
@@ -2139,7 +2164,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 		struct rdp_sessmgr sm = { -1, {0} };
 		rdp_info("conn[%s]: NLA login as %s", peer, nla_user);
 		if (rdp_sessmgr_open_auth(&sm, cfg->sessmgr_sock,
-			nla_user, nla_pass) == 0) {
+			nla_user, nla_pass, client_ip) == 0) {
 			int be_fd = -1;
 			if (rdp_sessmgr_spawn(&sm, desktop_w, desktop_h,
 			    &be_fd) == 0 && be_fd >= 0) {
@@ -2286,7 +2311,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 			client_info.username);
 		if (rdp_sessmgr_open_auth(&sm, cfg->sessmgr_sock,
 			client_info.username,
-			pw_utf8[0] ? pw_utf8 : "x") == 0) {
+			pw_utf8[0] ? pw_utf8 : "x", client_ip) == 0) {
 			int be_fd = -1;
 			if (rdp_sessmgr_spawn(&sm, desktop_w, desktop_h,
 				&be_fd) == 0) {
@@ -2308,7 +2333,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 	{
 		struct rdp_greeter_result gr;
 		struct rdp_sessmgr sm = { -1, {0} };
-		struct sessmgr_auth_ctx actx = { cfg->sessmgr_sock, &sm };
+		struct sessmgr_auth_ctx actx = { cfg->sessmgr_sock, &sm, client_ip };
 		rdp_greeter_auth_fn auth_fn = NULL;
 		void               *auth_ctx = NULL;
 

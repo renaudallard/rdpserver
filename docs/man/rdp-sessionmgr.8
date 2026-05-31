@@ -27,6 +27,15 @@ allocates the per-user runtime directory, and forks the
 .Xr rdp-session 8
 helper as the target user.
 .Pp
+Failed authentication is rate limited per source IP: after 5 failures
+within 60 seconds, further attempts from that IP are rejected without
+running PAM or
+.Xr bsd_auth 3
+until the window passes; a successful login clears the counter.
+The client IP is supplied by the
+.Xr rdpd 8
+worker in the authentication request.
+.Pp
 When a client disconnects, the
 .Xr rdpd 8
 worker sends a

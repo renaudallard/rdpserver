@@ -94,7 +94,7 @@ because there's no CI yet.
 |-------------------------------------|---------------------------------|
 | NLA / CredSSP                       | wire only; no hash backend      |
 | TLS cert pinning / channel binding  | not enforced                    |
-| Rate-limited auth                   | not implemented                 |
+| Rate-limited auth                   | per-source-IP, 5 fails / 60 s   |
 | Session resume / reconnect          | deferred to v1.1                |
 | seccomp-bpf (Linux)                 | detected, not wired             |
 | capsicum (FreeBSD)                  | detected, not wired             |

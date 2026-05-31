@@ -248,6 +248,14 @@ sandbox allowlists `unlinkat` and `renameat` for token file cleanup.
 AV pair construction and sealed-message buffers are bounds-checked
 to prevent stack overflows.
 
+`rdp-sessionmgr` rate-limits failed authentication per source IP: after
+5 failures within 60 seconds, further attempts from that IP are
+rejected without touching the auth backend until the window passes, and
+a successful login clears the counter. Because every worker
+authenticates through the one session manager, the limit is enforced
+centrally across all connections. The worker passes the client IP to
+the manager in the AUTH request.
+
 ## Contributing
 
 Bug reports and patches welcome via

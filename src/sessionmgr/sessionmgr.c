@@ -350,25 +350,109 @@ cache_nthash(const char *user, const char *pass)
 	rdp_info("cached NT hash for '%s'", user);
 }
 
+/*
+ * Per-source-IP authentication rate limiting.  An IP that fails
+ * AUTH_FAIL_MAX times within AUTH_FAIL_WINDOW seconds is rejected
+ * without touching the auth backend until the window passes; a
+ * successful auth clears the IP.  Fixed table, oldest-window eviction.
+ */
+#define AUTH_THROTTLE_MAX  256
+#define AUTH_FAIL_MAX      5
+#define AUTH_FAIL_WINDOW   60   /* seconds */
+
+static struct auth_throttle {
+	char    ip[RDP_SESSMGR_IP_MAX + 1];
+	int     fails;
+	time_t  window_start;
+} auth_throttle[AUTH_THROTTLE_MAX];
+
+static struct auth_throttle *
+auth_throttle_find(const char *ip)
+{
+	int i;
+	if (ip == NULL || ip[0] == '\0')
+		return NULL;
+	for (i = 0; i < AUTH_THROTTLE_MAX; i++)
+		if (strcmp(auth_throttle[i].ip, ip) == 0)
+			return &auth_throttle[i];
+	return NULL;
+}
+
+static void
+auth_throttle_fail(const char *ip, time_t now)
+{
+	struct auth_throttle *s, *evict;
+	int i;
+	if (ip == NULL || ip[0] == '\0')
+		return;
+	s = auth_throttle_find(ip);
+	if (s == NULL) {
+		evict = &auth_throttle[0];
+		for (i = 0; i < AUTH_THROTTLE_MAX; i++) {
+			if (auth_throttle[i].ip[0] == '\0') {
+				evict = &auth_throttle[i];
+				break;
+			}
+			if (auth_throttle[i].window_start < evict->window_start)
+				evict = &auth_throttle[i];
+		}
+		s = evict;
+		memset(s, 0, sizeof *s);
+		(void)snprintf(s->ip, sizeof s->ip, "%s", ip);
+		s->window_start = now;
+	} else if (now - s->window_start >= AUTH_FAIL_WINDOW) {
+		s->fails = 0;
+		s->window_start = now;
+	}
+	s->fails++;
+}
+
+static void
+auth_throttle_clear(const char *ip)
+{
+	struct auth_throttle *s = auth_throttle_find(ip);
+	if (s != NULL)
+		s->ip[0] = '\0';
+}
+
 static int
 handle_auth(int cfd, const uint8_t *req, size_t req_len,
 		const char *service, char *user_out, size_t user_out_sz)
 {
-	size_t user_len, pass_len;
+	size_t user_len, pass_len, ip_len;
 	char  user[RDP_SESSMGR_USER_MAX + 1];
 	char  pass[RDP_SESSMGR_PASS_MAX + 1];
+	char  ip[RDP_SESSMGR_IP_MAX + 1];
+	time_t now;
 	int   rc;
 
 	if (req_len < 8) return reply(cfd, RDP_SESSMGR_FAIL, -1);
 	user_len = (size_t)req[2] | ((size_t)req[3] << 8);
 	pass_len = (size_t)req[4] | ((size_t)req[5] << 8);
+	ip_len   = (size_t)req[6] | ((size_t)req[7] << 8);
 	if (user_len > RDP_SESSMGR_USER_MAX
 	    || pass_len > RDP_SESSMGR_PASS_MAX
-	    || 8 + user_len + pass_len > req_len)
+	    || ip_len > RDP_SESSMGR_IP_MAX
+	    || 8 + user_len + pass_len + ip_len > req_len)
 		return reply(cfd, RDP_SESSMGR_FAIL, -1);
 
 	memcpy(user, req + 8, user_len);              user[user_len] = '\0';
 	memcpy(pass, req + 8 + user_len, pass_len);   pass[pass_len] = '\0';
+	memcpy(ip, req + 8 + user_len + pass_len, ip_len);   ip[ip_len] = '\0';
+
+	/* Reject early if this source IP is over the failure threshold,
+	 * without touching the auth backend. */
+	now = time(NULL);
+	{
+		struct auth_throttle *s = auth_throttle_find(ip);
+		if (s != NULL && now - s->window_start < AUTH_FAIL_WINDOW
+		    && s->fails >= AUTH_FAIL_MAX) {
+			rdp_warn("auth: rate-limited %s after %d failures",
+				ip, s->fails);
+			explicit_bzero(pass, sizeof pass);
+			return reply(cfd, RDP_SESSMGR_FAIL, -1);
+		}
+	}
 
 	/* PAM and bsd_auth both fork an external helper and waitpid()
 	 * for it.  Our SIGCHLD reaper races with that wait, so suppress
@@ -392,8 +476,10 @@ handle_auth(int cfd, const uint8_t *req, size_t req_len,
 		size_t n = user_len < user_out_sz - 1 ? user_len : user_out_sz - 1;
 		memcpy(user_out, user, n);
 		user_out[n] = '\0';
+		auth_throttle_clear(ip);
 		return reply(cfd, RDP_SESSMGR_OK, -1);
 	}
+	auth_throttle_fail(ip, now);
 	return reply(cfd, RDP_SESSMGR_FAIL, -1);
 }
 

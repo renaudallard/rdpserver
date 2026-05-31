@@ -59,7 +59,8 @@ struct rdp_sessmgr {
  * the password buffer after this returns. */
 int rdp_sessmgr_open_auth(struct rdp_sessmgr *out,
 		const char *sock_path,
-		const char *user, const char *pass);
+		const char *user, const char *pass,
+		const char *client_ip);
 
 int rdp_sessmgr_open_nla(struct rdp_sessmgr *out,
 		const char *sock_path, const char *user,

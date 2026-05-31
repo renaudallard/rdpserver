@@ -80,11 +80,12 @@ connect_unix(const char *path)
 int
 rdp_sessmgr_open_auth(struct rdp_sessmgr *out,
 		const char *sock_path,
-		const char *user, const char *pass)
+		const char *user, const char *pass,
+		const char *client_ip)
 {
 	uint8_t  frame[RDP_SESSMGR_FRAME_MAX];
 	uint8_t  resp[8];
-	size_t   user_len, pass_len, off;
+	size_t   user_len, pass_len, ip_len, off;
 	ssize_t  n;
 	int      fd;
 
@@ -94,8 +95,10 @@ rdp_sessmgr_open_auth(struct rdp_sessmgr *out,
 	}
 	user_len = strlen(user);
 	pass_len = strlen(pass);
+	ip_len = client_ip != NULL ? strlen(client_ip) : 0;
 	if (user_len > RDP_SESSMGR_USER_MAX
-	    || pass_len > RDP_SESSMGR_PASS_MAX) {
+	    || pass_len > RDP_SESSMGR_PASS_MAX
+	    || ip_len > RDP_SESSMGR_IP_MAX) {
 		errno = E2BIG;
 		return -1;
 	}
@@ -110,9 +113,15 @@ rdp_sessmgr_open_auth(struct rdp_sessmgr *out,
 	frame[3] = (uint8_t)((user_len >> 8) & 0xff);
 	frame[4] = (uint8_t)(pass_len & 0xff);
 	frame[5] = (uint8_t)((pass_len >> 8) & 0xff);
+	frame[6] = (uint8_t)(ip_len & 0xff);
+	frame[7] = (uint8_t)((ip_len >> 8) & 0xff);
 	off = 8;
 	memcpy(frame + off, user, user_len); off += user_len;
 	memcpy(frame + off, pass, pass_len); off += pass_len;
+	if (ip_len > 0) {
+		memcpy(frame + off, client_ip, ip_len);
+		off += ip_len;
+	}
 
 	n = send(fd, frame, off, 0);
 	explicit_bzero(frame, off);
