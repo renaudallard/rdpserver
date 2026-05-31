@@ -160,10 +160,18 @@ rdp_rdpgfx_select_caps(const struct rdpgfx_caps_advertise *adv,
 			return 0;
 		}
 	}
-	*out_version = RDPGFX_CAPVERSION_81;
-	*out_flags = RDPGFX_CAPS_FLAG_AVC420_ENABLED;
-	*out_codec = RDPGFX_CODEC_AVC420;
-	return 0;
+	/*
+	 * No advertised v10.x version matched the pref list.  Only confirm
+	 * v8.1 AVC420 if the client actually advertised it; never confirm a
+	 * version the client did not offer.  Otherwise fall back to bitmap.
+	 */
+	if (has_avc420) {
+		*out_version = RDPGFX_CAPVERSION_81;
+		*out_flags = RDPGFX_CAPS_FLAG_AVC420_ENABLED;
+		*out_codec = RDPGFX_CODEC_AVC420;
+		return 0;
+	}
+	return -1;
 }
 
 ssize_t
