@@ -116,6 +116,8 @@ Graphics are sent as H.264 / AVC420 frames over the RDPGFX graphics pipeline whe
 
 Whichever version is chosen, the server confirms only a version the client actually advertised, and only after its libx264 encoder opens.  If no advertised version is usable, or the encoder cannot start, it sends no `CapsConfirm` and the client falls back to bitmap rather than waiting for frames that never arrive.
 
+As an alternative to AVC, `rdpd -P` offers **RFX Progressive** (MS-RDPEGFX `RFX_PROGRESSIVE`) to GFX-capable clients that are not given AVC.  It is a CPU-decodable wavelet codec that needs no client GPU (the same codec the Microsoft server uses for its GPU-less sessions), so it can accelerate mstsc, macOS, and Android clients without the `0xd06` teardown.  Off by default; the per-frame WireToSurface2 codec id selects it, so enabling it never changes clients that receive AVC.
+
 For an accelerated session to work end to end:
 
 - The server encodes with **libx264** on the CPU; there is no GPU encode path.  Frames are rounded to even dimensions for 4:2:0.

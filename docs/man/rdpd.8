@@ -7,7 +7,7 @@
 .Nd Remote Desktop Protocol server
 .Sh SYNOPSIS
 .Nm
-.Op Fl AdfV
+.Op Fl AdfPV
 .Op Fl h Ar host
 .Op Fl p Ar port
 .Op Fl S Ar socket
@@ -83,6 +83,16 @@ back, ending the session.
 which advertises the v8.1
 .Sy AVC420_ENABLED
 flag, is always offered AVC regardless of this option.
+.It Fl P
+Offer RFX Progressive
+.Pq MS-RDPEGFX RFX_PROGRESSIVE
+graphics to GFX-capable clients that are not given AVC.
+Unlike AVC, it is a CPU-decodable wavelet codec that needs no client
+GPU, so it accelerates GPU-less clients
+.Pq mstsc , macOS , Android
+without the AVC teardown described above.
+Off by default; the per-frame codec is selected by the WireToSurface2
+command, so it does not affect clients that receive AVC.
 .El
 .Sh FILES
 .Bl -tag -width Ds

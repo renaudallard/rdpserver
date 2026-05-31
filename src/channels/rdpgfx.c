@@ -92,7 +92,8 @@ rdp_rdpgfx_parse_caps_advertise(const uint8_t *pdu, size_t len,
 int
 rdp_rdpgfx_select_caps(const struct rdpgfx_caps_advertise *adv,
 		uint32_t *out_version, uint32_t *out_flags,
-		enum rdpgfx_codec *out_codec, int allow_v10_avc)
+		enum rdpgfx_codec *out_codec, int allow_v10_avc,
+		int allow_progressive)
 {
 	/*
 	 * Prefer versions inside the common client CapsConfirm accept
@@ -146,33 +147,60 @@ rdp_rdpgfx_select_caps(const struct rdpgfx_caps_advertise *adv,
 	 * client advertised.
 	 */
 	(void)has_v10_noavc;
-	if (!has_avc420 && !(allow_v10_avc && has_v10_avc))
-		return -1;
-
-	for (p = 0; p < sizeof pref / sizeof pref[0]; p++) {
-		for (i = 0; i < adv->count; i++) {
-			if (adv->sets[i].version != pref[p])
-				continue;
-			if (adv->sets[i].flags
-			    & RDPGFX_CAPS_FLAG_AVC_DISABLED)
-				continue;
-			*out_version = adv->sets[i].version;
-			*out_flags = 0;
+	if (has_avc420 || (allow_v10_avc && has_v10_avc)) {
+		for (p = 0; p < sizeof pref / sizeof pref[0]; p++) {
+			for (i = 0; i < adv->count; i++) {
+				if (adv->sets[i].version != pref[p])
+					continue;
+				if (adv->sets[i].flags
+				    & RDPGFX_CAPS_FLAG_AVC_DISABLED)
+					continue;
+				*out_version = adv->sets[i].version;
+				*out_flags = 0;
+				*out_codec = RDPGFX_CODEC_AVC420;
+				return 0;
+			}
+		}
+		/*
+		 * AVC was eligible but no advertised v10.x version matched the
+		 * pref list.  Confirm v8.1 AVC420 only if the client actually
+		 * advertised it; never confirm a version it did not offer.
+		 */
+		if (has_avc420) {
+			*out_version = RDPGFX_CAPVERSION_81;
+			*out_flags = RDPGFX_CAPS_FLAG_AVC420_ENABLED;
 			*out_codec = RDPGFX_CODEC_AVC420;
 			return 0;
 		}
 	}
+
 	/*
-	 * No advertised v10.x version matched the pref list.  Only confirm
-	 * v8.1 AVC420 if the client actually advertised it; never confirm a
-	 * version the client did not offer.  Otherwise fall back to bitmap.
+	 * No AVC.  Offer RFX Progressive when enabled (rdpd -P): it is a
+	 * CPU-decodable GFX codec that needs no client GPU, so it gives
+	 * GPU-less clients (mstsc, macOS, Android) acceleration without the
+	 * AVC 0xd06 teardown.  The per-frame WireToSurface2 codecId picks
+	 * progressive; the confirm just echoes a version the client
+	 * advertised, with AVC marked off.
 	 */
-	if (has_avc420) {
-		*out_version = RDPGFX_CAPVERSION_81;
-		*out_flags = RDPGFX_CAPS_FLAG_AVC420_ENABLED;
-		*out_codec = RDPGFX_CODEC_AVC420;
+	if (allow_progressive && adv->count > 0) {
+		for (p = 0; p < sizeof pref / sizeof pref[0]; p++) {
+			for (i = 0; i < adv->count; i++) {
+				if (adv->sets[i].version != pref[p])
+					continue;
+				*out_version = adv->sets[i].version;
+				*out_flags = RDPGFX_CAPS_FLAG_AVC_DISABLED;
+				*out_codec = RDPGFX_CODEC_CAPROGRESSIVE;
+				return 0;
+			}
+		}
+		/* No v10.x advertised; echo the first advertised version. */
+		*out_version = adv->sets[0].version;
+		*out_flags = (adv->sets[0].version >= RDPGFX_CAPVERSION_10)
+			? RDPGFX_CAPS_FLAG_AVC_DISABLED : 0;
+		*out_codec = RDPGFX_CODEC_CAPROGRESSIVE;
 		return 0;
 	}
+
 	return -1;
 }
 

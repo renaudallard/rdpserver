@@ -50,6 +50,7 @@ struct rdp_conn_cfg {
 	const char         *sessmgr_sock;  /* AF_UNIX path; NULL = stub auth */
 	int                 auto_login;    /* skip greeter; use Client Info creds */
 	int                 allow_v10_avc; /* offer AVC to v10.x-no-AVC_DISABLED clients */
+	int                 allow_progressive; /* offer RFX Progressive GFX when AVC is not used */
 };
 
 void rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer);

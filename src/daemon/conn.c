@@ -1048,6 +1048,7 @@ ensure_gfx_surface(struct rdp_tls *t, uint16_t user_id,
 /* Set per worker from rdp_conn_cfg; gates whether GFX AVC is offered to
  * clients that advertise v10.x without AVC_DISABLED (mstsc, macOS). */
 static int g_allow_v10_avc;
+static int g_allow_progressive;
 
 static void
 run_proxy(struct rdp_tls *t, int be_fd,
@@ -1236,7 +1237,8 @@ run_proxy(struct rdp_tls *t, int be_fd,
 						&adv, &sel_ver,
 						&sel_flags,
 						&sel_codec,
-						g_allow_v10_avc) == 0) {
+						g_allow_v10_avc,
+						g_allow_progressive) == 0) {
 						/*
 						 * Probe the encoder before confirming
 						 * the codec. If it will not open, send
@@ -1697,6 +1699,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 	struct clip_state clip = {0};
 
 	g_allow_v10_avc = cfg->allow_v10_avc;
+	g_allow_progressive = cfg->allow_progressive;
 	struct dynvc_state dynvc = {0};
 	struct snd_state snd = {0};
 	struct dr_state devr = {0};
