@@ -497,7 +497,7 @@ put_quant(uint8_t **p, const uint8_t q[10])
 	put_u8(p, (uint8_t)((q[7] & 0xf) | ((q[9] & 0xf) << 4)));
 }
 
-/* RFX_TILE_SIMPLE block header (24 bytes incl. 8-byte block header). */
+/* RFX_TILE_SIMPLE block header (22 bytes incl. 6-byte block header). */
 static int
 write_tile_simple(uint8_t *out, size_t cap, size_t *off,
 		uint16_t xIdx, uint16_t yIdx,
@@ -505,7 +505,7 @@ write_tile_simple(uint8_t *out, size_t cap, size_t *off,
 		const uint8_t *cbData, size_t cbLen,
 		const uint8_t *crData, size_t crLen)
 {
-	size_t need = 24 + yLen + cbLen + crLen;
+	size_t need = 22 + yLen + cbLen + crLen;
 	uint8_t *p;
 	if (*off + need > cap) return -1;
 	if (yLen > 0xffff || cbLen > 0xffff || crLen > 0xffff) return -1;
@@ -663,9 +663,13 @@ rdp_progressive_encode(struct rdp_progressive *p,
 		uint32_t region_len = (uint32_t)(off - region_off);
 		uint8_t *r = p->out_buf + region_off + 2;
 		put_u32(&r, region_len);
-		/* tileDataSize lives at region_off + header(8) + 6 (tileSize+numRects+numQuant+numProgQuant+flags+numTiles+something)
-		 * Easier to compute: region body starts at +8, then tileSize(1)+numRects(2)+numQuant(1)+numProgQuant(1)+flags(1)+numTiles(2)=8, so tileDataSize offset = +16. */
-		r = p->out_buf + region_off + 16;
+		/*
+		 * tileDataSize is at region_off + 14: blockType(2) + blockLen(4)
+		 * + tileSize(1) + numRects(2) + numQuant(1) + numProgQuant(1)
+		 * + flags(1) + numTiles(2) = 14.  The block header is 6 bytes,
+		 * not 8.
+		 */
+		r = p->out_buf + region_off + 14;
 		put_u32(&r, tileDataSize);
 		(void)region_body_off;
 	}
