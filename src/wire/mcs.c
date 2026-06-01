@@ -188,28 +188,28 @@ rdp_mcs_parse_connect_initial(const uint8_t *p, size_t len,
 				out->color_depth    =
 					(uint16_t)body[8]
 					| ((uint16_t)body[9] << 8);
-				/* sasSequence(2), keyboardLayout(4),
-				 * clientBuild(4), clientName(32-byte UTF-16LE
-				 * starting at offset 18). */
-				if (blen >= 4 + 18 + 4) {
+				/* sasSequence(2) at body offset 10, then
+				 * keyboardLayout(4) at 12, clientBuild(4) at
+				 * 16, clientName (UTF-16LE) at 20. */
+				if (blen >= 4 + 16) {
 					out->keyboard_layout =
-						(uint32_t)body[14]
-						| ((uint32_t)body[15] << 8)
-						| ((uint32_t)body[16] << 16)
-						| ((uint32_t)body[17] << 24);
+						(uint32_t)body[12]
+						| ((uint32_t)body[13] << 8)
+						| ((uint32_t)body[14] << 16)
+						| ((uint32_t)body[15] << 24);
 				}
-				if (blen >= 4 + 22 + 4) {
+				if (blen >= 4 + 20) {
 					out->client_build =
-						(uint32_t)body[18]
-						| ((uint32_t)body[19] << 8)
-						| ((uint32_t)body[20] << 16)
-						| ((uint32_t)body[21] << 24);
+						(uint32_t)body[16]
+						| ((uint32_t)body[17] << 8)
+						| ((uint32_t)body[18] << 16)
+						| ((uint32_t)body[19] << 24);
 				}
-				if (blen >= 4 + 22 + 32) {
+				if (blen >= 4 + 50) {
 					size_t i;
 					for (i = 0; i < 15; i++)
 						out->client_hostname[i] =
-							(char)body[22 + i * 2];
+							(char)body[20 + i * 2];
 				}
 			}
 			break;
