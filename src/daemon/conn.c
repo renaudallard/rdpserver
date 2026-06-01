@@ -1240,6 +1240,12 @@ run_proxy(struct rdp_tls *t, int be_fd,
 					if (prog)
 						(void)rdp_progressive_resize(prog,
 							rw, rh);
+					/* Recreate the GFX surface at the new
+					 * size: ensure_gfx_surface re-sends
+					 * RESET_GRAPHICS + CreateSurface +
+					 * MapSurface on the next frame (which
+					 * also forces an IDR for it). */
+					gfx.surface_created = 0;
 				}
 				if (r == 4 && !gfx.active
 				    && dv->dv.gfx_channel_id >= 0
