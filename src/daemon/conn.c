@@ -659,7 +659,18 @@ maybe_dispatch_clip(struct rdp_tls *t, int be_fd,
 					(void)send_clip_pdu(t, cs->user_id,
 						dv->channel_id, gc, (size_t)gn);
 			}
+			if (rc == 5 && !dv->dv.disp_create_pending
+			    && dv->dv.disp_channel_id < 0) {
+				uint8_t dcc[64];
+				ssize_t dn = rdp_drdynvc_build_create_disp(
+					&dv->dv, dcc, sizeof dcc);
+				if (dn > 0)
+					(void)send_clip_pdu(t, cs->user_id,
+						dv->channel_id, dcc,
+						(size_t)dn);
+			}
 			if (rc == 7) return 7;
+			if (rc == 8) return 11;   /* DisplayControl up */
 			if (rc == 1) return 2;
 			if (rc == 3 && gfx_data != NULL && gfx_len > 0) {
 				const uint8_t *gp = gfx_data;
@@ -1213,6 +1224,25 @@ run_proxy(struct rdp_tls *t, int be_fd,
 				if (r < 0) break;
 				if (r == 8) output_suppressed = 1;
 				if (r == 9) output_suppressed = 0;
+				if (r == 11) {
+					/* DisplayControl is up: advertise our
+					 * monitor limits so the client may
+					 * request a dynamic resize. */
+					uint8_t dc[20];
+					ssize_t dn =
+						rdp_drdynvc_build_disp_caps(
+							dc, sizeof dc);
+					if (dn > 0) {
+						(void)send_drdynvc_data(t,
+							user_id,
+							dv->channel_id,
+							dv->dv.disp_channel_id,
+							dc, (size_t)dn);
+						rdp_info("conn[%s]: "
+							"DisplayControl caps "
+							"sent", peer);
+					}
+				}
 				if (r == 7 && gfx.active) {
 					rdp_info("conn[%s]: GFX closed, "
 						"reverting to bitmap", peer);

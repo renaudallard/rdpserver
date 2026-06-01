@@ -40,7 +40,8 @@ Client drive, printer, and serial device redirection is handled by the
 .Sy RDPDR
 channel.
 Multi-monitor layouts are parsed from the GCC CS_MONITOR block, and
-dynamic resize is supported via the RDPEDISP Display Control Channel.
+dynamic resize is supported over the RDPEDISP Display Control channel,
+which the server opens and on which it advertises its monitor limits.
 .Pp
 The options are as follows:
 .Bl -tag -width Ds

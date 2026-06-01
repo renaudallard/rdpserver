@@ -120,6 +120,25 @@ rdp_drdynvc_handle(struct drdynvc_state *st,
 		size_t id_len;
 		if (read_channel_id(pdu + 1, len - 1, cbId,
 			&chan_id, &id_len) != 0) return -1;
+		/* Create Response to our DisplayControl request: once
+		 * the channel is up the caller sends the caps PDU. */
+		if (st->disp_create_pending
+		    && (int)chan_id == st->disp_channel_id) {
+			size_t remain = len - 1 - id_len;
+			int32_t status = 0;
+			if (remain >= 4)
+				status = (int32_t)ld32(pdu + 1 + id_len);
+			st->disp_create_pending = 0;
+			if (status == 0) {
+				rdp_info("drdynvc: DisplayControl "
+					"channel created ok");
+				return 8;
+			}
+			rdp_warn("drdynvc: DisplayControl create "
+				"failed (%d)", (int)status);
+			st->disp_channel_id = -1;
+			return 0;
+		}
 		/* Create Response to our server-initiated request. */
 		if (st->gfx_create_pending
 		    && (int)chan_id == st->gfx_channel_id) {
@@ -325,6 +344,8 @@ rdp_drdynvc_handle(struct drdynvc_state *st,
 
 #define GFX_CHANNEL_NAME "Microsoft::Windows::RDS::Graphics"
 #define GFX_SERVER_CHAN_ID 1
+#define DISP_CHANNEL_NAME "Microsoft::Windows::RDS::DisplayControl"
+#define DISP_SERVER_CHAN_ID 2
 
 ssize_t
 rdp_drdynvc_build_create_gfx(struct drdynvc_state *st,
@@ -340,6 +361,38 @@ rdp_drdynvc_build_create_gfx(struct drdynvc_state *st,
 	st->gfx_channel_id = GFX_SERVER_CHAN_ID;
 	st->gfx_create_pending = 1;
 	return (ssize_t)total;
+}
+
+ssize_t
+rdp_drdynvc_build_create_disp(struct drdynvc_state *st,
+		uint8_t *out, size_t cap)
+{
+	size_t name_len = sizeof(DISP_CHANNEL_NAME);
+	size_t total = 1 + 1 + name_len;
+
+	if (cap < total) return -1;
+	out[0] = (uint8_t)((DRDYNVC_CMD_CREATE << 4) | (2 << 2) | 0);
+	out[1] = DISP_SERVER_CHAN_ID;
+	memcpy(out + 2, DISP_CHANNEL_NAME, name_len);
+	st->disp_channel_id = DISP_SERVER_CHAN_ID;
+	st->disp_create_pending = 1;
+	return (ssize_t)total;
+}
+
+/* MS-RDPEDISP 2.2.2.1 DISPLAYCONTROL_CAPS_PDU: the server's monitor
+ * limits, sent once the DisplayControl channel is created so the
+ * client knows it may request a dynamic resize. */
+ssize_t
+rdp_drdynvc_build_disp_caps(uint8_t *out, size_t cap)
+{
+	if (cap < 20) return -1;
+	memset(out, 0, 20);
+	out[0]  = 0x05;   /* Type = DISPLAYCONTROL_PDU_TYPE_CAPS */
+	out[4]  = 20;     /* Length */
+	out[8]  = 16;     /* MaxNumMonitors */
+	out[13] = 0x20;   /* MaxMonitorAreaFactorA = 8192 (0x2000) */
+	out[17] = 0x20;   /* MaxMonitorAreaFactorB = 8192 (0x2000) */
+	return 20;
 }
 
 void

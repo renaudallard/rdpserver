@@ -58,6 +58,7 @@
 struct drdynvc_state {
 	int      caps_exchanged;
 	int      disp_channel_id;  /* -1 if not yet created */
+	int      disp_create_pending; /* waiting for Create Response */
 	int      gfx_channel_id;  /* -1 if not yet created */
 	int      gfx_create_pending; /* waiting for Create Response */
 	uint8_t *reasm_buf;
@@ -73,6 +74,13 @@ ssize_t rdp_drdynvc_build_caps(uint8_t *out, size_t cap);
 /* Build DRDYNVC Create Request for the GFX channel. */
 ssize_t rdp_drdynvc_build_create_gfx(struct drdynvc_state *st,
 		uint8_t *out, size_t cap);
+
+/* Build DRDYNVC Create Request for the DisplayControl channel. */
+ssize_t rdp_drdynvc_build_create_disp(struct drdynvc_state *st,
+		uint8_t *out, size_t cap);
+
+/* Build a DISPLAYCONTROL_CAPS_PDU (MS-RDPEDISP) inner payload. */
+ssize_t rdp_drdynvc_build_disp_caps(uint8_t *out, size_t cap);
 
 /* Process an inbound DRDYNVC PDU.  Returns:
  *   0 = handled, no resize
