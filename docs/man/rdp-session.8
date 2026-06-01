@@ -10,6 +10,7 @@
 .Op Fl DW
 .Op Fl w Ar width
 .Op Fl H Ar height
+.Op Fl k Ar lcid
 .Sh DESCRIPTION
 .Nm
 is the unprivileged per-user component of the Remote Desktop
@@ -23,9 +24,17 @@ via the XTEST extension, and bridges the X11 CLIPBOARD selection
 to the
 .Sy CLIPRDR
 RDP channel.
-Scancode key events map directly to X keycodes; Unicode key events are
-injected by temporarily remapping a spare keycode to the target keysym
-and faking a press and release.
+Scancode key events map directly to X keycodes; the Xvfb keyboard
+layout is set from the client's reported layout (LCID, passed by
+.Xr rdp-sessionmgr 8
+via
+.Fl k )
+using
+.Xr setxkbmap 1 ,
+so those keycodes produce the client's characters (US is used for an
+unknown layout).
+Unicode key events are injected by temporarily remapping a spare
+keycode to the target keysym and faking a press and release.
 .Pp
 Captured frames are sent as raw pixels over the backend socket.
 The
@@ -72,6 +81,10 @@ The default is 1024.
 .It Fl H Ar height
 Desktop height in pixels.
 The default is 768.
+.It Fl k Ar lcid
+Client keyboard layout identifier (Windows LCID, decimal) used to set
+the Xvfb keyboard layout.
+0 or an unknown value selects the US layout.
 .El
 .Sh SEE ALSO
 .Xr rdpd 8 ,

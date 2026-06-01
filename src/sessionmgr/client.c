@@ -221,9 +221,10 @@ rdp_sessmgr_nla_store(const char *sock_path,
 }
 
 int
-rdp_sessmgr_spawn(struct rdp_sessmgr *s, uint16_t w, uint16_t h, int *fd_out)
+rdp_sessmgr_spawn(struct rdp_sessmgr *s, uint16_t w, uint16_t h,
+		uint32_t lcid, int *fd_out)
 {
-	uint8_t req[8];
+	uint8_t req[12];
 	uint8_t resp[8];
 	struct msghdr msg;
 	struct iovec iov;
@@ -242,6 +243,10 @@ rdp_sessmgr_spawn(struct rdp_sessmgr *s, uint16_t w, uint16_t h, int *fd_out)
 	req[3] = (uint8_t)((w >> 8) & 0xff);
 	req[4] = (uint8_t)(h & 0xff);
 	req[5] = (uint8_t)((h >> 8) & 0xff);
+	req[8]  = (uint8_t)(lcid & 0xff);
+	req[9]  = (uint8_t)((lcid >> 8) & 0xff);
+	req[10] = (uint8_t)((lcid >> 16) & 0xff);
+	req[11] = (uint8_t)((lcid >> 24) & 0xff);
 	{
 		ssize_t sn;
 		do { sn = send(s->fd, req, sizeof req, 0); }

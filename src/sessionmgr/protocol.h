@@ -89,6 +89,7 @@
  *   u16 width
  *   u16 height
  *   u16 reserved
+ *   u32 keyboardLayout   (client LCID; 0 = unknown, session uses us)
  *
  * SPAWN reply (in addition to the status byte we already define):
  *   status     OK on success.  Successful replies include the

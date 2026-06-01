@@ -199,7 +199,8 @@ reply(int cfd, uint8_t status, int attach_fd)
 }
 
 static int
-spawn_session(const struct passwd *pw, uint16_t w, uint16_t h, int *out_fd)
+spawn_session(const struct passwd *pw, uint16_t w, uint16_t h,
+		uint32_t lcid, int *out_fd)
 {
 	int sv[2];
 	pid_t pid;
@@ -212,7 +213,7 @@ spawn_session(const struct passwd *pw, uint16_t w, uint16_t h, int *out_fd)
 		return -1;
 	}
 	if (pid == 0) {
-		char wbuf[8], hbuf[8];
+		char wbuf[8], hbuf[8], kbuf[16];
 		int i;
 
 		(void)close(sv[0]);
@@ -253,8 +254,9 @@ spawn_session(const struct passwd *pw, uint16_t w, uint16_t h, int *out_fd)
 
 		(void)snprintf(wbuf, sizeof wbuf, "%u", (unsigned)w);
 		(void)snprintf(hbuf, sizeof hbuf, "%u", (unsigned)h);
+		(void)snprintf(kbuf, sizeof kbuf, "%u", (unsigned)lcid);
 		execl(session_path, "rdp-session",
-			"-w", wbuf, "-H", hbuf, (char *)NULL);
+			"-w", wbuf, "-H", hbuf, "-k", kbuf, (char *)NULL);
 		(void)dprintf(2, "exec %s: %s\n",
 			session_path, strerror(errno));
 		_exit(127);
@@ -488,14 +490,17 @@ handle_spawn(int cfd, const uint8_t *req, size_t req_len,
 		const char *auth_user, int *retained_fd)
 {
 	uint16_t w, h;
+	uint32_t lcid;
 	struct passwd *pw;
 	int fd = -1;
 
-	if (req_len < 8) return reply(cfd, RDP_SESSMGR_FAIL, -1);
+	if (req_len < 12) return reply(cfd, RDP_SESSMGR_FAIL, -1);
 	if (auth_user == NULL || auth_user[0] == '\0')
 		return reply(cfd, RDP_SESSMGR_EPERM, -1);
 	w = (uint16_t)req[2] | ((uint16_t)req[3] << 8);
 	h = (uint16_t)req[4] | ((uint16_t)req[5] << 8);
+	lcid = (uint32_t)req[8] | ((uint32_t)req[9] << 8)
+		| ((uint32_t)req[10] << 16) | ((uint32_t)req[11] << 24);
 	if (w == 0 || h == 0) { w = 1024; h = 768; }
 
 	pw = getpwnam(auth_user);
@@ -507,7 +512,7 @@ handle_spawn(int cfd, const uint8_t *req, size_t req_len,
 		rdp_warn("SPAWN: refusing to launch as root");
 		return reply(cfd, RDP_SESSMGR_EPERM, -1);
 	}
-	if (spawn_session(pw, w, h, &fd) != 0) {
+	if (spawn_session(pw, w, h, lcid, &fd) != 0) {
 		rdp_err("spawn_session %s: %s", auth_user, strerror(errno));
 		return reply(cfd, RDP_SESSMGR_FAIL, -1);
 	}

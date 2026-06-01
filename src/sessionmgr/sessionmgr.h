@@ -76,7 +76,7 @@ int rdp_sessmgr_nla_store(const char *sock_path,
  * a SOCK_STREAM socketpair) via *fd_out.  Caller closes when
  * done. */
 int rdp_sessmgr_spawn(struct rdp_sessmgr *s,
-		uint16_t w, uint16_t h, int *fd_out);
+		uint16_t w, uint16_t h, uint32_t lcid, int *fd_out);
 
 void rdp_sessmgr_close(struct rdp_sessmgr *s);
 

@@ -66,6 +66,7 @@
 
 #include "clip_x11.h"
 #include "audio.h"
+#include "kbdmap.h"
 #if HAVE_WLROOTS
 #include "wayland_comp.h"
 #endif
@@ -1068,15 +1069,66 @@ static void
 usage(const char *prog)
 {
 	(void)fprintf(stderr,
-"usage: %s [-D] [-W] [-w width] [-H height]\n"
+"usage: %s [-D] [-W] [-w width] [-H height] [-k lcid]\n"
 "  -D     use native DDX driver instead of Xvfb\n"
 "  -W     use Wayland compositor instead of X11\n"
 "  -w n   desktop width  (default 1024)\n"
 "  -H n   desktop height (default 768)\n"
+"  -k id  client keyboard layout id (LCID; 0 = us)\n"
 "\n"
 "File descriptor 3 must be a SOCK_STREAM socket to the rdpd worker;\n"
 "rdp-sessionmgr sets this up on SPAWN.\n",
 		prog);
+}
+
+/* Set the Xvfb keyboard layout for the client's LCID via setxkbmap.
+ * Best-effort: on failure the session keeps the default us layout.
+ * Must run before uni_init_spares snapshots the keymap. */
+static void
+set_keymap(int display_num, uint32_t lcid)
+{
+	const char *layout = NULL, *variant = NULL;
+	struct sigaction dfl, old;
+	char disp[16];
+	pid_t pid;
+	int status = -1, restore = 0;
+
+	rdp_klid_to_xkb(lcid, &layout, &variant);
+	(void)snprintf(disp, sizeof disp, ":%d", display_num);
+
+	/* The process-wide SIGCHLD handler uses SA_NOCLDWAIT, under which
+	 * waitpid blocks until the child exits but cannot return its status.
+	 * Reap this one child with the default disposition so we can report
+	 * whether setxkbmap actually succeeded, then restore the handler. */
+	memset(&dfl, 0, sizeof dfl);
+	dfl.sa_handler = SIG_DFL;
+	if (sigaction(SIGCHLD, &dfl, &old) == 0)
+		restore = 1;
+
+	pid = fork();
+	if (pid < 0) {
+		rdp_warn("setxkbmap: fork: %s", strerror(errno));
+	} else if (pid == 0) {
+		if (variant != NULL)
+			execlp("setxkbmap", "setxkbmap", "-display", disp,
+				"-layout", layout, "-variant", variant,
+				(char *)NULL);
+		else
+			execlp("setxkbmap", "setxkbmap", "-display", disp,
+				"-layout", layout, (char *)NULL);
+		_exit(127);
+	} else {
+		while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
+			;
+		if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+			rdp_info("keyboard layout: LCID 0x%x -> %s",
+				(unsigned)lcid, layout);
+		else
+			rdp_warn("setxkbmap %s failed; keeping us layout",
+				layout);
+	}
+	if (restore)
+		(void)sigaction(SIGCHLD, &old, NULL);
 }
 
 int
@@ -1085,6 +1137,7 @@ main(int argc, char *argv[])
 	int w = 1024, h = 768;
 	int opt, use_ddx = 0, use_wayland = 0;
 	int display_num;
+	unsigned long lcid = 0;
 	pid_t xvfb_pid, xterm_pid;
 	Display *dpy;
 	struct cap cap;
@@ -1094,12 +1147,13 @@ main(int argc, char *argv[])
 	Damage dmg = None;
 	int damage_event = 0, damage_error = 0, dirty = 1;
 
-	while ((opt = getopt(argc, argv, "DWw:H:?")) != -1) {
+	while ((opt = getopt(argc, argv, "DWw:H:k:?")) != -1) {
 		switch (opt) {
 		case 'D': use_ddx = 1; break;
 		case 'W': use_wayland = 1; break;
 		case 'w': w = atoi(optarg); break;
 		case 'H': h = atoi(optarg); break;
+		case 'k': lcid = strtoul(optarg, NULL, 10); break;
 		case '?': default: usage(argv[0]); return 1;
 		}
 	}
@@ -1164,6 +1218,10 @@ main(int argc, char *argv[])
 		(void)kill(xvfb_pid, SIGTERM);
 		return 1;
 	}
+	/* Apply the client's keyboard layout before scanning for spare
+	 * keycodes, since setxkbmap rewrites the whole map. */
+	set_keymap(display_num, (uint32_t)lcid);
+	XSync(dpy, False);
 	uni_init_spares(dpy);
 
 	/* Resize the Xvfb desktop from 3840x2160 down to the client's

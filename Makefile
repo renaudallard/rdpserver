@@ -140,7 +140,7 @@ $(DDX_SO): $(DDX_OBJS)
 src/session/wayland_comp.o: src/session/wayland_comp.c
 	$(CC) $(CFLAGS) $(WLROOTS_CFLAGS) -Isrc/session/protocols -c -o $@ src/session/wayland_comp.c
 
-src/session/rdp_session.o: src/session/rdp_session.c
+src/session/rdp_session.o: src/session/rdp_session.c src/session/kbdmap.h
 	$(CC) $(CFLAGS) $(X11_CFLAGS) $(X264_CFLAGS) -DRDP_XVFB_PATH=\"$(XVFB_PATH)\" \
 		-c -o $@ src/session/rdp_session.c
 
