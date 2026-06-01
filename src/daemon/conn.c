@@ -199,6 +199,7 @@ strip_tpkt_x224(const uint8_t *buf, size_t len,
 struct proxy_input_ctx {
 	int be_fd;
 	int last_mouse_x, last_mouse_y;
+	uint16_t pending_high;   /* stashed UTF-16 high surrogate */
 };
 
 struct clip_state {
@@ -479,9 +480,35 @@ on_input_event(void *vctx, const struct rdp_fp_input_event *ev)
 		ctx->last_mouse_y = m.y;
 		break;
 	}
-	case RDP_FP_INPUT_UNICODE:
+	case RDP_FP_INPUT_UNICODE: {
+		struct rdp_be_input_unicode u = {0};
+		uint16_t cu = ev->keycode;   /* UTF-16 code unit */
+		uint32_t cp;
+		if (ev->flags & 0x01)        /* release: inject on press only */
+			break;
+		if (cu >= 0xd800 && cu <= 0xdbff) {
+			ctx->pending_high = cu;  /* high surrogate: await low */
+			break;
+		}
+		if (cu >= 0xdc00 && cu <= 0xdfff) {
+			if (ctx->pending_high == 0)
+				break;           /* unpaired low surrogate */
+			cp = 0x10000u
+			    + (((uint32_t)(ctx->pending_high - 0xd800)) << 10)
+			    + (uint32_t)(cu - 0xdc00);
+			ctx->pending_high = 0;
+		} else {
+			ctx->pending_high = 0;   /* drop any stale high */
+			cp = cu;
+		}
+		u.codepoint = cp;
+		u.down = 1;
+		(void)rdp_be_send(ctx->be_fd, RDP_BE_INPUT_UNICODE,
+			&u, sizeof u);
+		break;
+	}
 	case RDP_FP_INPUT_SYNC:
-		/* Not forwarded in v1; xterm and most apps don't care. */
+		/* Lock-key sync is not forwarded. */
 		break;
 	default:
 		break;
@@ -1082,7 +1109,7 @@ run_proxy(struct rdp_tls *t, int be_fd,
 		uint16_t desktop_w, uint16_t desktop_h,
 		const char *peer)
 {
-	struct proxy_input_ctx ictx = { be_fd, 0, 0 };
+	struct proxy_input_ctx ictx = { be_fd, 0, 0, 0 };
 	uint8_t *frame_buf = NULL;
 	size_t   frame_cap = 0;
 	struct rdpgfx_state gfx = {0};

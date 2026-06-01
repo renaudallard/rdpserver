@@ -443,6 +443,83 @@ inject_mouse(Display *dpy, const struct rdp_be_input_mouse *m)
 	return 0;
 }
 
+/* Map a Unicode scalar value to an X keysym (X.Org convention:
+ * Latin-1 maps directly, everything else is 0x01000000 | codepoint). */
+static KeySym
+cp_to_keysym(uint32_t cp)
+{
+	if (cp <= 0xff) return (KeySym)cp;
+	return (KeySym)(0x01000000u | cp);
+}
+
+#define UNI_SPARE_POOL 8
+#define UNI_MAX_LEVELS 8     /* cap on keysyms_per_keycode we rewrite */
+static KeyCode uni_spare[UNI_SPARE_POOL];  /* reserved all-NoSymbol keycodes */
+static int uni_spare_n;       /* number of spare keycodes found */
+static unsigned uni_spare_rr; /* round-robin slot */
+static int uni_per = 1;       /* keysyms per keycode on this display */
+
+/* Collect up to UNI_SPARE_POOL keycodes that are currently all-NoSymbol,
+ * scanning from the top down (high keycodes are never produced by the
+ * scancode + 8 path, and we only ever touch genuinely empty ones).
+ * inject_unicode round-robins over them and leaves each remapped, so a
+ * client can still resolve the delivered KeyPress.  Chosen once, after
+ * the display opens. */
+static void
+uni_init_spares(Display *dpy)
+{
+	int lo = 0, hi = 0, per = 0, kc, j;
+	KeySym *map;
+
+	if (uni_spare_n != 0) return;
+	XDisplayKeycodes(dpy, &lo, &hi);
+	map = XGetKeyboardMapping(dpy, lo, hi - lo + 1, &per);
+	if (map == NULL || per < 1) {
+		if (map != NULL) XFree(map);
+		return;
+	}
+	uni_per = (per > UNI_MAX_LEVELS) ? UNI_MAX_LEVELS : per;
+	for (kc = hi; kc >= lo && uni_spare_n < UNI_SPARE_POOL; kc--) {
+		int empty = 1;
+		for (j = 0; j < per; j++)
+			if (map[(kc - lo) * per + j] != NoSymbol) {
+				empty = 0;
+				break;
+			}
+		if (empty)
+			uni_spare[uni_spare_n++] = (KeyCode)kc;
+	}
+	XFree(map);
+}
+
+/* Inject one Unicode codepoint via XTest.  A spare keycode is mapped to
+ * the target keysym at every level (so the result does not depend on the
+ * modifier state), committed with XSync before the fake key, then pressed
+ * and released.  The mapping is deliberately left live: clients resolve a
+ * keycode to a keysym lazily, so the mapping must outlast event delivery;
+ * the round-robin pool keeps it valid until the slot is reused. */
+static int
+inject_unicode(Display *dpy, const struct rdp_be_input_unicode *u)
+{
+	KeySym ks = cp_to_keysym(u->codepoint);
+	KeySym lv[UNI_MAX_LEVELS];
+	KeyCode kc;
+	int i, n = uni_per;
+
+	if (uni_spare_n == 0) return 0;   /* no free keycode to borrow */
+	if (n < 1) n = 1;
+	if (n > UNI_MAX_LEVELS) n = UNI_MAX_LEVELS;
+	kc = uni_spare[uni_spare_rr++ % (unsigned)uni_spare_n];
+
+	for (i = 0; i < n; i++) lv[i] = ks;
+	XChangeKeyboardMapping(dpy, kc, n, lv, 1);
+	XSync(dpy, False);                   /* commit the map first */
+	(void)XTestFakeKeyEvent(dpy, kc, True, 0);
+	(void)XTestFakeKeyEvent(dpy, kc, False, 0);
+	XSync(dpy, False);
+	return 0;
+}
+
 static pid_t
 spawn_xorg_ddx(int display_num, int w, int h, int ctrl_fd)
 {
@@ -1087,6 +1164,7 @@ main(int argc, char *argv[])
 		(void)kill(xvfb_pid, SIGTERM);
 		return 1;
 	}
+	uni_init_spares(dpy);
 
 	/* Resize the Xvfb desktop from 3840x2160 down to the client's
 	 * requested size via RANDR. */
@@ -1219,6 +1297,11 @@ main(int argc, char *argv[])
 				struct rdp_be_input_mouse m;
 				memcpy(&m, buf, sizeof m);
 				(void)inject_mouse(dpy, &m);
+			} else if (type == RDP_BE_INPUT_UNICODE
+			    && n >= (ssize_t)sizeof(struct rdp_be_input_unicode)) {
+				struct rdp_be_input_unicode u;
+				memcpy(&u, buf, sizeof u);
+				(void)inject_unicode(dpy, &u);
 			} else if (type == RDP_BE_CLIP_OFFER
 			    || type == RDP_BE_CLIP_REQUEST
 			    || type == RDP_BE_CLIP_DATA) {

@@ -23,6 +23,9 @@ via the XTEST extension, and bridges the X11 CLIPBOARD selection
 to the
 .Sy CLIPRDR
 RDP channel.
+Scancode key events map directly to X keycodes; Unicode key events are
+injected by temporarily remapping a spare keycode to the target keysym
+and faking a press and release.
 .Pp
 Captured frames are sent as raw pixels over the backend socket.
 The

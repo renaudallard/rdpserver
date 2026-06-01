@@ -83,6 +83,7 @@
  * Request: session sends FS_REQ with an rdp_be_fs_req header.
  * Response: worker sends FS_RSP with an rdp_be_fs_rsp header + data. */
 #define RDP_BE_H264_FRAME  13u
+#define RDP_BE_INPUT_UNICODE 14u
 
 #define RDP_BE_FS_REQ      11u
 #define RDP_BE_FS_RSP      12u
@@ -143,6 +144,15 @@ struct rdp_be_input_key {
 	uint8_t  down;       /* 1 = press, 0 = release */
 	uint8_t  extended;   /* PC/AT E0 prefix */
 	uint8_t  pad[4];
+};
+
+/* Unicode key event payload (8 bytes).  Carries a Unicode scalar
+ * value; the session injects it by remapping a spare X keycode to the
+ * matching keysym.  Only presses are forwarded (down is always 1). */
+struct rdp_be_input_unicode {
+	uint32_t codepoint;
+	uint8_t  down;
+	uint8_t  pad[3];
 };
 
 /* Mouse event payload (12 bytes). */
