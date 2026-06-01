@@ -115,7 +115,7 @@ rdp_tls_ctx_new(const char *cert_pem, const char *key_pem)
 		return NULL;
 	}
 	(void)SSL_CTX_set_min_proto_version(t->ctx, TLS1_2_VERSION);
-	(void)SSL_CTX_set_max_proto_version(t->ctx, TLS1_2_VERSION);
+	(void)SSL_CTX_set_max_proto_version(t->ctx, TLS1_3_VERSION);
 	(void)SSL_CTX_set_options(t->ctx,
 		SSL_OP_NO_COMPRESSION
 		| SSL_OP_NO_RENEGOTIATION
@@ -323,6 +323,14 @@ int
 rdp_tls_fd(const struct rdp_tls *t)
 {
 	return t->fd;
+}
+
+const char *
+rdp_tls_version(const struct rdp_tls *t)
+{
+	if (t == NULL || t->ssl == NULL)
+		return "none";
+	return SSL_get_version(t->ssl);
 }
 
 ssize_t

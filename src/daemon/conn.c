@@ -1886,7 +1886,8 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 		rdp_err("conn[%s]: TLS handshake failed", peer);
 		goto done;
 	}
-	rdp_debug("conn[%s]: TLS established", peer);
+	rdp_debug("conn[%s]: TLS established (%s)", peer,
+		rdp_tls_version(t));
 
 	if (use_nla) {
 		if (rdp_nla_server(t, nla_user, sizeof nla_user,

@@ -3,8 +3,8 @@
 ## Trust model
 
 rdpserver is a TCP-facing RDP server.  Clients connect over the
-public network; the server speaks TLS for confidentiality and RDP
-on top.  The threat model assumes:
+public network; the server speaks TLS (1.2 or 1.3, 1.3 preferred)
+for confidentiality and RDP on top.  The threat model assumes:
 
 - A malicious client may send arbitrary bytes on the wire at any
   point in the handshake.

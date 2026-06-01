@@ -80,6 +80,9 @@ ssize_t rdp_tls_write_full(struct rdp_tls *t, const void *buf, size_t n);
  * TCP_NODELAY).  Caller must not directly read/write on it. */
 int rdp_tls_fd(const struct rdp_tls *t);
 
+/* Negotiated TLS protocol version string (e.g. "TLSv1.3"), or "none". */
+const char *rdp_tls_version(const struct rdp_tls *t);
+
 void rdp_tls_close(struct rdp_tls *t);
 
 /* Extract the server certificate's DER-encoded SubjectPublicKeyInfo.
