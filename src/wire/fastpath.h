@@ -74,6 +74,14 @@
 #define RDP_FP_FRAGMENT_FIRST      2
 #define RDP_FP_FRAGMENT_NEXT       3
 
+/* A fast-path PDU length is carried in a 15-bit determinant, so the
+ * absolute ceiling is 0x7FFF.  We cap our own output at 0x3FFF to stay
+ * comfortably under that and leave room for the variable header.  The
+ * safe fragment size is the largest update body slice we will emit per
+ * fragment when a single update would not fit. */
+#define RDP_FP_MAX_PACKET_SIZE     0x3FFF
+#define RDP_FP_FRAGMENT_SAFE_SIZE  0x3F80
+
 #define RDP_FP_INPUT_SCANCODE      0
 #define RDP_FP_INPUT_MOUSE         1
 #define RDP_FP_INPUT_MOUSEX        2
@@ -85,6 +93,23 @@
  * wire bytes written. */
 ssize_t rdp_fp_build_update(uint8_t *out, size_t cap,
 		uint8_t update_type, const void *body, size_t body_len);
+
+/* Like rdp_fp_build_update but lets the caller set the fragmentation
+ * flag (RDP_FP_FRAGMENT_SINGLE / FIRST / NEXT / LAST) so an oversized
+ * update body can be sliced across several fast-path PDUs.  Returns
+ * total wire bytes written, or -1 if it would not fit. */
+ssize_t rdp_fp_build_update_frag(uint8_t *out, size_t cap,
+		uint8_t update_type, uint8_t fragment,
+		const void *body, size_t body_len);
+
+/* Assemble a bare TS_UPDATE_BITMAP body (no fast-path wrapper) for the
+ * rect [x..x+w, y..y+h) from `pixels` (24bpp packed BGR, top-down).
+ * Returns the body size in bytes, or -1 if it exceeds cap or 0xffff.
+ * The body can then be wrapped whole via rdp_fp_build_bitmap_update or,
+ * when too large, sliced across fragments via rdp_fp_build_update_frag. */
+ssize_t rdp_fp_build_bitmap_body(uint8_t *out, size_t cap,
+		uint16_t x, uint16_t y, uint16_t w, uint16_t h,
+		const uint8_t *pixels, size_t pixels_stride);
 
 /* Build a Synchronize fast-path update (empty body). */
 ssize_t rdp_fp_build_synchronize(uint8_t *out, size_t cap);

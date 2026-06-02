@@ -370,7 +370,8 @@ rdp_capset_build_demand_active(uint8_t *out, size_t cap,
 }
 
 int
-rdp_capset_parse_confirm_active(const uint8_t *p, size_t len, uint16_t *bpp_out)
+rdp_capset_parse_confirm_active(const uint8_t *p, size_t len,
+		uint16_t *bpp_out, uint32_t *max_request_size_out)
 {
 	uint16_t lenSrc, lenComb, capCount;
 	size_t off = 0;
@@ -386,6 +387,7 @@ rdp_capset_parse_confirm_active(const uint8_t *p, size_t len, uint16_t *bpp_out)
 	capCount = (uint16_t)p[off] | ((uint16_t)p[off + 1] << 8); off += 2;
 	off += 2;  /* pad2 */
 	if (bpp_out) *bpp_out = 24;
+	if (max_request_size_out) *max_request_size_out = 0;
 	/* Iterate caps; we just sanity-check lengths. */
 	{
 		size_t end = off + lenComb - 4;
@@ -401,6 +403,13 @@ rdp_capset_parse_confirm_active(const uint8_t *p, size_t len, uint16_t *bpp_out)
 			if (ctype == RDP_CAP_BITMAP && clen >= 4 + 2 && bpp_out)
 				*bpp_out = (uint16_t)p[off + 4]
 					| ((uint16_t)p[off + 5] << 8);
+			if (ctype == RDP_CAP_MULTIFRAGMENT && clen >= 8
+			    && max_request_size_out)
+				*max_request_size_out =
+					 (uint32_t)p[off + 4]
+					| ((uint32_t)p[off + 5] << 8)
+					| ((uint32_t)p[off + 6] << 16)
+					| ((uint32_t)p[off + 7] << 24);
 			off += clen;
 			total++;
 		}

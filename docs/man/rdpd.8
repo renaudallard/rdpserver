@@ -33,6 +33,10 @@ Graphical output is sent as H.264 / AVC420 frames over the
 .Sy RDPGFX
 (Graphics Pipeline) dynamic virtual channel when the client supports
 it, falling back to fast-path bitmap updates otherwise.
+A bitmap update too large for a single fast-path PDU is split into
+FIRST/NEXT/LAST fragments sized to the client's MultifragmentUpdate
+MaxRequestSize (a 16KB safe default is used when the client omits it),
+while small updates remain single-fragment.
 Audio from the session is forwarded to the client via the
 .Sy RDPSND
 channel (PCM 16-bit stereo, 44.1 kHz).

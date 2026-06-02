@@ -70,7 +70,7 @@ sends fast-path bitmap updates).
 | --- | --- | --- |
 | TLS, MCS connect, channel join | ✓ | TLS 1.2 or 1.3 (1.3 preferred, 1.2 floor). |
 | Demand Active / Confirm Active / finalization | ✓ | |
-| Fast-path Bitmap Update output (24bpp, tiled) | ✓ | |
+| Fast-path Bitmap Update output (24bpp, tiled) | ✓ | Small updates are sent as a single fragment; a bitmap update too large for one fast-path PDU is split into FIRST/NEXT/LAST fragments honoring the client's MultifragmentUpdate MaxRequestSize (16KB safe default when absent). |
 | Fast-path input (scancode, mouse, sync, Unicode) | ✓ | Scancode and mouse forwarded to the session; Unicode events forwarded and injected via a spare-keycode keysym remap; sync (lock-key state) is parsed but not forwarded. |
 | Server-painted greeter + PAM/bsd_auth | ✓ | |
 | Per-user Xvfb + xterm session | ✓ | |

@@ -96,10 +96,12 @@
 ssize_t rdp_capset_build_demand_active(uint8_t *out, size_t cap,
 		uint32_t share_id, uint16_t desktop_w, uint16_t desktop_h);
 
-/* Parse a Confirm Active body and extract things we care about.
- * For Phase A this is mostly just verifying the structure and
- * pulling out the client's desktop bpp.  Returns 0 on success. */
+/* Parse a Confirm Active capability blob and extract things we care
+ * about: the client's desktop bpp and, when present, the
+ * MultifragmentUpdate MaxRequestSize.  Either out-param may be NULL.
+ * max_request_size_out defaults to 0 when the cap is absent.  Returns
+ * 0 on success. */
 int rdp_capset_parse_confirm_active(const uint8_t *p, size_t len,
-		uint16_t *bpp_out);
+		uint16_t *bpp_out, uint32_t *max_request_size_out);
 
 #endif /* RDP_CAPSET_H */

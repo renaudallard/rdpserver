@@ -515,11 +515,52 @@ on_input_event(void *vctx, const struct rdp_fp_input_event *ev)
 	}
 }
 
-/* Tile a frame and push as fast-path bitmap updates. */
+/* Emit a single TS_UPDATE_BITMAP body as one or more fast-path PDUs.
+ * When the body fits a single PDU it is sent unfragmented; otherwise it
+ * is sliced into FIRST/NEXT/LAST fragments of at most (chunk_target - 6)
+ * body bytes each (6 = 1 action + 2 length + 3 inner header headroom).
+ * Returns 0 on success, -1 on failure. */
+static int
+send_bitmap_fragments(struct rdp_tls *t, const uint8_t *body,
+		size_t body_size, size_t chunk_target)
+{
+	uint8_t pkt[0x4000];
+	size_t frag = chunk_target - 6;
+	size_t off = 0;
+	int first = 1;
+
+	/* Slice size must keep the whole PDU under the wire ceiling and
+	 * within the 16-bit update length. */
+	if (frag > 0xffff) frag = 0xffff;
+	while (off < body_size) {
+		size_t slice = body_size - off;
+		uint8_t flag;
+		ssize_t n;
+		if (slice > frag) slice = frag;
+		if (off + slice >= body_size)
+			flag = first ? RDP_FP_FRAGMENT_SINGLE
+				: RDP_FP_FRAGMENT_LAST;
+		else
+			flag = first ? RDP_FP_FRAGMENT_FIRST
+				: RDP_FP_FRAGMENT_NEXT;
+		n = rdp_fp_build_update_frag(pkt, sizeof pkt,
+			RDP_FP_UPDATE_BITMAP, flag, body + off, slice);
+		if (n < 0) return -1;
+		if (rdp_tls_write_full(t, pkt, (size_t)n) != (ssize_t)n)
+			return -1;
+		off += slice;
+		first = 0;
+	}
+	return 0;
+}
+
+/* Tile a frame and push as fast-path bitmap updates.  chunk_target is
+ * the largest fast-path PDU we may emit; a tile that does not fit one
+ * PDU is sliced across fragments. */
 static int
 push_frame_tiled(struct rdp_tls *t,
 		uint16_t fx, uint16_t fy, uint16_t fw, uint16_t fh,
-		const uint8_t *pixels)
+		const uint8_t *pixels, size_t chunk_target)
 {
 	const uint16_t TILE = 64;
 	uint8_t tile_pix[64 * 64 * 3];
@@ -531,6 +572,8 @@ push_frame_tiled(struct rdp_tls *t,
 		uint16_t x;
 		for (x = 0; x < fw; x += TILE) {
 			uint16_t tw = (uint16_t)(x + TILE > fw ? fw - x : TILE);
+			uint16_t wpad = (uint16_t)((tw + 3) & ~3u);
+			size_t body_size = 4 + 18 + (size_t)wpad * 3 * th;
 			ssize_t n;
 			size_t row;
 			for (row = 0; row < th; row++) {
@@ -539,13 +582,35 @@ push_frame_tiled(struct rdp_tls *t,
 						+ x) * 3,
 					(size_t)tw * 3);
 			}
-			n = rdp_fp_build_bitmap_update(pkt, sizeof pkt,
-				(uint16_t)(fx + x), (uint16_t)(fy + y),
-				tw, th, tile_pix, (size_t)tw * 3);
-			if (n < 0) return -1;
-			if (rdp_tls_write_full(t, pkt, (size_t)n)
-			    != (ssize_t)n)
-				return -1;
+			/* Common path: the whole tile fits one PDU. */
+			if (body_size + 6 <= chunk_target) {
+				n = rdp_fp_build_bitmap_update(pkt, sizeof pkt,
+					(uint16_t)(fx + x), (uint16_t)(fy + y),
+					tw, th, tile_pix, (size_t)tw * 3);
+				if (n < 0) return -1;
+				if (rdp_tls_write_full(t, pkt, (size_t)n)
+				    != (ssize_t)n)
+					return -1;
+				continue;
+			}
+			/* Oversized tile: build the body once and fragment. */
+			{
+				uint8_t *scratch = malloc(body_size);
+				ssize_t bn;
+				int rc;
+				if (scratch == NULL) return -1;
+				bn = rdp_fp_build_bitmap_body(scratch, body_size,
+					(uint16_t)(fx + x), (uint16_t)(fy + y),
+					tw, th, tile_pix, (size_t)tw * 3);
+				if (bn < 0) {
+					free(scratch);
+					return -1;
+				}
+				rc = send_bitmap_fragments(t, scratch,
+					(size_t)bn, chunk_target);
+				free(scratch);
+				if (rc != 0) return -1;
+			}
 		}
 	}
 	return 0;
@@ -1111,6 +1176,7 @@ run_proxy(struct rdp_tls *t, int be_fd,
 		struct snd_state *ss, struct dr_state *dr,
 		uint16_t user_id, uint16_t io_channel,
 		uint16_t desktop_w, uint16_t desktop_h,
+		uint32_t client_max_request,
 		const char *peer)
 {
 	struct proxy_input_ctx ictx = { be_fd, 0, 0, 0 };
@@ -1121,6 +1187,16 @@ run_proxy(struct rdp_tls *t, int be_fd,
 	struct rdp_progressive *prog = NULL;
 	int output_suppressed = 0;
 	int backend_lost = 0;
+	/* Largest fast-path PDU we will emit per bitmap fragment.  Honour
+	 * the client's MultifragmentUpdate MaxRequestSize when present,
+	 * never exceeding our own safe ceiling.  Floor it so the per-slice
+	 * header (6 bytes) never underflows and fragments stay sensible. */
+	size_t chunk_target = RDP_FP_FRAGMENT_SAFE_SIZE;
+	if (client_max_request != 0
+	    && client_max_request < (uint32_t)chunk_target)
+		chunk_target = (size_t)client_max_request;
+	if (chunk_target < 512)
+		chunk_target = 512;
 	gfx.surface_id = 0;
 	gfx.frame_id = 0;
 	gfx.desktop_w = desktop_w;
@@ -1518,7 +1594,7 @@ run_proxy(struct rdp_tls *t, int be_fd,
 				} else {
 					if (push_frame_tiled(t, fhdr.x,
 						fhdr.y, fhdr.w, fhdr.h,
-						frame_buf) != 0)
+						frame_buf, chunk_target) != 0)
 						break;
 				}
 			} else if (type == RDP_BE_H264_FRAME) {
@@ -1838,6 +1914,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 	uint16_t io_channel = RDP_MCS_IO_CHANNEL_ID;
 	uint16_t desktop_w = 0, desktop_h = 0;
 	uint32_t client_lcid = 0;
+	uint32_t client_max_request = 0;
 	int use_nla = 0;
 	char nla_user[256] = {0}, nla_pass[256] = {0};
 	char client_ip[RDP_SESSMGR_IP_MAX];
@@ -2186,6 +2263,17 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 		}
 		rdp_debug("conn[%s]: confirm active from src=%u len=%u",
 			peer, psrc, plen);
+		/* Pull the client's MultifragmentUpdate MaxRequestSize so we
+		 * can size fast-path bitmap fragments to what it accepts.  The
+		 * confirm-active body follows the 6-byte share-control header. */
+		if (payload_len > 6) {
+			uint32_t mrq = 0;
+			if (rdp_capset_parse_confirm_active(payload + 6,
+				payload_len - 6, NULL, &mrq) == 0)
+				client_max_request = mrq;
+		}
+		rdp_debug("conn[%s]: client MaxRequestSize=%u",
+			peer, (unsigned)client_max_request);
 	}
 
 	/* 9. Finalization handshake. */
@@ -2272,7 +2360,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 			}
 			run_proxy(t, be_fd, &clip, &dynvc, &snd, &devr,
 				user_id, io_channel,
-				desktop_w, desktop_h, peer);
+				desktop_w, desktop_h, client_max_request, peer);
 			/* On disconnect: try to SUSPEND the session so it
 			 * survives for the next reconnect. */
 			if (rdp_sessmgr_suspend(cfg->sessmgr_sock,
@@ -2343,7 +2431,8 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 				}
 				run_proxy(t, be_fd, &clip, &dynvc, &snd,
 					&devr, user_id, io_channel,
-					desktop_w, desktop_h, peer);
+					desktop_w, desktop_h,
+					client_max_request, peer);
 				(void)close(be_fd);
 				goto done;
 			}
@@ -2407,6 +2496,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 							&dynvc, &snd, &devr,
 							user_id, io_channel,
 							desktop_w, desktop_h,
+							client_max_request,
 							peer);
 						(void)close(be_fd);
 						goto send_disconnect;
@@ -2448,7 +2538,8 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 					peer, be_fd);
 				run_proxy(t, be_fd, &clip, &dynvc, &snd,
 					&devr, user_id, io_channel,
-					desktop_w, desktop_h, peer);
+					desktop_w, desktop_h,
+					client_max_request, peer);
 				(void)close(be_fd);
 				goto send_disconnect;
 			}
@@ -2513,7 +2604,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 				clip.enabled ? "enabled" : "off");
 			run_proxy(t, be_fd, &clip, &dynvc, &snd, &devr,
 				user_id, io_channel,
-				desktop_w, desktop_h, peer);
+				desktop_w, desktop_h, client_max_request, peer);
 
 			/* On disconnect: try to SUSPEND so a reconnecting
 			 * client can resume without re-authenticating. */
