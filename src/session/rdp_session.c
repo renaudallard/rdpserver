@@ -64,6 +64,8 @@
 #include <X11/extensions/XShm.h>
 #include <X11/extensions/XTest.h>
 #include <X11/extensions/Xfixes.h>
+#include <X11/XKBlib.h>		/* XkbKeysymToModifiers, XkbLockModifiers */
+#include <X11/keysym.h>		/* XK_Caps_Lock, XK_Num_Lock, XK_Scroll_Lock */
 
 #include "clip_x11.h"
 #include "audio.h"
@@ -559,6 +561,36 @@ inject_unicode(Display *dpy, const struct rdp_be_input_unicode *u)
 	(void)XTestFakeKeyEvent(dpy, kc, True, 0);
 	(void)XTestFakeKeyEvent(dpy, kc, False, 0);
 	XSync(dpy, False);
+	return 0;
+}
+
+/* MS-RDPBCGR fast-path SYNC toggle bits (KANA 0x08 is ignored). */
+#define RDP_SYNC_SCROLL_LOCK 0x01
+#define RDP_SYNC_NUM_LOCK    0x02
+#define RDP_SYNC_CAPS_LOCK   0x04
+
+/* Lock or unlock the X modifier bound to a toggle keysym.  Resolving
+ * the mask via XkbKeysymToModifiers is more robust than hardcoding
+ * LockMask/Mod2, since Num and Scroll Lock vary by layout. */
+static void
+lock_one(Display *dpy, KeySym ks, int on)
+{
+	unsigned int mask = XkbKeysymToModifiers(dpy, ks);
+
+	if (mask == 0)			/* toggle unbound in this layout */
+		return;
+	(void)XkbLockModifiers(dpy, XkbUseCoreKbd, mask, on ? mask : 0);
+}
+
+/* Apply the client's lock-key state to the session keyboard.  The
+ * state is absolute, so repeated syncs converge without drift. */
+static int
+inject_sync(Display *dpy, const struct rdp_be_input_sync *s)
+{
+	lock_one(dpy, XK_Caps_Lock,   (s->flags & RDP_SYNC_CAPS_LOCK) != 0);
+	lock_one(dpy, XK_Num_Lock,    (s->flags & RDP_SYNC_NUM_LOCK) != 0);
+	lock_one(dpy, XK_Scroll_Lock, (s->flags & RDP_SYNC_SCROLL_LOCK) != 0);
+	XFlush(dpy);
 	return 0;
 }
 
@@ -1410,6 +1442,11 @@ main(int argc, char *argv[])
 				struct rdp_be_input_unicode u;
 				memcpy(&u, buf, sizeof u);
 				(void)inject_unicode(dpy, &u);
+			} else if (type == RDP_BE_INPUT_SYNC
+			    && n >= (ssize_t)sizeof(struct rdp_be_input_sync)) {
+				struct rdp_be_input_sync s;
+				memcpy(&s, buf, sizeof s);
+				(void)inject_sync(dpy, &s);
 			} else if (type == RDP_BE_CLIP_OFFER
 			    || type == RDP_BE_CLIP_REQUEST
 			    || type == RDP_BE_CLIP_DATA) {

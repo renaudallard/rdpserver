@@ -84,7 +84,8 @@
  * Response: worker sends FS_RSP with an rdp_be_fs_rsp header + data. */
 #define RDP_BE_H264_FRAME  13u
 #define RDP_BE_INPUT_UNICODE 14u
-#define RDP_BE_CURSOR      15u   /* session -> worker; opcodes 1..14 are used */
+#define RDP_BE_CURSOR      15u   /* session -> worker */
+#define RDP_BE_INPUT_SYNC  16u   /* worker -> session: lock-key state; 1..16 used */
 
 #define RDP_BE_FS_REQ      11u
 #define RDP_BE_FS_RSP      12u
@@ -154,6 +155,13 @@ struct rdp_be_input_unicode {
 	uint32_t codepoint;
 	uint8_t  down;
 	uint8_t  pad[3];
+};
+
+/* Lock-key sync payload (4 bytes).  flags carries the MS-RDPBCGR
+ * fast-path SYNC toggle bits: SCROLL=0x01, NUM=0x02, CAPS=0x04,
+ * KANA=0x08.  It is the absolute desired lock state, not a toggle. */
+struct rdp_be_input_sync {
+	uint32_t flags;
 };
 
 /* Mouse event payload (12 bytes). */

@@ -507,9 +507,13 @@ on_input_event(void *vctx, const struct rdp_fp_input_event *ev)
 			&u, sizeof u);
 		break;
 	}
-	case RDP_FP_INPUT_SYNC:
-		/* Lock-key sync is not forwarded. */
+	case RDP_FP_INPUT_SYNC: {
+		struct rdp_be_input_sync s = {0};
+		/* Low nibble = SCROLL|NUM|CAPS|KANA; mask off reserved bits. */
+		s.flags = (uint32_t)(ev->flags & 0x0f);
+		(void)rdp_be_send(ctx->be_fd, RDP_BE_INPUT_SYNC, &s, sizeof s);
 		break;
+	}
 	default:
 		break;
 	}

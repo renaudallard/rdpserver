@@ -35,6 +35,11 @@ so those keycodes produce the client's characters (US is used for an
 unknown layout).
 Unicode key events are injected by temporarily remapping a spare
 keycode to the target keysym and faking a press and release.
+The client's lock-key state
+.Pq Caps , Num , and Scroll Lock
+is applied to the session keyboard with the XKB lock modifiers, so a
+client that connects or regains focus with a lock engaged stays in
+sync with the session.
 .Pp
 Captured frames are sent as raw pixels over the backend socket.
 The
