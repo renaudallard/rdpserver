@@ -113,13 +113,20 @@ the FUSE device on file descriptor 4.
 .Nm
 speaks the raw FUSE kernel protocol on that descriptor (no
 .Sy libfuse
-dependency) and translates browse and read requests
-.Pq lookup, getattr, opendir, readdir, open, and read
+dependency) and translates browse, read, and write requests
+.Pq lookup, getattr, setattr, opendir, readdir, open, read, and write
 into RDPDR file operations carried to the
 .Xr rdpd 8
 worker over the backend socket.
-The mount is currently read-only: write and metadata changes are not
-yet forwarded.
+File metadata
+.Pq size and timestamps
+is fetched from the client with QueryInformation IRPs, so
+.Xr stat 2
+reports the true size and modification time.
+Writing, truncating
+.Pq including save-with-truncate ,
+and timestamp updates are forwarded to the client; the mount is
+read-write.
 If
 .Pa /dev/fuse
 is unavailable, the kernel is too old, or the host is not Linux, the

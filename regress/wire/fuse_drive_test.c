@@ -43,6 +43,7 @@
 
 #include <sys/stat.h>
 
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -65,8 +66,17 @@ uint32_t fuse_drive_test_req_device(void);
 uint32_t fuse_drive_test_req_file_id(void);
 uint32_t fuse_drive_test_req_length(void);
 uint64_t fuse_drive_test_req_offset(void);
+uint32_t fuse_drive_test_req_info_class(void);
+uint32_t fuse_drive_test_req_access(void);
 const uint8_t *fuse_drive_test_req_payload(size_t *);
 const uint8_t *fuse_drive_test_reply(size_t *);
+
+/* FSCC info-class and FileAttributes constants used by the metadata tests
+ * (mirrors src/channels/rdpdr.h and the FSCC bit we honour). */
+#define IC_FILE_BASIC      0x00000004u
+#define IC_FILE_STANDARD   0x00000005u
+#define IC_FILE_EOF        0x00000014u
+#define FATTR_DIRECTORY    0x00000010u
 
 static void
 put32le(uint8_t *p, uint32_t v)
@@ -75,6 +85,30 @@ put32le(uint8_t *p, uint32_t v)
 	p[1] = (uint8_t)(v >> 8);
 	p[2] = (uint8_t)(v >> 16);
 	p[3] = (uint8_t)(v >> 24);
+}
+
+static void
+put64le(uint8_t *p, uint64_t v)
+{
+	int i;
+	for (i = 0; i < 8; i++)
+		p[i] = (uint8_t)(v >> (i * 8));
+}
+
+/* Feed an FS_RSP carrying a forwarded payload to the module. */
+static void
+feed_rsp(struct fuse_drive *fd, uint32_t req_id, uint32_t status,
+		uint32_t file_id, uint32_t length,
+		const uint8_t *payload, size_t payload_len)
+{
+	struct rdp_be_fs_rsp rsp;
+	memset(&rsp, 0, sizeof rsp);
+	rsp.req_id = req_id;
+	rsp.status = status;
+	rsp.file_id = file_id;
+	rsp.length = length;
+	fuse_drive_test_reset();
+	fuse_drive_handle_fs_rsp(fd, &rsp, payload, payload_len);
 }
 
 /* Build a fuse_in_header in-place; returns total length written. */
@@ -264,22 +298,81 @@ test_lookup_emits_open(struct fuse_drive *fd)
 	return fuse_drive_test_req_id();
 }
 
-/* Feed an OPEN success FS_RSP and check the LOOKUP got a fuse_entry_out. */
+/* A FILETIME for 2000-01-01 00:00:00 UTC and its unix-seconds image. */
+#define MTIME_FILETIME  125911584000000000ull
+#define MTIME_UNIX_SEC  946684800ull
+
+/*
+ * Drive the getattr chain that a LOOKUP/GETATTR starts.  open_req is the
+ * req_id of the already-emitted OPEN; this feeds the OPEN success (with
+ * file_id), then the FileStandardInformation reply (EndOfFile=size,
+ * Directory flag), then the FileBasicInformation reply (LastWriteTime),
+ * asserting the query the module emits at each step.  The final FUSE
+ * reply (entry or attr) is left in the capture for the caller to read.
+ */
+static void
+drive_getattr_chain(struct fuse_drive *fd, uint32_t open_req,
+		uint32_t file_id, uint64_t size, int directory)
+{
+	uint32_t std_req, basic_req;
+	uint8_t std[4 + 24];
+	uint8_t basic[4 + 36];
+
+	/* OPEN completion must emit the FileStandardInformation query. */
+	feed_rsp(fd, open_req, STATUS_SUCCESS, file_id, 0, NULL, 0);
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_op() != RDP_FS_QUERY_INFO)
+		FAIL("getattr chain: OPEN did not emit a QUERY_INFO");
+	if (fuse_drive_test_req_info_class() != IC_FILE_STANDARD)
+		FAIL("getattr chain: first query class 0x%x not Standard",
+			fuse_drive_test_req_info_class());
+	if (fuse_drive_test_req_file_id() != file_id)
+		FAIL("getattr chain: query file_id 0x%x",
+			fuse_drive_test_req_file_id());
+	std_req = fuse_drive_test_req_id();
+
+	/* Canned FileStandardInformation: Length(u32) + 24-byte struct. */
+	memset(std, 0, sizeof std);
+	put32le(std, 24);
+	put64le(std + 4 + 8, size);                 /* EndOfFile */
+	std[4 + 21] = (uint8_t)(directory ? 1 : 0); /* Directory (+21) */
+
+	/* The Standard reply must chain to the FileBasicInformation query. */
+	feed_rsp(fd, std_req, STATUS_SUCCESS, 0, 0, std, sizeof std);
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_op() != RDP_FS_QUERY_INFO)
+		FAIL("getattr chain: Standard reply did not emit a QUERY_INFO");
+	if (fuse_drive_test_req_info_class() != IC_FILE_BASIC)
+		FAIL("getattr chain: second query class 0x%x not Basic",
+			fuse_drive_test_req_info_class());
+	basic_req = fuse_drive_test_req_id();
+
+	/* Canned FileBasicInformation: Length(u32) + 36-byte struct with a
+	 * known LastWriteTime and the directory attribute reflecting the
+	 * Standard reply (the module keys is_dir off Basic FileAttributes). */
+	memset(basic, 0, sizeof basic);
+	put32le(basic, 36);
+	put64le(basic + 4 + 16, MTIME_FILETIME);    /* LastWriteTime */
+	put32le(basic + 4 + 32, directory ? FATTR_DIRECTORY : 0);
+
+	/* The Basic reply produces the final FUSE reply, left in the capture. */
+	feed_rsp(fd, basic_req, STATUS_SUCCESS, 0, 0, basic, sizeof basic);
+}
+
+/*
+ * Feed an OPEN success FS_RSP and drive the getattr chain the LOOKUP now
+ * starts (OPEN -> Standard -> Basic), then check the resulting
+ * fuse_entry_out carries the real size, S_IFREG, and converted mtime.
+ */
 static void
 test_lookup_open_reply(struct fuse_drive *fd, uint32_t req_id)
 {
-	struct rdp_be_fs_rsp rsp;
 	struct fuse_entry_out eo;
 	struct fuse_out_header oh;
 	size_t rlen;
 	const uint8_t *r;
 
-	memset(&rsp, 0, sizeof rsp);
-	rsp.req_id = req_id;
-	rsp.status = STATUS_SUCCESS;
-	rsp.file_id = 0x4242;
-	fuse_drive_test_reset();
-	fuse_drive_handle_fs_rsp(fd, &rsp, NULL, 0);
+	drive_getattr_chain(fd, req_id, 0x4242, 12345, 0);
 
 	get_out(&oh);
 	if (oh.error != 0)
@@ -294,8 +387,17 @@ test_lookup_open_reply(struct fuse_drive *fd, uint32_t req_id)
 	if (eo.nodeid == 0 || eo.nodeid == FUSE_ROOT_ID)
 		FAIL("LOOKUP child nodeid %llu",
 			(unsigned long long)eo.nodeid);
-	printf("  lookup reply: entry nodeid %llu ok\n",
-		(unsigned long long)eo.nodeid);
+	if ((eo.attr.mode & S_IFMT) != S_IFREG)
+		FAIL("LOOKUP attr not S_IFREG, mode 0%o", eo.attr.mode);
+	if (eo.attr.size != 12345)
+		FAIL("LOOKUP attr size %llu != 12345",
+			(unsigned long long)eo.attr.size);
+	if (eo.attr.mtime != MTIME_UNIX_SEC)
+		FAIL("LOOKUP attr mtime %llu != %llu",
+			(unsigned long long)eo.attr.mtime,
+			(unsigned long long)MTIME_UNIX_SEC);
+	printf("  lookup reply: getattr chain -> nodeid %llu size 12345 "
+		"S_IFREG mtime ok\n", (unsigned long long)eo.nodeid);
 }
 
 /* --- OPEN of the looked-up file emits an OPEN, reply gives open_out --- */
@@ -593,19 +695,15 @@ test_bounds(struct fuse_drive *fd)
 		uint64_t xnode;
 		const uint8_t *rr;
 
-		/* Open a regular file under DOCS first; read the assigned
-		 * nodeid from the entry reply rather than assuming it. */
+		/* Open a regular file under DOCS first; the LOOKUP starts the
+		 * getattr chain, so drive it to completion (file_id 0x55) and
+		 * read the assigned nodeid from the entry reply. */
 		fuse_drive_test_reset();
 		len2 = build_in(buf2, FUSE_LOOKUP, 60, 3,
 			"x", strlen("x") + 1);
 		fuse_drive_test_dispatch(fd, buf2, len2);
 		rreq = fuse_drive_test_req_id();
-		memset(&rsp, 0, sizeof rsp);
-		rsp.req_id = rreq;
-		rsp.status = STATUS_SUCCESS;
-		rsp.file_id = 0x55;
-		fuse_drive_test_reset();
-		fuse_drive_handle_fs_rsp(fd, &rsp, NULL, 0);  /* entry */
+		drive_getattr_chain(fd, rreq, 0x55, 0, 0);
 		rr = fuse_drive_test_reply(&rlen2);
 		if (rlen2 != sizeof oh + sizeof eo2)
 			FAIL("bounds LOOKUP entry size %zu", rlen2);
@@ -639,7 +737,12 @@ test_bounds(struct fuse_drive *fd)
 		"clamped, no over-read ok\n");
 }
 
-/* --- Re-LOOKUP of an already-open node reuses the handle (no new OPEN) --- */
+/*
+ * Re-LOOKUP of an already-open node reuses the RDPDR handle (it does not
+ * re-OPEN) but still refreshes metadata over the held handle, so it emits
+ * a QUERY_INFO directly rather than an OPEN.  Feeding the Standard/Basic
+ * replies yields the entry for the same nodeid.
+ */
 static void
 test_relookup_open(struct fuse_drive *fd, uint64_t child_node)
 {
@@ -647,6 +750,9 @@ test_relookup_open(struct fuse_drive *fd, uint64_t child_node)
 	const char *name = "file.txt";
 	struct fuse_out_header oh;
 	struct fuse_entry_out eo;
+	uint32_t std_req, basic_req;
+	uint8_t std[4 + 24];
+	uint8_t basic[4 + 36];
 	size_t len, rlen;
 	const uint8_t *r;
 
@@ -655,8 +761,31 @@ test_relookup_open(struct fuse_drive *fd, uint64_t child_node)
 		name, strlen(name) + 1);
 	fuse_drive_test_dispatch(fd, buf, len);
 
-	if (fuse_drive_test_have_req())
+	/* No OPEN: the held handle is reused, so the first emit is the
+	 * FileStandardInformation query straight away. */
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_op() != RDP_FS_QUERY_INFO)
+		FAIL("re-LOOKUP did not query over the held handle");
+	if (fuse_drive_test_req_op() == RDP_FS_OPEN)
 		FAIL("re-LOOKUP re-issued an OPEN for an already-open node");
+	if (fuse_drive_test_req_info_class() != IC_FILE_STANDARD)
+		FAIL("re-LOOKUP first query not Standard");
+	std_req = fuse_drive_test_req_id();
+
+	memset(std, 0, sizeof std);
+	put32le(std, 24);
+	put64le(std + 4 + 8, 12345);
+	feed_rsp(fd, std_req, STATUS_SUCCESS, 0, 0, std, sizeof std);
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_info_class() != IC_FILE_BASIC)
+		FAIL("re-LOOKUP did not chain to Basic");
+	basic_req = fuse_drive_test_req_id();
+
+	memset(basic, 0, sizeof basic);
+	put32le(basic, 36);
+	put64le(basic + 4 + 16, MTIME_FILETIME);
+	feed_rsp(fd, basic_req, STATUS_SUCCESS, 0, 0, basic, sizeof basic);
+
 	get_out(&oh);
 	if (oh.error != 0)
 		FAIL("re-LOOKUP reply error %d", oh.error);
@@ -668,7 +797,8 @@ test_relookup_open(struct fuse_drive *fd, uint64_t child_node)
 		FAIL("re-LOOKUP nodeid %llu != %llu",
 			(unsigned long long)eo.nodeid,
 			(unsigned long long)child_node);
-	printf("  re-lookup file.txt: cached handle reused, no new OPEN ok\n");
+	printf("  re-lookup file.txt: handle reused, metadata refreshed, "
+		"no new OPEN ok\n");
 }
 
 /* --- BATCH_FORGET drops a node so a later LOOKUP re-opens it --- */
@@ -723,11 +853,568 @@ test_batch_forget(struct fuse_drive *fd, uint64_t child_node)
 		"re-opens ok\n");
 }
 
+/*
+ * LOOKUP a fresh file under drive C and drive its getattr chain so the
+ * node ends up open read-only with the given file_id.  Returns the
+ * assigned nodeid.  Used to set up the write/setattr tests on an
+ * independent node.
+ */
+static uint64_t
+lookup_open_file(struct fuse_drive *fd, const char *name, uint32_t file_id,
+		uint64_t unique)
+{
+	uint8_t buf[256];
+	struct fuse_entry_out eo;
+	struct fuse_out_header oh;
+	uint32_t open_req;
+	size_t len, rlen;
+	const uint8_t *r;
+
+	fuse_drive_test_reset();
+	len = build_in(buf, FUSE_LOOKUP, unique, DRIVE_C_NODE,
+		name, strlen(name) + 1);
+	fuse_drive_test_dispatch(fd, buf, len);
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_op() != RDP_FS_OPEN)
+		FAIL("lookup_open_file('%s') did not emit an OPEN", name);
+	open_req = fuse_drive_test_req_id();
+	drive_getattr_chain(fd, open_req, file_id, 0, 0);
+	get_out(&oh);
+	if (oh.error != 0)
+		FAIL("lookup_open_file('%s') entry error %d", name, oh.error);
+	r = fuse_drive_test_reply(&rlen);
+	if (rlen != sizeof oh + sizeof eo)
+		FAIL("lookup_open_file('%s') entry size %zu", name, rlen);
+	memcpy(&eo, r + sizeof oh, sizeof eo);
+	return eo.nodeid;
+}
+
+/* --- FUSE_OPEN with O_WRONLY requests FILE_WRITE_DATA --- */
+static void
+test_open_wronly(struct fuse_drive *fd, uint64_t node, uint32_t new_file_id)
+{
+	uint8_t buf[256];
+	struct fuse_open_in oi;
+	size_t len;
+
+	/* The node is currently open read-only (from lookup_open_file), so an
+	 * O_WRONLY open upgrades: it closes and reopens with write access. */
+	memset(&oi, 0, sizeof oi);
+	oi.flags = O_WRONLY;
+	fuse_drive_test_reset();
+	len = build_in(buf, FUSE_OPEN, 200, node, &oi, sizeof oi);
+	fuse_drive_test_dispatch(fd, buf, len);
+
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_op() != RDP_FS_OPEN)
+		FAIL("O_WRONLY open did not emit an OPEN FS_REQ");
+	if ((fuse_drive_test_req_access() & FILE_WRITE_DATA) == 0)
+		FAIL("O_WRONLY open access 0x%x lacks FILE_WRITE_DATA",
+			fuse_drive_test_req_access());
+	printf("  open O_WRONLY: OPEN desired_access 0x%x includes "
+		"FILE_WRITE_DATA ok\n", fuse_drive_test_req_access());
+
+	/* Complete the reopen so the node is write-open for the write test. */
+	{
+		struct fuse_out_header oh;
+		uint32_t open_req = fuse_drive_test_req_id();
+		feed_rsp(fd, open_req, STATUS_SUCCESS, new_file_id, 0, NULL, 0);
+		get_out(&oh);
+		if (oh.error != 0)
+			FAIL("O_WRONLY open reply error %d", oh.error);
+	}
+}
+
+/* --- FUSE_WRITE emits RDP_FS_WRITE and reports bytes written --- */
+static void
+test_write(struct fuse_drive *fd, uint64_t node, uint32_t file_id)
+{
+	uint8_t buf[256];
+	struct fuse_write_in wi;
+	const uint8_t data[5] = { 'h', 'e', 'l', 'l', 'o' };
+	uint32_t write_req;
+	size_t plen;
+	const uint8_t *pl;
+
+	memset(&wi, 0, sizeof wi);
+	wi.fh = node;
+	wi.offset = 100;
+	wi.size = 5;
+	fuse_drive_test_reset();
+	(void)build_in(buf, FUSE_WRITE, 210, node, &wi, sizeof wi);
+	/* Append the 5 write-data bytes after the fuse_write_in. */
+	memcpy(buf + sizeof(struct fuse_in_header) + sizeof wi, data, 5);
+	{
+		struct fuse_in_header ih;
+		memcpy(&ih, buf, sizeof ih);
+		ih.len = (uint32_t)(sizeof ih + sizeof wi + 5);
+		memcpy(buf, &ih, sizeof ih);
+	}
+	fuse_drive_test_dispatch(fd, buf, sizeof(struct fuse_in_header)
+		+ sizeof wi + 5);
+
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_op() != RDP_FS_WRITE)
+		FAIL("FUSE_WRITE did not emit an RDP_FS_WRITE");
+	if (fuse_drive_test_req_file_id() != file_id)
+		FAIL("WRITE file_id 0x%x != 0x%x",
+			fuse_drive_test_req_file_id(), file_id);
+	if (fuse_drive_test_req_offset() != 100)
+		FAIL("WRITE offset %llu != 100",
+			(unsigned long long)fuse_drive_test_req_offset());
+	pl = fuse_drive_test_req_payload(&plen);
+	if (plen != 5 || memcmp(pl, data, 5) != 0)
+		FAIL("WRITE payload (%zu bytes) mismatch", plen);
+	write_req = fuse_drive_test_req_id();
+
+	/* DR_WRITE_RSP: Length(u32)=bytes written, then a Padding byte. */
+	{
+		struct fuse_out_header oh;
+		struct fuse_write_out wo;
+		uint8_t rsp_pl[5];
+		size_t rlen;
+		const uint8_t *r;
+		put32le(rsp_pl, 5);
+		rsp_pl[4] = 0;
+		feed_rsp(fd, write_req, STATUS_SUCCESS, 0, 5,
+			rsp_pl, sizeof rsp_pl);
+		get_out(&oh);
+		if (oh.error != 0)
+			FAIL("WRITE reply error %d", oh.error);
+		r = fuse_drive_test_reply(&rlen);
+		if (rlen != sizeof oh + sizeof wo)
+			FAIL("WRITE reply size %zu", rlen);
+		memcpy(&wo, r + sizeof oh, sizeof wo);
+		if (wo.size != 5)
+			FAIL("WRITE reported %u bytes != 5", wo.size);
+	}
+	printf("  write: RDP_FS_WRITE offset 100 + 5-byte payload, "
+		"fuse_write_out.size==5 ok\n");
+}
+
+/* --- FUSE_SETATTR FATTR_SIZE=0 emits a FileEndOfFileInformation set --- */
+static void
+test_setattr_truncate(struct fuse_drive *fd, uint64_t node)
+{
+	uint8_t buf[256];
+	struct fuse_setattr_in si;
+	size_t len, plen;
+	const uint8_t *pl;
+	uint32_t set_req;
+
+	memset(&si, 0, sizeof si);
+	si.valid = FATTR_SIZE;
+	si.size = 0;
+	fuse_drive_test_reset();
+	len = build_in(buf, FUSE_SETATTR, 220, node, &si, sizeof si);
+	fuse_drive_test_dispatch(fd, buf, len);
+
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_op() != RDP_FS_SET_INFO)
+		FAIL("SETATTR size did not emit an RDP_FS_SET_INFO");
+	if (fuse_drive_test_req_info_class() != IC_FILE_EOF)
+		FAIL("SETATTR info_class 0x%x not FileEndOfFileInformation",
+			fuse_drive_test_req_info_class());
+	pl = fuse_drive_test_req_payload(&plen);
+	if (plen != 8)
+		FAIL("SETATTR EOF SetBuffer %zu bytes != 8", plen);
+	{
+		uint64_t eof = 0;
+		int i;
+		for (i = 0; i < 8; i++)
+			eof |= (uint64_t)pl[i] << (i * 8);
+		if (eof != 0)
+			FAIL("SETATTR EndOfFile %llu != 0",
+				(unsigned long long)eof);
+	}
+	set_req = fuse_drive_test_req_id();
+
+	/* Completing the set triggers a re-query (Standard) for the new attr. */
+	{
+		uint8_t rsp_pl[5];
+		put32le(rsp_pl, 0);
+		rsp_pl[4] = 0;
+		feed_rsp(fd, set_req, STATUS_SUCCESS, 0, 0, rsp_pl, sizeof rsp_pl);
+		if (!fuse_drive_test_have_req()
+		    || fuse_drive_test_req_op() != RDP_FS_QUERY_INFO
+		    || fuse_drive_test_req_info_class() != IC_FILE_STANDARD)
+			FAIL("SETATTR did not re-query after the set");
+	}
+	printf("  setattr truncate: RDP_FS_SET_INFO "
+		"FileEndOfFileInformation EndOfFile==0 ok\n");
+}
+
+/* Open `node` with the given open(2) flags; the held handle already covers
+ * the access so the reuse fast-path replies immediately and emits no
+ * FS_REQ.  Asserts the open_out fh matches the node. */
+static void
+open_reuse(struct fuse_drive *fd, uint64_t node, uint32_t oflags,
+		uint64_t unique)
+{
+	uint8_t buf[256];
+	struct fuse_open_in oi;
+	struct fuse_out_header oh;
+	struct fuse_open_out oo;
+	size_t len, rlen;
+	const uint8_t *r;
+
+	memset(&oi, 0, sizeof oi);
+	oi.flags = oflags;
+	fuse_drive_test_reset();
+	len = build_in(buf, FUSE_OPEN, unique, node, &oi, sizeof oi);
+	fuse_drive_test_dispatch(fd, buf, len);
+	if (fuse_drive_test_have_req())
+		FAIL("open_reuse: reuse fast-path emitted an FS_REQ");
+	get_out(&oh);
+	if (oh.error != 0)
+		FAIL("open_reuse: error %d", oh.error);
+	r = fuse_drive_test_reply(&rlen);
+	if (rlen != sizeof oh + sizeof oo)
+		FAIL("open_reuse: reply size %zu", rlen);
+	memcpy(&oo, r + sizeof oh, sizeof oo);
+	if (oo.fh != node)
+		FAIL("open_reuse: fh %llu != %llu",
+			(unsigned long long)oo.fh, (unsigned long long)node);
+}
+
+/* Send a FUSE_RELEASE for `node` and return whether it emitted a CLOSE. */
+static int
+release_emits_close(struct fuse_drive *fd, uint64_t node, uint64_t unique)
+{
+	uint8_t buf[256];
+	struct fuse_release_in rl;
+	struct fuse_out_header oh;
+	size_t len;
+
+	memset(&rl, 0, sizeof rl);
+	rl.fh = node;
+	fuse_drive_test_reset();
+	len = build_in(buf, FUSE_RELEASE, unique, node, &rl, sizeof rl);
+	fuse_drive_test_dispatch(fd, buf, len);
+	get_out(&oh);
+	if (oh.error != 0)
+		FAIL("RELEASE error %d", oh.error);
+	return fuse_drive_test_have_req()
+		&& fuse_drive_test_req_op() == RDP_FS_CLOSE;
+}
+
+/*
+ * Open refcount: two opens of the same node share one RDPDR handle, so the
+ * first RELEASE must NOT close it (another fd is still open) and a read on
+ * the surviving fd must still issue an RDP_FS_READ.  The second RELEASE
+ * (last fd) then closes the handle.
+ */
+static void
+test_open_refcount(struct fuse_drive *fd, uint64_t node, uint32_t file_id)
+{
+	uint8_t buf[256];
+	struct fuse_read_in ri;
+	size_t len;
+
+	/* The node is open read-only from lookup_open_file.  Two read opens
+	 * both reuse the held handle, raising open_refs to 2. */
+	open_reuse(fd, node, O_RDONLY, 400);
+	open_reuse(fd, node, O_RDONLY, 401);
+
+	/* First RELEASE drops refs 2 -> 1: the shared handle must survive. */
+	if (release_emits_close(fd, node, 402))
+		FAIL("first RELEASE closed a still-shared handle");
+
+	/* A read on the surviving fd must still reach the client. */
+	memset(&ri, 0, sizeof ri);
+	ri.fh = node;
+	ri.offset = 0;
+	ri.size = 4;
+	fuse_drive_test_reset();
+	len = build_in(buf, FUSE_READ, 403, node, &ri, sizeof ri);
+	fuse_drive_test_dispatch(fd, buf, len);
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_op() != RDP_FS_READ)
+		FAIL("read after first RELEASE did not issue RDP_FS_READ");
+	if (fuse_drive_test_req_file_id() != file_id)
+		FAIL("read after RELEASE file_id 0x%x != 0x%x",
+			fuse_drive_test_req_file_id(), file_id);
+	/* Drain the read so the in-flight slot is freed. */
+	{
+		struct rdp_be_fs_rsp rsp;
+		uint8_t pl[4 + 4] = { 0 };
+		uint32_t rreq = fuse_drive_test_req_id();
+		put32le(pl, 4);
+		memset(&rsp, 0, sizeof rsp);
+		rsp.req_id = rreq;
+		rsp.status = STATUS_SUCCESS;
+		rsp.length = 4;
+		fuse_drive_test_reset();
+		fuse_drive_handle_fs_rsp(fd, &rsp, pl, sizeof pl);
+	}
+
+	/* Second RELEASE drops refs 1 -> 0: now the handle closes. */
+	if (!release_emits_close(fd, node, 404))
+		FAIL("last RELEASE did not close the handle");
+
+	printf("  open refcount: two opens share one handle, first RELEASE "
+		"keeps it (read ok), last RELEASE closes ok\n");
+}
+
+/*
+ * Combined size + time SETATTR.  A single SETATTR carrying both FATTR_SIZE
+ * and FATTR_MTIME must emit BOTH a FileEndOfFileInformation set and then a
+ * FileBasicInformation set, and produce exactly one fuse_attr_out reply.
+ */
+static void
+test_setattr_size_and_time(struct fuse_drive *fd, uint64_t node)
+{
+	uint8_t buf[256];
+	struct fuse_setattr_in si;
+	size_t len, plen;
+	const uint8_t *pl;
+	uint32_t eof_req, basic_req, std_req;
+
+	memset(&si, 0, sizeof si);
+	si.valid = FATTR_SIZE | FATTR_MTIME;
+	si.size = 1234;
+	si.mtime = MTIME_UNIX_SEC;
+	si.mtimensec = 0;
+	fuse_drive_test_reset();
+	len = build_in(buf, FUSE_SETATTR, 230, node, &si, sizeof si);
+	fuse_drive_test_dispatch(fd, buf, len);
+
+	/* Step 1: the EOF set goes first, tagged so its reply finishes the op. */
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_op() != RDP_FS_SET_INFO)
+		FAIL("combined SETATTR did not emit a SET_INFO first");
+	if (fuse_drive_test_req_info_class() != IC_FILE_EOF)
+		FAIL("combined SETATTR first set 0x%x not EOF",
+			fuse_drive_test_req_info_class());
+	pl = fuse_drive_test_req_payload(&plen);
+	if (plen != 8)
+		FAIL("combined SETATTR EOF SetBuffer %zu != 8", plen);
+	{
+		uint64_t eof = 0;
+		int i;
+		for (i = 0; i < 8; i++)
+			eof |= (uint64_t)pl[i] << (i * 8);
+		if (eof != 1234)
+			FAIL("combined SETATTR EndOfFile %llu != 1234",
+				(unsigned long long)eof);
+	}
+	eof_req = fuse_drive_test_req_id();
+
+	/* Step 2: completing the EOF set must emit the FileBasicInformation
+	 * set carrying the requested LastWriteTime, NOT a re-query yet. */
+	{
+		uint8_t rsp_pl[5];
+		put32le(rsp_pl, 0);
+		rsp_pl[4] = 0;
+		feed_rsp(fd, eof_req, STATUS_SUCCESS, 0, 0, rsp_pl, sizeof rsp_pl);
+	}
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_op() != RDP_FS_SET_INFO)
+		FAIL("combined SETATTR EOF completion did not emit the time set");
+	if (fuse_drive_test_req_info_class() != IC_FILE_BASIC)
+		FAIL("combined SETATTR second set 0x%x not Basic",
+			fuse_drive_test_req_info_class());
+	pl = fuse_drive_test_req_payload(&plen);
+	if (plen != 36)
+		FAIL("combined SETATTR Basic SetBuffer %zu != 36", plen);
+	{
+		uint64_t lwt = 0;
+		int i;
+		for (i = 0; i < 8; i++)
+			lwt |= (uint64_t)pl[16 + i] << (i * 8);
+		if (lwt != MTIME_FILETIME)
+			FAIL("combined SETATTR LastWriteTime %llu != %llu",
+				(unsigned long long)lwt,
+				(unsigned long long)MTIME_FILETIME);
+	}
+	basic_req = fuse_drive_test_req_id();
+
+	/* Step 3: completing the time set must run the single re-query
+	 * (Standard) whose chain produces the one fuse reply. */
+	{
+		uint8_t rsp_pl[5];
+		put32le(rsp_pl, 0);
+		rsp_pl[4] = 0;
+		feed_rsp(fd, basic_req, STATUS_SUCCESS, 0, 0, rsp_pl, sizeof rsp_pl);
+	}
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_op() != RDP_FS_QUERY_INFO
+	    || fuse_drive_test_req_info_class() != IC_FILE_STANDARD)
+		FAIL("combined SETATTR did not re-query after the time set");
+	std_req = fuse_drive_test_req_id();
+
+	/* Drive the re-query chain to the single fuse_attr_out reply. */
+	{
+		uint8_t std[4 + 24];
+		uint8_t basic[4 + 36];
+		uint32_t bq;
+		struct fuse_out_header oh;
+		struct fuse_attr_out ao;
+		size_t rlen;
+		const uint8_t *r;
+
+		memset(std, 0, sizeof std);
+		put32le(std, 24);
+		put64le(std + 4 + 8, 1234);
+		feed_rsp(fd, std_req, STATUS_SUCCESS, 0, 0, std, sizeof std);
+		if (!fuse_drive_test_have_req()
+		    || fuse_drive_test_req_info_class() != IC_FILE_BASIC)
+			FAIL("combined SETATTR re-query did not chain to Basic");
+		bq = fuse_drive_test_req_id();
+
+		memset(basic, 0, sizeof basic);
+		put32le(basic, 36);
+		put64le(basic + 4 + 16, MTIME_FILETIME);
+		feed_rsp(fd, bq, STATUS_SUCCESS, 0, 0, basic, sizeof basic);
+
+		get_out(&oh);
+		if (oh.error != 0)
+			FAIL("combined SETATTR final reply error %d", oh.error);
+		if (oh.unique != 230)
+			FAIL("combined SETATTR reply unique %llu",
+				(unsigned long long)oh.unique);
+		r = fuse_drive_test_reply(&rlen);
+		if (rlen != sizeof oh + sizeof ao)
+			FAIL("combined SETATTR reply size %zu (not one attr_out)",
+				rlen);
+		memcpy(&ao, r + sizeof oh, sizeof ao);
+		if (ao.attr.size != 1234)
+			FAIL("combined SETATTR reply size %llu != 1234",
+				(unsigned long long)ao.attr.size);
+		if (ao.attr.mtime != MTIME_UNIX_SEC)
+			FAIL("combined SETATTR reply mtime %llu != %llu",
+				(unsigned long long)ao.attr.mtime,
+				(unsigned long long)MTIME_UNIX_SEC);
+	}
+	printf("  setattr size+time: EOF set then Basic set, single "
+		"attr_out reply (size 1234, mtime) ok\n");
+}
+
+/*
+ * Bounds: truncated FileStandardInformation (<24) and FileBasicInformation
+ * (<36) FSCC buffers, and a FUSE_WRITE claiming more data than present,
+ * must not over-read (ASan/UBSan fails the run on any OOB).  The getattr
+ * chain must still produce a well-formed reply with the fallback attr.
+ */
+static void
+test_bounds_meta(struct fuse_drive *fd)
+{
+	uint8_t buf[256];
+	struct fuse_out_header oh;
+	uint64_t node;
+	uint32_t open_req, std_req, basic_req;
+
+	/* LOOKUP a fresh file; drive OPEN then feed SHORT Standard/Basic. */
+	fuse_drive_test_reset();
+	{
+		const char *nm = "short.bin";
+		size_t len = build_in(buf, FUSE_LOOKUP, 300, DRIVE_C_NODE,
+			nm, strlen(nm) + 1);
+		fuse_drive_test_dispatch(fd, buf, len);
+	}
+	open_req = fuse_drive_test_req_id();
+	feed_rsp(fd, open_req, STATUS_SUCCESS, 0x301, 0, NULL, 0);
+	if (fuse_drive_test_req_info_class() != IC_FILE_STANDARD)
+		FAIL("bounds_meta: OPEN did not emit Standard query");
+	std_req = fuse_drive_test_req_id();
+
+	/* Truncated FileStandardInformation: Length claims 24 but only 10
+	 * bytes follow.  The decode must clamp and still chain to Basic. */
+	{
+		uint8_t pl[4 + 10];
+		memset(pl, 0xAB, sizeof pl);
+		put32le(pl, 24);   /* over-claims the inner buffer */
+		feed_rsp(fd, std_req, STATUS_SUCCESS, 0, 0, pl, sizeof pl);
+	}
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_info_class() != IC_FILE_BASIC)
+		FAIL("bounds_meta: short Standard did not chain to Basic");
+	basic_req = fuse_drive_test_req_id();
+
+	/* Truncated FileBasicInformation: Length claims 36 but only 12 bytes
+	 * follow.  The decode must clamp and still produce the final reply. */
+	{
+		uint8_t pl[4 + 12];
+		memset(pl, 0xCD, sizeof pl);
+		put32le(pl, 36);   /* over-claims the inner buffer */
+		feed_rsp(fd, basic_req, STATUS_SUCCESS, 0, 0, pl, sizeof pl);
+	}
+	get_out(&oh);   /* well-formed entry reply, no crash */
+	if (oh.error != 0)
+		FAIL("bounds_meta: short Basic reply error %d", oh.error);
+
+	/* Read the assigned nodeid from the entry to drive the over-claimed
+	 * write against an open, writable handle. */
+	{
+		struct fuse_entry_out eo;
+		size_t rlen;
+		const uint8_t *r = fuse_drive_test_reply(&rlen);
+		if (rlen != sizeof oh + sizeof eo)
+			FAIL("bounds_meta: entry size %zu", rlen);
+		memcpy(&eo, r + sizeof oh, sizeof eo);
+		node = eo.nodeid;
+	}
+
+	/* Upgrade the handle to write access so the write is accepted. */
+	{
+		struct fuse_open_in oi;
+		size_t len;
+		uint32_t req;
+		memset(&oi, 0, sizeof oi);
+		oi.flags = O_WRONLY;
+		fuse_drive_test_reset();
+		len = build_in(buf, FUSE_OPEN, 310, node, &oi, sizeof oi);
+		fuse_drive_test_dispatch(fd, buf, len);
+		req = fuse_drive_test_req_id();
+		feed_rsp(fd, req, STATUS_SUCCESS, 0x302, 0, NULL, 0);
+		get_out(&oh);
+	}
+
+	/* FUSE_WRITE whose declared size exceeds the bytes actually present
+	 * in the request body.  The handler must clamp size to the available
+	 * trailing bytes and never over-read. */
+	{
+		struct fuse_write_in wi;
+		size_t hdr = sizeof(struct fuse_in_header);
+		size_t total;
+		size_t plen;
+		const uint8_t *pl;
+		memset(&wi, 0, sizeof wi);
+		wi.fh = node;
+		wi.offset = 0;
+		wi.size = 0x10000;   /* claims 64 KiB */
+		(void)build_in(buf, FUSE_WRITE, 320, node, &wi, sizeof wi);
+		/* Only 3 real data bytes follow the fuse_write_in. */
+		buf[hdr + sizeof wi + 0] = 0x11;
+		buf[hdr + sizeof wi + 1] = 0x22;
+		buf[hdr + sizeof wi + 2] = 0x33;
+		total = hdr + sizeof wi + 3;
+		{
+			struct fuse_in_header ih;
+			memcpy(&ih, buf, sizeof ih);
+			ih.len = (uint32_t)total;
+			memcpy(buf, &ih, sizeof ih);
+		}
+		fuse_drive_test_reset();
+		fuse_drive_test_dispatch(fd, buf, total);
+		if (!fuse_drive_test_have_req()
+		    || fuse_drive_test_req_op() != RDP_FS_WRITE)
+			FAIL("bounds_meta: over-claimed WRITE no FS_REQ");
+		pl = fuse_drive_test_req_payload(&plen);
+		if (plen != 3)
+			FAIL("bounds_meta: WRITE not clamped to 3 bytes (%zu)",
+				plen);
+		(void)pl;
+	}
+	printf("  bounds_meta: short Standard/Basic + over-claimed WRITE "
+		"clamped, no over-read ok\n");
+}
+
 int
 main(void)
 {
 	struct fuse_drive *fd = fuse_drive_test_new();
-	uint64_t child;
+	uint64_t child, wnode, rnode;
 	uint32_t lookup_req;
 
 	if (fd == NULL)
@@ -747,6 +1434,20 @@ main(void)
 	test_bounds(fd);
 	test_relookup_open(fd, child);
 	test_batch_forget(fd, child);
+
+	/* Stage 4: real metadata getattr chain (covered above via the LOOKUP
+	 * tests), plus the write path and setattr. */
+	wnode = lookup_open_file(fd, "w.bin", 0x100, 90);
+	test_open_wronly(fd, wnode, 0x101);
+	test_write(fd, wnode, 0x101);
+	test_setattr_truncate(fd, wnode);
+	test_setattr_size_and_time(fd, wnode);
+	test_bounds_meta(fd);
+
+	/* Open refcount: a dedicated node opened twice via the reuse
+	 * fast-path (read-only handle held from the LOOKUP getattr chain). */
+	rnode = lookup_open_file(fd, "shared.bin", 0x200, 91);
+	test_open_refcount(fd, rnode, 0x200);
 
 	fuse_drive_free(fd);
 	printf("fuse_drive_test: all ok\n");
