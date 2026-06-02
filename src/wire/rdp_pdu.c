@@ -33,6 +33,7 @@
 #include "rdp_pdu.h"
 
 #include "../common/buf.h"
+#include "../common/utf16.h"
 
 #include <string.h>
 
@@ -291,5 +292,62 @@ rdp_pdu_build_save_session_logon(uint8_t *out, size_t cap,
 	if (rdp_buf_put_u32le(&b, RDP_INFOTYPE_LOGON_PLAINNOTIFY) != 0)
 		return -1;
 	if (rdp_buf_put(&b, pad, sizeof pad) != 0) return -1;
+	return total;
+}
+
+/* TS_LOGON_INFO_VERSION_2 (MS-RDPBCGR 2.2.10.1.1.2): the logon
+ * notification carrying the session id, domain, and user name.  The
+ * fixed header (Version + Size + SessionId + cbDomain + cbUserName)
+ * is 18 bytes, followed by a 558-byte reserved pad, then the variable
+ * length Domain and UserName UTF-16LE strings (each null-terminated;
+ * cbDomain/cbUserName count those bytes including the terminator).
+ * The client caps Domain at 52 and UserName at 512 bytes, so the
+ * payloads are clamped to 50 and 510 to leave room for the NUL. */
+ssize_t
+rdp_pdu_build_save_session_logon_v2(uint8_t *out, size_t cap,
+		uint16_t pdu_source, uint32_t share_id,
+		const char *domain, const char *username, uint32_t session_id)
+{
+	uint8_t dom16[52], usr16[512], pad[558];
+	size_t dw, uw;
+	uint32_t cb_domain, cb_username;
+	uint16_t total;
+	ssize_t r;
+	struct rdp_buf b;
+
+	if (domain == NULL) domain = "";
+	if (username == NULL) username = "";
+
+	dw = rdp_utf8_to_utf16le(dom16, sizeof dom16 - 2, domain, strlen(domain));
+	if (dw == (size_t)-1 || dw > sizeof dom16 - 2)
+		dw = sizeof dom16 - 2;   /* malformed or truncated: clamp */
+	dw &= ~(size_t)1;                /* keep whole UTF-16 units */
+	dom16[dw] = 0; dom16[dw + 1] = 0;
+	cb_domain = (uint32_t)(dw + 2);
+
+	uw = rdp_utf8_to_utf16le(usr16, sizeof usr16 - 2, username, strlen(username));
+	if (uw == (size_t)-1 || uw > sizeof usr16 - 2)
+		uw = sizeof usr16 - 2;
+	uw &= ~(size_t)1;
+	usr16[uw] = 0; usr16[uw + 1] = 0;
+	cb_username = (uint32_t)(uw + 2);
+
+	total = (uint16_t)(18 + 4 + 18 + 558 + cb_domain + cb_username);
+	if (cap < total) return -1;
+	memset(pad, 0, sizeof pad);
+
+	r = rdp_pdu_build_share_data(out, cap, pdu_source, share_id,
+		RDP_PDU2_SAVE_SESSION_INFO, total);
+	if (r < 0) return -1;
+	rdp_buf_init(&b, out + r, cap - (size_t)r);
+	if (rdp_buf_put_u32le(&b, RDP_INFOTYPE_LOGON_LONG) != 0) return -1;
+	if (rdp_buf_put_u16le(&b, 1) != 0) return -1;        /* Version */
+	if (rdp_buf_put_u32le(&b, 576) != 0) return -1;      /* Size */
+	if (rdp_buf_put_u32le(&b, session_id) != 0) return -1;
+	if (rdp_buf_put_u32le(&b, cb_domain) != 0) return -1;
+	if (rdp_buf_put_u32le(&b, cb_username) != 0) return -1;
+	if (rdp_buf_put(&b, pad, sizeof pad) != 0) return -1;
+	if (rdp_buf_put(&b, dom16, cb_domain) != 0) return -1;
+	if (rdp_buf_put(&b, usr16, cb_username) != 0) return -1;
 	return total;
 }

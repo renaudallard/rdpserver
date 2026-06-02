@@ -2647,10 +2647,10 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 					if (en > 0)
 						(void)send_send_data(t, user_id,
 							io_channel, ei, (size_t)en);
-					uint8_t li[700];
-					ssize_t ln = rdp_pdu_build_save_session_logon(
+					uint8_t li[1200];
+					ssize_t ln = rdp_pdu_build_save_session_logon_v2(
 						li, sizeof li, user_id,
-						RDP_CONN_SHARE_ID);
+						RDP_CONN_SHARE_ID, "", nla_user, 0);
 					if (ln > 0)
 						(void)send_send_data(t, user_id,
 							io_channel, li, (size_t)ln);
@@ -2721,6 +2721,17 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 						rdp_sessmgr_close(&sm);
 						rdp_info("conn[%s]: backend fd %d",
 							peer, be_fd);
+						{
+							uint8_t li[1200];
+							ssize_t ln = rdp_pdu_build_save_session_logon_v2(
+								li, sizeof li, user_id,
+								RDP_CONN_SHARE_ID,
+								"", tok_user, 0);
+							if (ln > 0)
+								(void)send_send_data(t,
+									user_id, io_channel,
+									li, (size_t)ln);
+						}
 						run_proxy(t, be_fd, &clip,
 							&dynvc, &snd, &devr,
 							user_id, io_channel,
@@ -2768,6 +2779,17 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 				rdp_sessmgr_close(&sm);
 				rdp_info("conn[%s]: backend fd %d",
 					peer, be_fd);
+				{
+					uint8_t li[1200];
+					ssize_t ln = rdp_pdu_build_save_session_logon_v2(
+						li, sizeof li, user_id,
+						RDP_CONN_SHARE_ID,
+						client_info.domain,
+						client_info.username, 0);
+					if (ln > 0)
+						(void)send_send_data(t, user_id,
+							io_channel, li, (size_t)ln);
+				}
 				run_proxy(t, be_fd, &clip, &dynvc, &snd,
 					&devr, user_id, io_channel,
 					desktop_w, desktop_h,
@@ -2832,6 +2854,16 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 				if (sn > 0)
 					(void)send_send_data(t, user_id,
 						io_channel, ssi, (size_t)sn);
+			}
+			{
+				uint8_t li[1200];
+				ssize_t ln = rdp_pdu_build_save_session_logon_v2(
+					li, sizeof li, user_id,
+					RDP_CONN_SHARE_ID,
+					"", gr.username, logon_id);
+				if (ln > 0)
+					(void)send_send_data(t, user_id,
+						io_channel, li, (size_t)ln);
 			}
 
 			rdp_info("conn[%s]: backend fd %d (cliprdr=%s)",

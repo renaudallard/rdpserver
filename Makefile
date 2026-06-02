@@ -91,7 +91,8 @@ REGRESS_PROGS = \
 	regress/wire/tpkt_test \
 	regress/wire/x224_test \
 	regress/wire/mcs_test \
-	regress/wire/capset_test
+	regress/wire/capset_test \
+	regress/wire/rdp_pdu_test
 
 FUZZ_PROG = regress/fuzz/fuzz_parsers
 
@@ -194,6 +195,9 @@ regress/wire/mcs_test: regress/wire/mcs_test.o $(WIRE_LIB) $(COMMON_LIB)
 
 regress/wire/capset_test: regress/wire/capset_test.o $(WIRE_LIB) $(COMMON_LIB)
 	$(CC) $(LDFLAGS) -o $@ regress/wire/capset_test.o $(WIRE_LIB) $(COMMON_LIB)
+
+regress/wire/rdp_pdu_test: regress/wire/rdp_pdu_test.o $(WIRE_LIB) $(COMMON_LIB)
+	$(CC) $(LDFLAGS) -o $@ regress/wire/rdp_pdu_test.o $(WIRE_LIB) $(COMMON_LIB)
 
 regress/fuzz/fuzz_parsers: regress/fuzz/fuzz_parsers.o \
 		$(WIRE_LIB) $(CHANNELS_LIB) $(SEC_LIB) $(COMMON_LIB)

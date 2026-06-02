@@ -167,4 +167,12 @@ ssize_t rdp_pdu_build_set_error_info(uint8_t *out, size_t cap,
 ssize_t rdp_pdu_build_save_session_logon(uint8_t *out, size_t cap,
 		uint16_t pdu_source, uint32_t share_id);
 
+/* TS_LOGON_INFO_VERSION_2 logon notification (session id, domain, and
+ * user name).  Domain/username are UTF-16LE encoded into the variable
+ * length fields; the client caps them at 52 and 512 bytes so longer
+ * inputs are clamped. */
+ssize_t rdp_pdu_build_save_session_logon_v2(uint8_t *out, size_t cap,
+		uint16_t pdu_source, uint32_t share_id,
+		const char *domain, const char *username, uint32_t session_id);
+
 #endif /* RDP_PDU_H */
