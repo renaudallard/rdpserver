@@ -1894,6 +1894,7 @@ fd_complete_open(struct fuse_drive *fd, struct fd_inflight *f, uint32_t status,
 		uint32_t file_id)
 {
 	struct fd_node *n = fd_node_find(fd, f->nodeid);
+	uint64_t unique = f->fuse_unique;
 
 	if (n == NULL) {
 		fd_reply_error(fd, f->fuse_unique, -ENOENT);
@@ -1966,18 +1967,21 @@ fd_complete_open(struct fuse_drive *fd, struct fd_inflight *f, uint32_t status,
 		break;
 	case RDP_FS_MKNOD_TAG:
 		/* MKNOD: the file is created; we do not keep the handle, so
-		 * close it and reply the entry only. */
+		 * close it and reply the entry only.  fd_send_close recycles the
+		 * just-freed inflight f, so reply from the saved unique not
+		 * f->fuse_unique. */
 		n->nlookup++;
 		fd_send_close(fd, n);
-		fd_reply_entry(fd, f->fuse_unique, n);
+		fd_reply_entry(fd, unique, n);
 		break;
 	case RDP_FS_MKDIR_TAG:
 		/* MKDIR: the directory is created; close the handle and reply the
-		 * entry (the node is a dir, so fd_node_to_attr reports S_IFDIR). */
+		 * entry (the node is a dir, so fd_node_to_attr reports S_IFDIR).
+		 * Reply from the saved unique since fd_send_close recycles f. */
 		n->is_dir = 1;
 		n->nlookup++;
 		fd_send_close(fd, n);
-		fd_reply_entry(fd, f->fuse_unique, n);
+		fd_reply_entry(fd, unique, n);
 		break;
 	default:
 		fd_reply_error(fd, f->fuse_unique, -EIO);

@@ -134,16 +134,29 @@ A rename is only honoured when the source and destination are on the
 same redirected drive; a cross-drive rename returns
 .Er EXDEV
 so the kernel falls back to a copy plus delete.
+.Pp
+On OpenBSD the same file system is presented through the kernel's own
+.Pa fusebuf
+protocol on
+.Pa /dev/fuse
+(messages correlated by a uuid, native
+.Vt struct stat
+attributes and native directory records) over the same
+protocol-agnostic core, so the identical read and write operations are
+supported.
+This OpenBSD backend is experimental and currently validated only at the
+protocol level, not yet against a live mount.
 If
 .Pa /dev/fuse
-is unavailable, the kernel is too old, or the host is not Linux, the
-session simply runs without the mount and drive operations remain
-reachable only through the backend protocol.
+is unavailable, the kernel is too old, or the host is neither Linux nor
+OpenBSD, the session simply runs without the mount and drive operations
+remain reachable only through the backend protocol.
 The mount is removed when the session process exits.
 .Sh FILES
 .Bl -tag -width Ds
 .It Pa ~/RemoteDrive
-Mount point for redirected client drives (Linux, read-write).
+Mount point for redirected client drives (Linux, read-write; OpenBSD
+read-write but experimental).
 .El
 .Sh SEE ALSO
 .Xr rdpd 8 ,

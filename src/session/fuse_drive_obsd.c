@@ -27,7 +27,7 @@
  * POSSIBILITY OF SUCH DAMAGES.
  *
  * fuse_drive_obsd.c -- OpenBSD fusebuf wire backend for the RDPDR drive
- * redirection core (read path).
+ * redirection core (read and write paths).
  *
  * This is the only file that includes <sys/fusebuf.h>.  It owns the OpenBSD
  * kernel wire format: recv parses one struct fusebuf (a 56-byte fb_hdr, a
@@ -303,7 +303,11 @@ obsd_emit_open(struct fuse_drive *fd, uint64_t unique, uint64_t fh,
 	fd_obsd_slot_free(s);
 }
 
-/* CREATE is a write-path op (Stage 6c); never reached on the read path. */
+/*
+ * CREATE has no fusebuf opcode: the OpenBSD kernel maps fusefs_create onto
+ * FBT_MKNOD, which the core serves through emit_entry, so this emitter is
+ * never reached.  Reply ENOSYS defensively in case a future kernel adds one.
+ */
 static void
 obsd_emit_create(struct fuse_drive *fd, uint64_t unique, uint64_t nodeid,
 		uint64_t fh, const struct fd_attr *a)
@@ -346,20 +350,24 @@ obsd_emit_read(struct fuse_drive *fd, uint64_t unique, const uint8_t *data,
 	fd_obsd_slot_free(s);
 }
 
-/* WRITE is a write-path op (Stage 6c); never reached on the read path. */
+/*
+ * Reply WRITE.  The kernel reads the byte count back from the reply's
+ * fb_io_len (the FD union), not from fb_len: fusefs_write computes
+ * diff = len - fbuf->fb_io_len.  So the count goes in fb_io_len with fb_len 0
+ * and fb_err 0, and the reply is a single header-only write (no fb_dat).
+ */
 static void
 obsd_emit_write(struct fuse_drive *fd, uint64_t unique, uint32_t count)
 {
 	struct fd_obsd_slot *s = fd_obsd_slot_find(unique);
+	uint8_t hdr[FD_FB_HDRLEN];
+	struct fusebuf *fb = (struct fusebuf *)hdr;
 
-	(void)count;
 	if (s == NULL)
 		return;
-	{
-		uint8_t hdr[FD_FB_HDRLEN];
-		fd_obsd_build_hdr(hdr, s, ENOSYS, 0);
-		fd_obsd_write_reply(fd, hdr, NULL, 0);
-	}
+	fd_obsd_build_hdr(hdr, s, 0, 0);
+	fb->fb_io_len = (size_t)count;   /* bytes written, read via fb_io_len */
+	fd_obsd_write_reply(fd, hdr, NULL, 0);
 	fd_obsd_slot_free(s);
 }
 
@@ -521,6 +529,74 @@ fd_obsd_reply_statfs(struct fuse_drive *fd, const struct fusebuf *req)
 }
 
 /*
+ * Pull one NUL-terminated leaf name out of the fb_dat blob at offset off.
+ * The kernel appends a single NUL-terminated component for MKNOD/MKDIR/UNLINK/
+ * RMDIR, and two back to back for RENAME, so this is called once per name.
+ * Returns a pointer to the name and its length via *name_len, or NULL on a
+ * malformed (unterminated or empty/over-long) body.  Every read is bounded
+ * against data_len so there is no over-read.
+ */
+static const char *
+fd_obsd_name_field(const uint8_t *data, size_t data_len, size_t off,
+		size_t *name_len)
+{
+	const char *name;
+	size_t avail, namelen;
+
+	if (off >= data_len)
+		return NULL;
+	name = (const char *)(data + off);
+	avail = data_len - off;
+	namelen = strnlen(name, avail);
+	if (namelen == avail)
+		return NULL;   /* no terminating NUL inside the body */
+	if (namelen == 0 || namelen > FD_NAME_MAX)
+		return NULL;
+	*name_len = namelen;
+	return name;
+}
+
+/*
+ * Resolve a SETATTR request into the OS neutral fattr_valid mask and the
+ * requested size/time fields.  The new values travel in the request's
+ * fb_attr (a struct stat in the FD union); fb_dat is a struct fb_io whose
+ * fi_flags is the FUSE_FATTR_* mask telling which fields are being set.  The
+ * fb_io is read through the host struct so its layout is never hardcoded.
+ * Mode/uid/gid changes have no RDPDR representation and are ignored; the
+ * core then replies a fresh attr.  Returns 0 on success, or -1 if fb_dat is
+ * too short to carry the fb_io mask.
+ */
+static int
+fd_obsd_parse_setattr(const struct fusebuf *fb, const uint8_t *data,
+		size_t data_len, struct fd_request *req)
+{
+	struct fb_io io;
+
+	if (data_len < sizeof io)
+		return -1;
+	memcpy(&io, data, sizeof io);
+
+	req->fattr_valid = 0;
+	if (io.fi_flags & FUSE_FATTR_SIZE) {
+		req->fattr_valid |= FD_FATTR_SIZE;
+		req->set_size = (uint64_t)fb->fb_attr.st_size;
+	}
+	if (io.fi_flags & FUSE_FATTR_ATIME) {
+		req->fattr_valid |= FD_FATTR_ATIME;
+		req->set_atime = (uint64_t)fb->fb_attr.st_atim.tv_sec;
+		req->set_atimensec = 0;
+	}
+	if (io.fi_flags & FUSE_FATTR_MTIME) {
+		req->fattr_valid |= FD_FATTR_MTIME;
+		req->set_mtime = (uint64_t)fb->fb_attr.st_mtim.tv_sec;
+		req->set_mtimensec = 0;
+	}
+	/* MODE/UID/GID/FH carry no RDPDR meaning; the core replies a fresh
+	 * attr for those so the kernel sees current state. */
+	return 0;
+}
+
+/*
  * Parse one fully framed fusebuf request (raw points at the hdr+FD region,
  * len is the total bytes received, so the data is at raw + FD_FB_HDRLEN with
  * length len - FD_FB_HDRLEN) into *req.  Returns 1 when the core should
@@ -632,9 +708,83 @@ obsd_recv(struct fuse_drive *fd, const uint8_t *raw, size_t len,
 		req->op = FD_OP_RELEASEDIR;
 		req->fh = fb.fb_io_fd;
 		return 1;
+	case FBT_WRITE:
+		/* fb_io carries the handle, offset and length; fb_dat is the
+		 * data (fb_len bytes).  Never read past the bytes received. */
+		req->op = FD_OP_WRITE;
+		req->fh = fb.fb_io_fd;
+		req->offset = (uint64_t)fb.fb_io_off;
+		req->data = data;
+		req->data_len = (uint32_t)data_len;
+		return 1;
+	case FBT_SETATTR:
+		req->op = FD_OP_SETATTR;
+		if (fd_obsd_parse_setattr(&fb, data, data_len, req) != 0) {
+			obsd_emit_error(fd, fb.fb_uuid, EINVAL);
+			return 0;
+		}
+		return 1;
+	case FBT_MKNOD:
+	case FBT_MKDIR: {
+		/* fb_ino is the parent, fb_io_mode the mode, fb_dat the NUL
+		 * terminated child name (fb_len counts the NUL). */
+		size_t namelen;
+		const char *name = fd_obsd_name_field(data, data_len, 0,
+			&namelen);
+		if (name == NULL) {
+			obsd_emit_error(fd, fb.fb_uuid, EINVAL);
+			return 0;
+		}
+		req->op = type == FBT_MKDIR ? FD_OP_MKDIR : FD_OP_MKNOD;
+		req->mode = (uint32_t)fb.fb_io_mode;
+		req->name = name;
+		req->name_len = namelen;
+		return 1;
+	}
+	case FBT_UNLINK:
+	case FBT_RMDIR: {
+		/* fb_ino is the parent, fb_dat the NUL terminated name. */
+		size_t namelen;
+		const char *name = fd_obsd_name_field(data, data_len, 0,
+			&namelen);
+		if (name == NULL) {
+			obsd_emit_error(fd, fb.fb_uuid, EINVAL);
+			return 0;
+		}
+		req->op = type == FBT_RMDIR ? FD_OP_RMDIR : FD_OP_UNLINK;
+		req->name = name;
+		req->name_len = namelen;
+		return 1;
+	}
+	case FBT_RENAME: {
+		/* fb_ino is the source parent; fb_dat is oldname '\0' newname
+		 * '\0'; fb_io_ino is the destination parent.  Both names are
+		 * bounded against fb_len so a missing second NUL is rejected. */
+		size_t oldlen, newlen;
+		const char *oldname = fd_obsd_name_field(data, data_len, 0,
+			&oldlen);
+		const char *newname;
+		if (oldname == NULL) {
+			obsd_emit_error(fd, fb.fb_uuid, EINVAL);
+			return 0;
+		}
+		newname = fd_obsd_name_field(data, data_len, oldlen + 1,
+			&newlen);
+		if (newname == NULL) {
+			obsd_emit_error(fd, fb.fb_uuid, EINVAL);
+			return 0;
+		}
+		req->op = FD_OP_RENAME;
+		req->newdir = (uint64_t)fb.fb_io_ino;
+		req->name = oldname;
+		req->name_len = oldlen;
+		req->name2 = newname;
+		req->name2_len = newlen;
+		return 1;
+	}
 	default:
-		/* Write/namespace ops arrive in Stage 6c; reject for now so the
-		 * kernel sees a clean error rather than a hang. */
+		/* READLINK / SYMLINK / LINK and any unknown op have no RDPDR
+		 * representation; reject so the kernel sees a clean error. */
 		obsd_emit_error(fd, fb.fb_uuid, ENOSYS);
 		return 0;
 	}

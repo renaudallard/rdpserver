@@ -229,7 +229,7 @@ regress/wire/fuse_drive_test: regress/wire/fuse_drive_test.c \
 		src/session/fuse_drive.c src/session/fuse_drive_linux.c \
 		src/common/io.c src/common/log.c
 
-# Drive read-path fusebuf protocol test (OpenBSD).  The core (fuse_drive.c)
+# Drive read and write fusebuf protocol test (OpenBSD).  The core (fuse_drive.c)
 # and the OpenBSD fusebuf backend (fuse_drive_obsd.c) are recompiled together
 # with -DRDP_FUSE_TEST so the dispatch is callable on in-memory buffers, the
 # same way the Linux test works.  The OpenBSD toolchain ships no ASan/UBSan

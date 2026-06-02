@@ -84,7 +84,18 @@ uint64_t fuse_drive_test_find_child(struct fuse_drive *, uint64_t,
 /* FSCC info-class and FileAttributes constants used by the metadata tests. */
 #define IC_FILE_BASIC      0x00000004u
 #define IC_FILE_STANDARD   0x00000005u
+#define IC_FILE_RENAME     0x0000000Au
+#define IC_FILE_DISP       0x0000000Du
+#define IC_FILE_EOF        0x00000014u
 #define FATTR_DIRECTORY    0x00000010u
+
+/* CreateDisposition / CreateOptions / DesiredAccess mirrored from rdpdr.h for
+ * the namespace-op assertions. */
+#define DISP_FILE_CREATE    0x00000002u
+#define OPT_DIRECTORY_FILE  0x00000001u
+#define OPT_NON_DIR_FILE    0x00000040u
+#define OPT_DELETE_ON_CLOSE 0x00001000u
+#define ACC_DELETE          0x00010000u
 
 #define FD_ROOTINO         ((uint64_t)1)
 
@@ -134,6 +145,90 @@ build_fb(uint8_t *buf, int type, uint64_t uuid, uint64_t ino,
 	if (data_len > 0)
 		memcpy(buf + FB_HDRLEN, data, data_len);
 	return FB_HDRLEN + data_len;
+}
+
+/*
+ * Build a MKDIR/MKNOD request: fb_ino is the parent, the FD union's fb_io_mode
+ * carries the mode, and fb_dat is the NUL terminated child name.  Returns the
+ * total length.
+ */
+static size_t
+build_fb_mknod(uint8_t *buf, int type, uint64_t uuid, uint64_t parent,
+		mode_t mode, const char *name)
+{
+	struct fusebuf fb;
+	size_t namelen = strlen(name) + 1;   /* include the NUL */
+
+	memset(&fb, 0, sizeof fb);
+	fb.fb_type = type;
+	fb.fb_uuid = uuid;
+	fb.fb_ino = (ino_t)parent;
+	fb.fb_len = namelen;
+	fb.fb_io_mode = mode;
+	memcpy(buf, &fb, FB_HDRLEN);
+	memcpy(buf + FB_HDRLEN, name, namelen);
+	return FB_HDRLEN + namelen;
+}
+
+/*
+ * Build a SETATTR request: fb_ino is the inode, the FD union's fb_attr (struct
+ * stat) carries the new size/atime/mtime, and fb_dat is a struct fb_io whose
+ * fi_flags is the FUSE_FATTR_* valid mask.  Returns the total length.
+ */
+static size_t
+build_fb_setattr(uint8_t *buf, uint64_t uuid, uint64_t ino, uint32_t valid,
+		uint64_t size, uint64_t atime, uint64_t mtime)
+{
+	struct fusebuf fb;
+	struct fb_io io;
+
+	memset(&fb, 0, sizeof fb);
+	fb.fb_type = FBT_SETATTR;
+	fb.fb_uuid = uuid;
+	fb.fb_ino = (ino_t)ino;
+	fb.fb_len = sizeof io;
+	fb.fb_attr.st_size = (off_t)size;
+	fb.fb_attr.st_atim.tv_sec = (time_t)atime;
+	fb.fb_attr.st_mtim.tv_sec = (time_t)mtime;
+	memcpy(buf, &fb, FB_HDRLEN);
+
+	memset(&io, 0, sizeof io);
+	io.fi_flags = valid;
+	memcpy(buf + FB_HDRLEN, &io, sizeof io);
+	return FB_HDRLEN + sizeof io;
+}
+
+/*
+ * Build a RENAME request: fb_ino is the source parent, the FD union's
+ * fb_io_ino is the destination parent, and fb_dat is oldname '\0' newname
+ * '\0'.  When trailing_nul is 0 the second name's NUL is omitted so the
+ * bounds path can be exercised.  Returns the total length.
+ */
+static size_t
+build_fb_rename(uint8_t *buf, uint64_t uuid, uint64_t src_parent,
+		uint64_t dst_parent, const char *oldname, const char *newname,
+		int trailing_nul)
+{
+	struct fusebuf fb;
+	size_t oldn = strlen(oldname);
+	size_t newn = strlen(newname);
+	size_t dlen = oldn + 1 + newn + (trailing_nul ? 1 : 0);
+	uint8_t *d = buf + FB_HDRLEN;
+
+	memset(&fb, 0, sizeof fb);
+	fb.fb_type = FBT_RENAME;
+	fb.fb_uuid = uuid;
+	fb.fb_ino = (ino_t)src_parent;
+	fb.fb_len = dlen;
+	fb.fb_io_ino = (ino_t)dst_parent;
+	memcpy(buf, &fb, FB_HDRLEN);
+
+	memcpy(d, oldname, oldn);
+	d[oldn] = '\0';
+	memcpy(d + oldn + 1, newname, newn);
+	if (trailing_nul)
+		d[oldn + 1 + newn] = '\0';
+	return FB_HDRLEN + dlen;
 }
 
 /* Read the reply header region into *fb and return the data pointer/len. */
@@ -688,6 +783,436 @@ test_bounds(struct fuse_drive *fd)
 		"no over-read ok\n");
 }
 
+/*
+ * Open the looked-up file O_WRONLY so the node carries a write handle, then
+ * FBT_WRITE: assert the FS_REQ is RDP_FS_WRITE with the file_id/offset and the
+ * data payload, feed a canned write completion (Length = N), and assert the
+ * reply puts the count in fb_io_len (not fb_len), with fb_len 0 and exactly
+ * one write_reply call (header-only, no fb_dat).
+ */
+static void
+test_write(struct fuse_drive *fd, uint64_t child_node)
+{
+	uint8_t buf[FB_HDRLEN + 32];
+	struct fusebuf fb;
+	const uint8_t data[5] = { 'h', 'e', 'l', 'l', 'o' };
+	uint8_t pl[4 + 1];
+	size_t len, dlen, plen;
+	const uint8_t *rqpl;
+	uint32_t open_req, write_req;
+	struct rdp_be_fs_rsp rsp;
+
+	/* Upgrade the read-only handle to a write handle (O_WRONLY open).  The
+	 * open flags travel in fb_io_flags, which build_fb does not set, so put
+	 * them in directly through the host struct. */
+	fuse_drive_test_reset();
+	len = build_fb(buf, FBT_OPEN, 0x5000, child_node, 0, 0, 0, NULL, 0);
+	{
+		struct fusebuf t;
+		memcpy(&t, buf, FB_HDRLEN);
+		t.fb_io_flags = O_WRONLY;
+		memcpy(buf, &t, FB_HDRLEN);
+	}
+	fuse_drive_test_dispatch(fd, buf, len);
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_op() != RDP_FS_OPEN)
+		FAIL("O_WRONLY open did not emit an OPEN FS_REQ");
+	open_req = fuse_drive_test_req_id();
+	feed_rsp(fd, open_req, STATUS_SUCCESS, 0x7777, 0, NULL, 0);
+	(void)get_reply(&fb, &dlen);
+	if (fb.fb_err != 0)
+		FAIL("O_WRONLY open reply err %d", fb.fb_err);
+
+	/* FBT_WRITE: handle in fb_io_fd, offset in fb_io_off, length in
+	 * fb_io_len, the data in fb_dat. */
+	fuse_drive_test_reset();
+	len = build_fb(buf, FBT_WRITE, 0x5001, child_node, child_node, 100,
+		sizeof data, data, sizeof data);
+	fuse_drive_test_dispatch(fd, buf, len);
+
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_op() != RDP_FS_WRITE)
+		FAIL("FBT_WRITE did not emit an RDP_FS_WRITE");
+	if (fuse_drive_test_req_file_id() != 0x7777)
+		FAIL("WRITE file_id 0x%x != 0x7777",
+			fuse_drive_test_req_file_id());
+	if (fuse_drive_test_req_offset() != 100)
+		FAIL("WRITE offset %llu != 100",
+			(unsigned long long)fuse_drive_test_req_offset());
+	rqpl = fuse_drive_test_req_payload(&plen);
+	if (plen != sizeof data || memcmp(rqpl, data, sizeof data) != 0)
+		FAIL("WRITE payload (%zu bytes) mismatch", plen);
+	write_req = fuse_drive_test_req_id();
+
+	/* Canned write completion: FSCC Length(u32) = 5, then a Padding byte. */
+	put32le(pl, 5);
+	pl[4] = 0;
+	memset(&rsp, 0, sizeof rsp);
+	rsp.req_id = write_req;
+	rsp.status = STATUS_SUCCESS;
+	rsp.length = 5;
+	fuse_drive_test_reset();
+	fuse_drive_handle_fs_rsp(fd, &rsp, pl, sizeof pl);
+
+	(void)get_reply(&fb, &dlen);
+	if (fb.fb_err != 0)
+		FAIL("WRITE reply err %d", fb.fb_err);
+	if (fb.fb_uuid != 0x5001)
+		FAIL("WRITE uuid %llu", (unsigned long long)fb.fb_uuid);
+	if ((uint64_t)fb.fb_io_len != 5)
+		FAIL("WRITE count in fb_io_len %llu != 5",
+			(unsigned long long)fb.fb_io_len);
+	if (fb.fb_len != 0 || dlen != 0)
+		FAIL("WRITE reply carried a body (fb_len %zu)", (size_t)fb.fb_len);
+	if (fuse_drive_test_reply_writes() != 1)
+		FAIL("WRITE reply used %d writes (must be 1)",
+			fuse_drive_test_reply_writes());
+	printf("  write: RDP_FS_WRITE offset 100 + 5-byte payload, "
+		"count in fb_io_len==5, single header-only reply ok\n");
+}
+
+/*
+ * FBT_SETATTR with FUSE_FATTR_SIZE emits a FileEndOfFileInformation set with
+ * the requested size; a success completion (then the re-query chain) yields an
+ * attr reply.  The node must be write-open, which test_write left it.
+ */
+static void
+test_setattr_truncate(struct fuse_drive *fd, uint64_t child_node)
+{
+	uint8_t buf[FB_HDRLEN + 64];
+	struct fusebuf fb;
+	size_t len, dlen;
+	uint32_t set_req;
+	const uint8_t *pl;
+	size_t plen;
+
+	fuse_drive_test_reset();
+	len = build_fb_setattr(buf, 0x5100, child_node, FUSE_FATTR_SIZE,
+		4096, 0, 0);
+	fuse_drive_test_dispatch(fd, buf, len);
+
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_op() != RDP_FS_SET_INFO)
+		FAIL("SETATTR size did not emit an RDP_FS_SET_INFO");
+	if (fuse_drive_test_req_info_class() != IC_FILE_EOF)
+		FAIL("SETATTR info_class 0x%x != FileEndOfFileInformation",
+			fuse_drive_test_req_info_class());
+	pl = fuse_drive_test_req_payload(&plen);
+	if (plen != 8)
+		FAIL("SETATTR EOF SetBuffer %zu != 8", plen);
+	{
+		uint64_t eof = 0;
+		int i;
+		for (i = 0; i < 8; i++)
+			eof |= (uint64_t)pl[i] << (i * 8);
+		if (eof != 4096)
+			FAIL("SETATTR EndOfFile %llu != 4096",
+				(unsigned long long)eof);
+	}
+	set_req = fuse_drive_test_req_id();
+
+	/* The EOF set completion runs a single FileStandardInformation re-query;
+	 * answer it, then the FileBasicInformation one, to land the attr reply. */
+	feed_rsp(fd, set_req, STATUS_SUCCESS, 0, 0, NULL, 0);
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_op() != RDP_FS_QUERY_INFO
+	    || fuse_drive_test_req_info_class() != IC_FILE_STANDARD)
+		FAIL("SETATTR did not re-query Standard after the EOF set");
+	{
+		uint32_t std_req = fuse_drive_test_req_id();
+		uint8_t std[4 + 24];
+		uint32_t basic_req;
+		uint8_t basic[4 + 36];
+		memset(std, 0, sizeof std);
+		put32le(std, 24);
+		put64le(std + 4 + 8, 4096);   /* EndOfFile reflects the truncate */
+		feed_rsp(fd, std_req, STATUS_SUCCESS, 0, 0, std, sizeof std);
+		if (!fuse_drive_test_have_req()
+		    || fuse_drive_test_req_info_class() != IC_FILE_BASIC)
+			FAIL("SETATTR did not re-query Basic");
+		basic_req = fuse_drive_test_req_id();
+		memset(basic, 0, sizeof basic);
+		put32le(basic, 36);
+		feed_rsp(fd, basic_req, STATUS_SUCCESS, 0, 0, basic, sizeof basic);
+	}
+
+	(void)get_reply(&fb, &dlen);
+	if (fb.fb_err != 0)
+		FAIL("SETATTR reply err %d", fb.fb_err);
+	if (fb.fb_uuid != 0x5100)
+		FAIL("SETATTR uuid %llu", (unsigned long long)fb.fb_uuid);
+	if (dlen != 0)
+		FAIL("SETATTR reply carried a body (%zu)", dlen);
+	if ((uint64_t)fb.fb_attr.st_size != 4096)
+		FAIL("SETATTR reply st_size %llu != 4096",
+			(unsigned long long)fb.fb_attr.st_size);
+	printf("  setattr truncate: RDP_FS_SET_INFO FileEndOfFileInformation "
+		"EndOfFile==4096, attr reply st_size 4096 ok\n");
+}
+
+/*
+ * FBT_MKDIR emits an OPEN with disposition FILE_CREATE and options
+ * FILE_DIRECTORY_FILE; the success completion closes the handle and replies an
+ * entry with S_IFDIR and the new child inode in fb_ino.
+ */
+static void
+test_mkdir(struct fuse_drive *fd)
+{
+	uint8_t buf[FB_HDRLEN + 32];
+	struct fusebuf fb;
+	size_t len, dlen;
+	uint32_t open_req;
+
+	fuse_drive_test_reset();
+	len = build_fb_mknod(buf, FBT_MKDIR, 0x5200, DRIVE_C_NODE,
+		S_IFDIR | 0755, "newdir");
+	fuse_drive_test_dispatch(fd, buf, len);
+
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_op() != RDP_FS_OPEN)
+		FAIL("MKDIR did not emit an OPEN FS_REQ");
+	if (fuse_drive_test_req_disposition() != DISP_FILE_CREATE)
+		FAIL("MKDIR disposition 0x%x != FILE_CREATE",
+			fuse_drive_test_req_disposition());
+	if ((fuse_drive_test_req_options() & OPT_DIRECTORY_FILE) == 0)
+		FAIL("MKDIR options 0x%x lacks FILE_DIRECTORY_FILE",
+			fuse_drive_test_req_options());
+	open_req = fuse_drive_test_req_id();
+
+	/* OPEN(FILE_CREATE) succeeds; the completion closes and replies entry. */
+	feed_rsp(fd, open_req, STATUS_SUCCESS, 0x660, 0, NULL, 0);
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_op() != RDP_FS_CLOSE)
+		FAIL("MKDIR did not close the create handle");
+
+	(void)get_reply(&fb, &dlen);
+	if (fb.fb_err != 0)
+		FAIL("MKDIR reply err %d", fb.fb_err);
+	if (fb.fb_uuid != 0x5200)
+		FAIL("MKDIR uuid %llu", (unsigned long long)fb.fb_uuid);
+	if ((uint64_t)fb.fb_ino == 0 || (uint64_t)fb.fb_ino == FD_ROOTINO)
+		FAIL("MKDIR child ino %llu", (unsigned long long)fb.fb_ino);
+	if ((fb.fb_attr.st_mode & S_IFMT) != S_IFDIR)
+		FAIL("MKDIR attr not S_IFDIR, mode 0%o",
+			(unsigned)fb.fb_attr.st_mode);
+	if ((uint64_t)fb.fb_attr.st_ino != (uint64_t)fb.fb_ino)
+		FAIL("MKDIR stat st_ino %llu != fb_ino %llu",
+			(unsigned long long)fb.fb_attr.st_ino,
+			(unsigned long long)fb.fb_ino);
+	printf("  mkdir newdir: OPEN FILE_CREATE FILE_DIRECTORY_FILE, close, "
+		"reply child ino %llu S_IFDIR ok\n",
+		(unsigned long long)fb.fb_ino);
+}
+
+/*
+ * FBT_UNLINK emits an OPEN(DELETE, FILE_DELETE_ON_CLOSE) then a
+ * SET_INFO(FileDispositionInformation) carrying DeletePending=1, then a CLOSE;
+ * the chain replies fb_err 0.
+ */
+static void
+test_unlink(struct fuse_drive *fd)
+{
+	uint8_t buf[FB_HDRLEN + 32];
+	struct fusebuf fb;
+	size_t len, dlen, plen;
+	const uint8_t *pl;
+	uint32_t open_req, set_req;
+
+	fuse_drive_test_reset();
+	len = build_fb_mknod(buf, FBT_UNLINK, 0x5300, DRIVE_C_NODE, 0,
+		"del.txt");
+	fuse_drive_test_dispatch(fd, buf, len);
+
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_op() != RDP_FS_OPEN)
+		FAIL("UNLINK did not emit an OPEN FS_REQ");
+	if ((fuse_drive_test_req_access() & ACC_DELETE) == 0)
+		FAIL("UNLINK access 0x%x lacks DELETE",
+			fuse_drive_test_req_access());
+	if ((fuse_drive_test_req_options() & OPT_DELETE_ON_CLOSE) == 0)
+		FAIL("UNLINK options 0x%x lacks FILE_DELETE_ON_CLOSE",
+			fuse_drive_test_req_options());
+	if ((fuse_drive_test_req_options() & OPT_NON_DIR_FILE) == 0)
+		FAIL("UNLINK options 0x%x lacks FILE_NON_DIRECTORY_FILE",
+			fuse_drive_test_req_options());
+	open_req = fuse_drive_test_req_id();
+
+	feed_rsp(fd, open_req, STATUS_SUCCESS, 0x670, 0, NULL, 0);
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_op() != RDP_FS_SET_INFO)
+		FAIL("UNLINK did not emit a SET_INFO after the OPEN");
+	if (fuse_drive_test_req_info_class() != IC_FILE_DISP)
+		FAIL("UNLINK set info_class 0x%x != FileDispositionInformation",
+			fuse_drive_test_req_info_class());
+	pl = fuse_drive_test_req_payload(&plen);
+	if (plen != 1 || pl[0] != 1)
+		FAIL("UNLINK disposition SetBuffer (%zu bytes, DeletePending %u)",
+			plen, plen > 0 ? pl[0] : 0);
+	set_req = fuse_drive_test_req_id();
+
+	feed_rsp(fd, set_req, STATUS_SUCCESS, 0, 0, NULL, 0);
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_op() != RDP_FS_CLOSE)
+		FAIL("UNLINK did not close the delete handle");
+	(void)get_reply(&fb, &dlen);
+	if (fb.fb_err != 0)
+		FAIL("UNLINK reply err %d != 0", fb.fb_err);
+	if (fb.fb_uuid != 0x5300)
+		FAIL("UNLINK uuid %llu", (unsigned long long)fb.fb_uuid);
+	if (dlen != 0)
+		FAIL("UNLINK reply carried a body (%zu)", dlen);
+	printf("  unlink del.txt: OPEN(DELETE) + SET FileDispositionInformation "
+		"(DeletePending=1) + CLOSE, fb_err 0 ok\n");
+}
+
+/*
+ * FBT_RENAME on the same device emits an OPEN(source) then a
+ * SET_INFO(FileRenameInformation) whose SetBuffer carries ReplaceIfExists=1,
+ * RootDirectory=0, the correct FileNameLength, and the UTF-16LE target path;
+ * the chain closes and replies fb_err 0.  The destination parent travels in
+ * the request's fb_io_ino.
+ */
+static void
+test_rename_same_device(struct fuse_drive *fd)
+{
+	uint8_t buf[FB_HDRLEN + 64];
+	struct fusebuf fb;
+	const char *expect = "\\dst.txt";   /* dest is the drive root */
+	size_t len, dlen, plen, i;
+	const uint8_t *pl;
+	uint32_t open_req, set_req, name_bytes;
+
+	fuse_drive_test_reset();
+	len = build_fb_rename(buf, 0x5400, DRIVE_C_NODE, DRIVE_C_NODE,
+		"src.txt", "dst.txt", 1);
+	fuse_drive_test_dispatch(fd, buf, len);
+
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_op() != RDP_FS_OPEN)
+		FAIL("RENAME did not emit an OPEN FS_REQ");
+	if ((fuse_drive_test_req_access() & ACC_DELETE) == 0)
+		FAIL("RENAME access 0x%x lacks DELETE",
+			fuse_drive_test_req_access());
+	pl = fuse_drive_test_req_payload(&plen);
+	if (plen == 0 || strcmp((const char *)pl, "\\src.txt") != 0)
+		FAIL("RENAME source path '%.*s'", (int)plen, pl);
+	open_req = fuse_drive_test_req_id();
+
+	feed_rsp(fd, open_req, STATUS_SUCCESS, 0x680, 0, NULL, 0);
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_op() != RDP_FS_SET_INFO)
+		FAIL("RENAME did not emit a SET_INFO after the OPEN");
+	if (fuse_drive_test_req_info_class() != IC_FILE_RENAME)
+		FAIL("RENAME set info_class 0x%x != FileRenameInformation",
+			fuse_drive_test_req_info_class());
+	pl = fuse_drive_test_req_payload(&plen);
+	name_bytes = (uint32_t)(strlen(expect) * 2);
+	if (plen != 6 + name_bytes)
+		FAIL("RENAME SetBuffer %zu != %u", plen, 6 + name_bytes);
+	if (pl[0] != 1)
+		FAIL("RENAME ReplaceIfExists %u != 1", pl[0]);
+	if (pl[1] != 0)
+		FAIL("RENAME RootDirectory %u != 0", pl[1]);
+	{
+		uint32_t flen = pl[2] | ((uint32_t)pl[3] << 8)
+			| ((uint32_t)pl[4] << 16) | ((uint32_t)pl[5] << 24);
+		if (flen != name_bytes)
+			FAIL("RENAME FileNameLength %u != %u", flen, name_bytes);
+	}
+	for (i = 0; i < strlen(expect); i++) {
+		if (pl[6 + i * 2] != (uint8_t)expect[i] || pl[6 + i * 2 + 1] != 0)
+			FAIL("RENAME UTF-16LE target mismatch at char %zu", i);
+	}
+	set_req = fuse_drive_test_req_id();
+
+	feed_rsp(fd, set_req, STATUS_SUCCESS, 0, 0, NULL, 0);
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_op() != RDP_FS_CLOSE)
+		FAIL("RENAME did not close the source handle");
+	(void)get_reply(&fb, &dlen);
+	if (fb.fb_err != 0)
+		FAIL("RENAME reply err %d != 0", fb.fb_err);
+	if (fb.fb_uuid != 0x5400)
+		FAIL("RENAME uuid %llu", (unsigned long long)fb.fb_uuid);
+	printf("  rename src.txt -> dst.txt (same device): OPEN + SET "
+		"FileRenameInformation (replace=1, root=0, UTF-16LE target), "
+		"fb_err 0 ok\n");
+}
+
+/*
+ * A cross-device FBT_RENAME (source under drive C, destination under drive
+ * DOCS, node 3) must reply fb_err EXDEV without emitting any FS_REQ.
+ */
+static void
+test_rename_cross_device(struct fuse_drive *fd)
+{
+	uint8_t buf[FB_HDRLEN + 64];
+	struct fusebuf fb;
+	size_t len, dlen;
+
+	fuse_drive_test_reset();
+	len = build_fb_rename(buf, 0x5500, DRIVE_C_NODE, 3,
+		"a.txt", "b.txt", 1);
+	fuse_drive_test_dispatch(fd, buf, len);
+
+	if (fuse_drive_test_have_req())
+		FAIL("cross-device RENAME emitted an FS_REQ");
+	(void)get_reply(&fb, &dlen);
+	if (fb.fb_err != EXDEV)
+		FAIL("cross-device RENAME fb_err %d != EXDEV", fb.fb_err);
+	printf("  rename cross-device: fb_err EXDEV, no FS_REQ ok\n");
+}
+
+/*
+ * Namespace bounds: a RENAME whose second name has no terminating NUL, and an
+ * over-long MKDIR name, must be rejected (fb_err EINVAL) with no FS_REQ and no
+ * over-read past the fb_dat we provided.
+ */
+static void
+test_namespace_bounds(struct fuse_drive *fd)
+{
+	uint8_t buf[FB_HDRLEN + 512];
+	struct fusebuf fb;
+	size_t len, dlen;
+
+	/* RENAME missing the second name's NUL: build_fb_rename(..., 0). */
+	fuse_drive_test_reset();
+	len = build_fb_rename(buf, 0x5600, DRIVE_C_NODE, DRIVE_C_NODE,
+		"one", "two", 0);
+	fuse_drive_test_dispatch(fd, buf, len);
+	if (fuse_drive_test_have_req())
+		FAIL("unterminated RENAME name was dispatched");
+	(void)get_reply(&fb, &dlen);
+	if (fb.fb_err == 0)
+		FAIL("unterminated RENAME name not rejected");
+
+	/* Over-long MKDIR name (> FD_NAME_MAX = 255), NUL terminated but too
+	 * long: the name field rejects it. */
+	{
+		struct fusebuf t;
+		size_t nlen = 400;
+		memset(&t, 0, sizeof t);
+		t.fb_type = FBT_MKDIR;
+		t.fb_uuid = 0x5601;
+		t.fb_ino = (ino_t)DRIVE_C_NODE;
+		t.fb_len = nlen + 1;
+		t.fb_io_mode = S_IFDIR | 0755;
+		memcpy(buf, &t, FB_HDRLEN);
+		memset(buf + FB_HDRLEN, 'x', nlen);
+		buf[FB_HDRLEN + nlen] = '\0';
+		len = FB_HDRLEN + nlen + 1;
+		fuse_drive_test_reset();
+		fuse_drive_test_dispatch(fd, buf, len);
+		if (fuse_drive_test_have_req())
+			FAIL("over-long MKDIR name emitted an FS_REQ");
+		(void)get_reply(&fb, &dlen);
+		if (fb.fb_err == 0)
+			FAIL("over-long MKDIR name not rejected");
+	}
+	printf("  namespace bounds: unterminated RENAME + over-long MKDIR "
+		"rejected, no over-read ok\n");
+}
+
 int
 main(void)
 {
@@ -708,6 +1233,15 @@ main(void)
 	test_read(fd, child);
 	test_readdir_drive(fd);
 	test_bounds(fd);
+
+	/* write + namespace ops (stage 6c) */
+	test_write(fd, child);
+	test_setattr_truncate(fd, child);
+	test_mkdir(fd);
+	test_unlink(fd);
+	test_rename_same_device(fd);
+	test_rename_cross_device(fd);
+	test_namespace_bounds(fd);
 
 	fuse_drive_free(fd);
 	printf("fuse_drive_obsd_test: all ok\n");
