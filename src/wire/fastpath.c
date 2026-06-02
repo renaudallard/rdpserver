@@ -35,6 +35,7 @@
 #include "../common/buf.h"
 #include "../include/rdp_log.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 /* Encode the fast-path header: 1 byte (action=0, numEvents=0,
@@ -95,6 +96,74 @@ ssize_t
 rdp_fp_build_pointer_default(uint8_t *out, size_t cap)
 {
 	return rdp_fp_build_update(out, cap, RDP_FP_UPDATE_PTR_DEFAULT, NULL, 0);
+}
+
+ssize_t
+rdp_fp_build_pointer_new(uint8_t *out, size_t cap,
+		uint16_t cache_index, uint16_t hot_x, uint16_t hot_y,
+		uint16_t w, uint16_t h, const uint8_t *argb, size_t stride)
+{
+	size_t xor_stride = (size_t)w * 4;          /* 32bpp, already even */
+	size_t and_stride = ((size_t)w + 15) / 16 * 2; /* 1bpp, WORD-padded */
+	size_t len_xor = xor_stride * h;
+	size_t len_and = and_stride * h;
+	size_t body_len = 16 + len_xor + len_and;
+	uint8_t *body;
+	uint16_t r;
+	ssize_t rc;
+
+	if (w == 0 || h == 0 || argb == NULL) return -1;
+	if (len_xor > 0xffff || len_and > 0xffff) return -1;
+	/* The hotspot must lie within the cursor; clamp untrusted input. */
+	if (hot_x >= w) hot_x = (uint16_t)(w - 1);
+	if (hot_y >= h) hot_y = (uint16_t)(h - 1);
+	body = malloc(body_len);
+	if (body == NULL) return -1;
+
+	/* TS_POINTERATTRIBUTE header (all u16 LE). */
+	body[0] = 32; body[1] = 0;                          /* xorBpp = 32 */
+	body[2] = (uint8_t)(cache_index & 0xff);
+	body[3] = (uint8_t)(cache_index >> 8);
+	body[4] = (uint8_t)(hot_x & 0xff);
+	body[5] = (uint8_t)(hot_x >> 8);
+	body[6] = (uint8_t)(hot_y & 0xff);
+	body[7] = (uint8_t)(hot_y >> 8);
+	body[8] = (uint8_t)(w & 0xff);
+	body[9] = (uint8_t)(w >> 8);
+	body[10] = (uint8_t)(h & 0xff);
+	body[11] = (uint8_t)(h >> 8);
+	body[12] = (uint8_t)(len_and & 0xff);
+	body[13] = (uint8_t)(len_and >> 8);
+	body[14] = (uint8_t)(len_xor & 0xff);
+	body[15] = (uint8_t)(len_xor >> 8);
+
+	/* Rows are bottom-up: output row r maps to source row (h-1-r). */
+	for (r = 0; r < h; r++) {
+		const uint8_t *src = argb + (size_t)(h - 1 - r) * stride;
+		uint8_t *xrow = body + 16 + (size_t)r * xor_stride;
+		uint8_t *arow = body + 16 + len_xor + (size_t)r * and_stride;
+		uint16_t x;
+		memset(arow, 0, and_stride);
+		for (x = 0; x < w; x++) {
+			uint8_t pr = src[x * 4 + 0];
+			uint8_t pg = src[x * 4 + 1];
+			uint8_t pb = src[x * 4 + 2];
+			uint8_t pa = src[x * 4 + 3];
+			/* xorMask pixel as BGRA. */
+			xrow[x * 4 + 0] = pb;
+			xrow[x * 4 + 1] = pg;
+			xrow[x * 4 + 2] = pr;
+			xrow[x * 4 + 3] = pa;
+			/* AND mask MSB-first: 1 = transparent, 0 = opaque. */
+			if (pa < 128)
+				arow[x / 8] |= (uint8_t)(0x80 >> (x % 8));
+		}
+	}
+
+	rc = rdp_fp_build_update(out, cap, RDP_FP_UPDATE_POINTER,
+		body, body_len);
+	free(body);
+	return rc;
 }
 
 /* Convert a top-down 24bpp BGR frame slice into a bottom-up rows

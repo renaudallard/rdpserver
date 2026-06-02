@@ -84,6 +84,7 @@
  * Response: worker sends FS_RSP with an rdp_be_fs_rsp header + data. */
 #define RDP_BE_H264_FRAME  13u
 #define RDP_BE_INPUT_UNICODE 14u
+#define RDP_BE_CURSOR      15u   /* session -> worker; opcodes 1..14 are used */
 
 #define RDP_BE_FS_REQ      11u
 #define RDP_BE_FS_RSP      12u
@@ -185,6 +186,15 @@ struct rdp_be_resize {
 	uint16_t width;
 	uint16_t height;
 	uint16_t pad[2];
+};
+
+/* CURSOR payload: 8-byte header then width*height*4 bytes, top-down,
+ * R,G,B,A per pixel (A = X cursor alpha). */
+struct rdp_be_cursor_hdr {
+	uint16_t width;
+	uint16_t height;
+	uint16_t hotspot_x;
+	uint16_t hotspot_y;
 };
 
 #endif /* RDP_BACKEND_PROTO_H */

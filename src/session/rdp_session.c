@@ -63,6 +63,7 @@
 #include <X11/extensions/Xdamage.h>
 #include <X11/extensions/XShm.h>
 #include <X11/extensions/XTest.h>
+#include <X11/extensions/Xfixes.h>
 
 #include "clip_x11.h"
 #include "audio.h"
@@ -379,6 +380,46 @@ send_frame(int fd, int w, int h, const uint8_t *pixels)
 		free(buf);
 		return rc;
 	}
+}
+
+/* Forward the current X cursor image to the worker as an RDP_BE_CURSOR
+ * message: an rdp_be_cursor_hdr followed by width*height pixels in
+ * top-down R,G,B,A order.  Returns 0 on success, -1 on failure. */
+static int
+send_cursor(int fd, XFixesCursorImage *ci)
+{
+	struct rdp_be_cursor_hdr hdr;
+	size_t px, i, len;
+	uint8_t *buf, *out;
+	int rc;
+
+	if (ci == NULL || ci->width == 0 || ci->height == 0) return 0;
+	px = (size_t)ci->width * ci->height;
+	if (px > (1u << 20)) return 0;
+	len = sizeof hdr + px * 4;
+	buf = malloc(len);
+	if (buf == NULL) return -1;
+
+	hdr.width = ci->width;
+	hdr.height = ci->height;
+	hdr.hotspot_x = ci->xhot;
+	hdr.hotspot_y = ci->yhot;
+	memcpy(buf, &hdr, sizeof hdr);
+
+	out = buf + sizeof hdr;
+	for (i = 0; i < px; i++) {
+		/* ci->pixels is unsigned long*; narrowing to uint32_t is
+		 * mandatory on 64-bit so we read one ARGB pixel per slot. */
+		uint32_t p = (uint32_t)ci->pixels[i];
+		out[i * 4 + 0] = (uint8_t)(p >> 16); /* R */
+		out[i * 4 + 1] = (uint8_t)(p >> 8);  /* G */
+		out[i * 4 + 2] = (uint8_t)p;         /* B */
+		out[i * 4 + 3] = (uint8_t)(p >> 24); /* A */
+	}
+
+	rc = rdp_be_send(fd, RDP_BE_CURSOR, buf, len);
+	free(buf);
+	return rc;
 }
 
 static int
@@ -1146,6 +1187,7 @@ main(int argc, char *argv[])
 	struct rdp_log_cfg lc;
 	Damage dmg = None;
 	int damage_event = 0, damage_error = 0, dirty = 1;
+	int cursor_dirty = 1;
 
 	while ((opt = getopt(argc, argv, "DWw:H:k:?")) != -1) {
 		switch (opt) {
@@ -1252,6 +1294,14 @@ main(int argc, char *argv[])
 			rdp_info("XDamageCreate failed; full-frame capture");
 	} else {
 		rdp_info("XDamage unavailable; full-frame capture");
+	}
+
+	int xfixes_event = 0, xfixes_error = 0, xfixes_ok = 0;
+	if (XFixesQueryExtension(dpy, &xfixes_event, &xfixes_error)) {
+		XFixesSelectCursorInput(dpy, DefaultRootWindow(dpy),
+		    XFixesDisplayCursorNotifyMask);
+		xfixes_ok = 1;
+		rdp_info("XFixes cursor tracking enabled");
 	}
 
 	struct rdp_clip clip;
@@ -1414,6 +1464,9 @@ main(int argc, char *argv[])
 				if (dmg != None
 				    && ev.type == damage_event + XDamageNotify)
 					dirty = 1;
+				else if (xfixes_ok
+				    && ev.type == xfixes_event + XFixesCursorNotify)
+					cursor_dirty = 1;
 				else if (clip_ok)
 					(void)rdp_clip_handle_xevent(&clip, &ev);
 			}
@@ -1449,6 +1502,18 @@ main(int argc, char *argv[])
 				dirty = 0;
 			}
 			last_send = now;
+		}
+		/* Forward the real X cursor only on a change frame, gated by
+		 * the same cadence so animated cursors cannot flood the link.
+		 * XFixesGetCursorImage is never called per video frame. */
+		if (xfixes_ok && cursor_dirty
+		    && elapsed_ms >= FRAME_INTERVAL_MS) {
+			XFixesCursorImage *ci = XFixesGetCursorImage(dpy);
+			if (ci) {
+				(void)send_cursor(BE_FD, ci);
+				XFree(ci);
+			}
+			cursor_dirty = 0;
 		}
 		if (audio != NULL && audio_buf != NULL) {
 			ssize_t ar = rdp_audio_read(audio, audio_buf, 17640);

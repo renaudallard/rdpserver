@@ -72,6 +72,7 @@ sends fast-path bitmap updates).
 | Demand Active / Confirm Active / finalization | ✓ | |
 | Fast-path Bitmap Update output (24bpp, tiled) | ✓ | Small updates are sent as a single fragment; a bitmap update too large for one fast-path PDU is split into FIRST/NEXT/LAST fragments honoring the client's MultifragmentUpdate MaxRequestSize (16KB safe default when absent). |
 | Fast-path input (scancode, mouse, sync, Unicode) | ✓ | Scancode and mouse forwarded to the session; Unicode events forwarded and injected via a spare-keycode keysym remap; sync (lock-key state) is parsed but not forwarded. |
+| Color mouse-cursor forwarding | ✓ | The real session cursor is captured from the session X server via XFixes and forwarded to the client as a fast-path New Pointer (32bpp ARGB) update, gated on the client's pointer caps.  Large-pointer clients receive cursors up to roughly 60x60 (the single fast-path PDU limit); other clients get the cursor nearest-neighbour scaled to fit 32x32.  The hotspot is scaled to match, and larger cursors are scaled down.  Clients without color-pointer support keep the default system pointer. |
 | Server-painted greeter + PAM/bsd_auth | ✓ | |
 | Per-user Xvfb + xterm session | ✓ | |
 | CLIPRDR clipboard, bidirectional, text formats | ✓ | |

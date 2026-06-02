@@ -117,6 +117,17 @@ ssize_t rdp_fp_build_synchronize(uint8_t *out, size_t cap);
 /* Build a System Pointer Default fast-path update. */
 ssize_t rdp_fp_build_pointer_default(uint8_t *out, size_t cap);
 
+/* Build a New Pointer (TS_POINTERATTRIBUTE, xorBpp=32 ARGB) fast-path
+ * update for a w x h color cursor.  argb is the session wire format:
+ * top-down rows of R,G,B,A, stride = bytes per source row (normally
+ * w*4).  cache_index selects the client pointer cache slot, hot_x/hot_y
+ * are the hotspot.  Returns total wire bytes written, or -1 if it would
+ * not fit cap or a single fast-path PDU.  The caller is responsible for
+ * clamping w,h to the cap-derived maximum before calling. */
+ssize_t rdp_fp_build_pointer_new(uint8_t *out, size_t cap,
+		uint16_t cache_index, uint16_t hot_x, uint16_t hot_y,
+		uint16_t w, uint16_t h, const uint8_t *argb, size_t stride);
+
 /* Build a Bitmap fast-path update covering rect [x..x+w, y..y+h)
  * with `pixels` (24bpp packed BGR, top-down).  The wire format
  * expects bottom-up rows padded to a 4-pixel width, which this

@@ -98,10 +98,12 @@ ssize_t rdp_capset_build_demand_active(uint8_t *out, size_t cap,
 
 /* Parse a Confirm Active capability blob and extract things we care
  * about: the client's desktop bpp and, when present, the
- * MultifragmentUpdate MaxRequestSize.  Either out-param may be NULL.
- * max_request_size_out defaults to 0 when the cap is absent.  Returns
- * 0 on success. */
+ * MultifragmentUpdate MaxRequestSize, the Pointer colorPointerFlag and
+ * the LargePointer largePointerSupportFlags.  Any out-param may be NULL.
+ * max_request_size_out, color_ptr_out and large_ptr_flags_out default to
+ * 0 when their cap is absent.  Returns 0 on success. */
 int rdp_capset_parse_confirm_active(const uint8_t *p, size_t len,
-		uint16_t *bpp_out, uint32_t *max_request_size_out);
+		uint16_t *bpp_out, uint32_t *max_request_size_out,
+		uint16_t *color_ptr_out, uint16_t *large_ptr_flags_out);
 
 #endif /* RDP_CAPSET_H */

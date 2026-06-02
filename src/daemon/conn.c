@@ -1177,9 +1177,18 @@ run_proxy(struct rdp_tls *t, int be_fd,
 		uint16_t user_id, uint16_t io_channel,
 		uint16_t desktop_w, uint16_t desktop_h,
 		uint32_t client_max_request,
+		uint16_t client_color_ptr, uint16_t client_large_ptr,
 		const char *peer)
 {
 	struct proxy_input_ctx ictx = { be_fd, 0, 0, 0 };
+	/* Largest cursor edge we may send: 96x96 only when the client
+	 * advertises the large-pointer flag, else the legacy 32x32.  A New
+	 * Pointer update must fit one fast-path PDU, which caps a 32bpp
+	 * cursor body near 60x60, so clamp there and scale larger cursors
+	 * down to fit. */
+	uint16_t ptr_maxdim = (client_large_ptr & 0x0001) ? 96 : 32;
+	int can_color_ptr = (client_color_ptr != 0);
+	if (ptr_maxdim > 60) ptr_maxdim = 60;
 	uint8_t *frame_buf = NULL;
 	size_t   frame_cap = 0;
 	struct rdpgfx_state gfx = {0};
@@ -1740,6 +1749,148 @@ run_proxy(struct rdp_tls *t, int be_fd,
 						left -= c;
 					}
 				}
+			} else if (type == RDP_BE_CURSOR) {
+				struct rdp_be_cursor_hdr ch;
+				size_t want = (len >= sizeof ch)
+					? len - sizeof ch : 0;
+				size_t npx = 0;
+				uint8_t *argb = NULL;
+				int valid = 0;
+
+				/* A header too short to hold the fixed struct
+				 * is malformed: drain the whole payload and
+				 * move on without touching it. */
+				if (len < sizeof ch) {
+					size_t left = len;
+					uint8_t junk[1024];
+					while (left > 0) {
+						size_t c = left > sizeof junk
+							? sizeof junk : left;
+						if (rdp_read_full(be_fd, junk,
+						    c) <= 0) goto out;
+						left -= c;
+					}
+					continue;
+				}
+				/* A failed header read means the stream is
+				 * desynced; bail like the other branches. */
+				if (rdp_read_full(be_fd, &ch, sizeof ch)
+				    != (ssize_t)sizeof ch)
+					goto out;
+				npx = (size_t)ch.width * ch.height;
+				if (ch.width > 0 && ch.height > 0
+				    && npx <= (1u << 20)
+				    && npx * 4 == want) {
+					argb = malloc(want);
+					if (argb != NULL) {
+						/* A partial pixel read also
+						 * desyncs the stream. */
+						if (rdp_read_full(be_fd, argb,
+						    want) != (ssize_t)want) {
+							free(argb);
+							goto out;
+						}
+						valid = 1;
+					}
+				}
+				/* Geometry rejected or malloc failed: the
+				 * pixels are still on the wire, so drain them
+				 * to keep the stream framed. */
+				if (!valid && argb == NULL) {
+					size_t left = want;
+					uint8_t junk[1024];
+					while (left > 0) {
+						size_t c = left > sizeof junk
+							? sizeof junk : left;
+						if (rdp_read_full(be_fd, junk,
+						    c) <= 0) goto out;
+						left -= c;
+					}
+				}
+				/* Without colour pointer support, the default
+				 * system pointer is left in place. */
+				if (valid && can_color_ptr) {
+					uint16_t sw = ch.width;
+					uint16_t sh = ch.height;
+					uint16_t hx = ch.hotspot_x;
+					uint16_t hy = ch.hotspot_y;
+					uint8_t *scaled = NULL;
+					const uint8_t *src = argb;
+					size_t src_stride = (size_t)sw * 4;
+					if (sw > ptr_maxdim
+					    || sh > ptr_maxdim) {
+						/* Nearest-neighbour shrink to
+						 * fit ptr_maxdim, preserving
+						 * aspect. */
+						uint32_t dw = sw, dh = sh;
+						if (dw > ptr_maxdim) {
+							dh = (uint32_t)dh
+							    * ptr_maxdim / dw;
+							dw = ptr_maxdim;
+						}
+						if (dh > ptr_maxdim) {
+							dw = (uint32_t)dw
+							    * ptr_maxdim / dh;
+							dh = ptr_maxdim;
+						}
+						if (dw == 0) dw = 1;
+						if (dh == 0) dh = 1;
+						scaled = malloc((size_t)dw
+						    * dh * 4);
+						if (scaled != NULL) {
+							uint32_t yy;
+							for (yy = 0; yy < dh; yy++) {
+								uint32_t sy = yy
+								  * sh / dh;
+								uint32_t xx;
+								for (xx = 0; xx < dw; xx++) {
+									uint32_t sx = xx
+									  * sw / dw;
+									const uint8_t *sp =
+									  argb + ((size_t)sy
+									  * sw + sx) * 4;
+									uint8_t *dp =
+									  scaled + ((size_t)yy
+									  * dw + xx) * 4;
+									dp[0] = sp[0];
+									dp[1] = sp[1];
+									dp[2] = sp[2];
+									dp[3] = sp[3];
+								}
+							}
+							/* Scale the hotspot by the
+							 * same factor, clamp into
+							 * the new bounds. */
+							hx = (uint16_t)((uint32_t)hx
+							    * dw / sw);
+							hy = (uint16_t)((uint32_t)hy
+							    * dh / sh);
+							if (hx >= dw)
+								hx = (uint16_t)(dw - 1);
+							if (hy >= dh)
+								hy = (uint16_t)(dh - 1);
+							src = scaled;
+							src_stride = (size_t)dw * 4;
+							sw = (uint16_t)dw;
+							sh = (uint16_t)dh;
+						}
+					}
+					if (src != NULL
+					    && (scaled != NULL
+						|| !(ch.width > ptr_maxdim
+						    || ch.height > ptr_maxdim))) {
+						uint8_t pkt[0x4000];
+						ssize_t pn =
+						    rdp_fp_build_pointer_new(
+						    pkt, sizeof pkt, 0, hx, hy,
+						    sw, sh, src, src_stride);
+						if (pn > 0)
+							(void)rdp_tls_write_full(
+							    t, pkt, (size_t)pn);
+					}
+					free(scaled);
+				}
+				free(argb);
 			} else if (type == RDP_BE_FS_REQ
 			    && dr->enabled
 			    && len >= sizeof(struct rdp_be_fs_req)) {
@@ -1915,6 +2066,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 	uint16_t desktop_w = 0, desktop_h = 0;
 	uint32_t client_lcid = 0;
 	uint32_t client_max_request = 0;
+	uint16_t client_color_ptr = 0, client_large_ptr = 0;
 	int use_nla = 0;
 	char nla_user[256] = {0}, nla_pass[256] = {0};
 	char client_ip[RDP_SESSMGR_IP_MAX];
@@ -2268,12 +2420,17 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 		 * confirm-active body follows the 6-byte share-control header. */
 		if (payload_len > 6) {
 			uint32_t mrq = 0;
+			uint16_t cptr = 0, lptr = 0;
 			if (rdp_capset_parse_confirm_active(payload + 6,
-				payload_len - 6, NULL, &mrq) == 0)
+				payload_len - 6, NULL, &mrq, &cptr, &lptr) == 0) {
 				client_max_request = mrq;
+				client_color_ptr = cptr;
+				client_large_ptr = lptr;
+			}
 		}
-		rdp_debug("conn[%s]: client MaxRequestSize=%u",
-			peer, (unsigned)client_max_request);
+		rdp_debug("conn[%s]: client MaxRequestSize=%u colorPtr=%u largePtr=0x%04x",
+			peer, (unsigned)client_max_request,
+			(unsigned)client_color_ptr, (unsigned)client_large_ptr);
 	}
 
 	/* 9. Finalization handshake. */
@@ -2360,7 +2517,8 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 			}
 			run_proxy(t, be_fd, &clip, &dynvc, &snd, &devr,
 				user_id, io_channel,
-				desktop_w, desktop_h, client_max_request, peer);
+				desktop_w, desktop_h, client_max_request,
+				client_color_ptr, client_large_ptr, peer);
 			/* On disconnect: try to SUSPEND the session so it
 			 * survives for the next reconnect. */
 			if (rdp_sessmgr_suspend(cfg->sessmgr_sock,
@@ -2432,7 +2590,9 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 				run_proxy(t, be_fd, &clip, &dynvc, &snd,
 					&devr, user_id, io_channel,
 					desktop_w, desktop_h,
-					client_max_request, peer);
+					client_max_request,
+					client_color_ptr, client_large_ptr,
+					peer);
 				(void)close(be_fd);
 				goto done;
 			}
@@ -2497,6 +2657,8 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 							user_id, io_channel,
 							desktop_w, desktop_h,
 							client_max_request,
+							client_color_ptr,
+							client_large_ptr,
 							peer);
 						(void)close(be_fd);
 						goto send_disconnect;
@@ -2539,7 +2701,9 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 				run_proxy(t, be_fd, &clip, &dynvc, &snd,
 					&devr, user_id, io_channel,
 					desktop_w, desktop_h,
-					client_max_request, peer);
+					client_max_request,
+					client_color_ptr, client_large_ptr,
+					peer);
 				(void)close(be_fd);
 				goto send_disconnect;
 			}
@@ -2604,7 +2768,8 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 				clip.enabled ? "enabled" : "off");
 			run_proxy(t, be_fd, &clip, &dynvc, &snd, &devr,
 				user_id, io_channel,
-				desktop_w, desktop_h, client_max_request, peer);
+				desktop_w, desktop_h, client_max_request,
+				client_color_ptr, client_large_ptr, peer);
 
 			/* On disconnect: try to SUSPEND so a reconnecting
 			 * client can resume without re-authenticating. */

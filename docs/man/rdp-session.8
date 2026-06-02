@@ -45,6 +45,14 @@ and wraps the bitstream in RDPGFX AVC420 PDUs when the client
 negotiated the graphics pipeline; otherwise it sends fast-path
 bitmap updates.
 .Pp
+The session mouse cursor is tracked with the X
+.Sy XFixes
+extension and forwarded over the backend socket whenever it changes.
+The
+.Xr rdpd 8
+proxy relays it to the client as a fast-path New Pointer update so the
+client shows the real session cursor instead of a static arrow.
+.Pp
 Audio from applications in the session is captured and forwarded to
 the RDP client via the backend protocol.
 The audio capture backend is selected at compile time:
