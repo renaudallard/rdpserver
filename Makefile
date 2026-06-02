@@ -92,7 +92,8 @@ REGRESS_PROGS = \
 	regress/wire/x224_test \
 	regress/wire/mcs_test \
 	regress/wire/capset_test \
-	regress/wire/rdp_pdu_test
+	regress/wire/rdp_pdu_test \
+	regress/wire/rdpdr_test
 
 FUZZ_PROG = regress/fuzz/fuzz_parsers
 
@@ -198,6 +199,15 @@ regress/wire/capset_test: regress/wire/capset_test.o $(WIRE_LIB) $(COMMON_LIB)
 
 regress/wire/rdp_pdu_test: regress/wire/rdp_pdu_test.o $(WIRE_LIB) $(COMMON_LIB)
 	$(CC) $(LDFLAGS) -o $@ regress/wire/rdp_pdu_test.o $(WIRE_LIB) $(COMMON_LIB)
+
+# Built with ASan + UBSan to catch any out-of-bounds in the IRP builders.
+# rdpdr.o and the common log object are recompiled with the sanitizers so
+# the instrumentation covers the code under test.
+regress/wire/rdpdr_test: regress/wire/rdpdr_test.c src/channels/rdpdr.c \
+		src/common/log.c
+	$(CC) $(CFLAGS) -fsanitize=address,undefined -Isrc/include \
+		-o $@ regress/wire/rdpdr_test.c src/channels/rdpdr.c \
+		src/common/log.c
 
 regress/fuzz/fuzz_parsers: regress/fuzz/fuzz_parsers.o \
 		$(WIRE_LIB) $(CHANNELS_LIB) $(SEC_LIB) $(COMMON_LIB)

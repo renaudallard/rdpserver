@@ -299,8 +299,6 @@ put_irp_header(uint8_t *out, uint32_t device_id, uint32_t file_id,
 	st32(out + 20, minor);
 }
 
-#define IRP_HDR_SIZE 24
-
 ssize_t
 rdp_rdpdr_build_irp_create(struct rdpdr_state *st,
 		uint8_t *out, size_t cap,
@@ -408,6 +406,101 @@ rdp_rdpdr_build_irp_query_dir(struct rdpdr_state *st,
 		out[off + i * 2] = (uint8_t)pattern[i];
 		out[off + i * 2 + 1] = 0;
 	}
+	return (ssize_t)total;
+}
+
+ssize_t
+rdp_rdpdr_build_irp_write(struct rdpdr_state *st,
+		uint8_t *out, size_t cap,
+		uint32_t device_id, uint32_t file_id,
+		uint64_t offset, const uint8_t *data, size_t data_len,
+		uint32_t *completion_id_out)
+{
+	uint32_t cid;
+	size_t total;
+
+	/* DR_WRITE body: Length(4) + Offset(8) + Padding(20) + WriteData. */
+	if (data_len > 0xFFFFFFFF)
+		return -1;
+	total = IRP_HDR_SIZE + 32 + data_len;
+	if (cap < total)
+		return -1;
+	if (data_len > 0 && data == NULL)
+		return -1;
+	if (alloc_pending(st, device_id, IRP_MJ_WRITE, &cid) == NULL)
+		return -1;
+	*completion_id_out = cid;
+
+	memset(out, 0, IRP_HDR_SIZE + 32);
+	put_irp_header(out, device_id, file_id, cid, IRP_MJ_WRITE, 0);
+	st32(out + IRP_HDR_SIZE, (uint32_t)data_len);
+	st32(out + IRP_HDR_SIZE + 4, (uint32_t)(offset & 0xFFFFFFFF));
+	st32(out + IRP_HDR_SIZE + 8, (uint32_t)(offset >> 32));
+	/* 20 bytes of padding at +12..+31 already zeroed by memset. */
+	if (data_len > 0)
+		memcpy(out + IRP_HDR_SIZE + 32, data, data_len);
+	return (ssize_t)total;
+}
+
+ssize_t
+rdp_rdpdr_build_irp_query_info(struct rdpdr_state *st,
+		uint8_t *out, size_t cap,
+		uint32_t device_id, uint32_t file_id,
+		uint32_t info_class, uint32_t *completion_id_out)
+{
+	uint32_t cid;
+	size_t total = IRP_HDR_SIZE + 32;
+
+	/* DR_QUERY_INFORMATION_REQ body: FileInformationClass(4) +
+	 * Length(4) + Padding(24).  No query buffer is sent. */
+	if (cap < total)
+		return -1;
+	if (alloc_pending(st, device_id, IRP_MJ_QUERY_INFORMATION, &cid)
+	    == NULL)
+		return -1;
+	*completion_id_out = cid;
+
+	memset(out, 0, total);
+	put_irp_header(out, device_id, file_id, cid,
+		IRP_MJ_QUERY_INFORMATION, 0);
+	st32(out + IRP_HDR_SIZE, info_class);
+	st32(out + IRP_HDR_SIZE + 4, 0);
+	/* 24 bytes of padding at +8..+31 already zeroed by memset. */
+	return (ssize_t)total;
+}
+
+ssize_t
+rdp_rdpdr_build_irp_set_info(struct rdpdr_state *st,
+		uint8_t *out, size_t cap,
+		uint32_t device_id, uint32_t file_id,
+		uint32_t info_class, const uint8_t *buf, size_t buf_len,
+		uint32_t *completion_id_out)
+{
+	uint32_t cid;
+	size_t total;
+
+	/* DR_SET_INFORMATION_REQ body: FileInformationClass(4) +
+	 * Length(4) + Padding(24) + SetBuffer(Length). */
+	if (buf_len > 0xFFFFFFFF)
+		return -1;
+	total = IRP_HDR_SIZE + 32 + buf_len;
+	if (cap < total)
+		return -1;
+	if (buf_len > 0 && buf == NULL)
+		return -1;
+	if (alloc_pending(st, device_id, IRP_MJ_SET_INFORMATION, &cid)
+	    == NULL)
+		return -1;
+	*completion_id_out = cid;
+
+	memset(out, 0, IRP_HDR_SIZE + 32);
+	put_irp_header(out, device_id, file_id, cid,
+		IRP_MJ_SET_INFORMATION, 0);
+	st32(out + IRP_HDR_SIZE, info_class);
+	st32(out + IRP_HDR_SIZE + 4, (uint32_t)buf_len);
+	/* 24 bytes of padding at +8..+31 already zeroed by memset. */
+	if (buf_len > 0)
+		memcpy(out + IRP_HDR_SIZE + 32, buf, buf_len);
 	return (ssize_t)total;
 }
 

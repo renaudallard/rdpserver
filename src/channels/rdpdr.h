@@ -82,6 +82,10 @@ struct rdpdr_device {
 	char     name[9];
 };
 
+/* IRP header size: component(2)+packetId(2)+deviceId(4)+fileId(4)+
+ * completionId(4)+majorFunction(4)+minorFunction(4) = 24 bytes. */
+#define IRP_HDR_SIZE 24
+
 /* IRP Major Function codes */
 #define IRP_MJ_CREATE              0x00000000
 #define IRP_MJ_CLOSE               0x00000002
@@ -100,6 +104,8 @@ struct rdpdr_device {
 #define FileBasicInformation       0x00000004
 #define FileStandardInformation    0x00000005
 #define FileBothDirectoryInformation 0x00000003
+#define FileRenameInformation      0x0000000A
+#define FileDispositionInformation 0x0000000D
 #define FileEndOfFileInformation   0x00000014
 
 /* NTSTATUS codes */
@@ -196,6 +202,30 @@ ssize_t rdp_rdpdr_build_irp_query_dir(struct rdpdr_state *st,
 		uint8_t *out, size_t cap,
 		uint32_t device_id, uint32_t file_id,
 		const char *pattern, int initial,
+		uint32_t *completion_id_out);
+
+/* Build an IRP Write request. data points to data_len bytes written at
+ * offset; both data and data_len are caller supplied. */
+ssize_t rdp_rdpdr_build_irp_write(struct rdpdr_state *st,
+		uint8_t *out, size_t cap,
+		uint32_t device_id, uint32_t file_id,
+		uint64_t offset, const uint8_t *data, size_t data_len,
+		uint32_t *completion_id_out);
+
+/* Build an IRP QueryInformation request for one FileInformation class.
+ * No query buffer is sent (Length = 0). */
+ssize_t rdp_rdpdr_build_irp_query_info(struct rdpdr_state *st,
+		uint8_t *out, size_t cap,
+		uint32_t device_id, uint32_t file_id,
+		uint32_t info_class, uint32_t *completion_id_out);
+
+/* Build an IRP SetInformation request. buf points to buf_len bytes of
+ * the MS-FSCC FILE_*_INFORMATION structure for info_class; the worker
+ * forwards it verbatim (the session builds it). */
+ssize_t rdp_rdpdr_build_irp_set_info(struct rdpdr_state *st,
+		uint8_t *out, size_t cap,
+		uint32_t device_id, uint32_t file_id,
+		uint32_t info_class, const uint8_t *buf, size_t buf_len,
 		uint32_t *completion_id_out);
 
 /* IO completion callback info. */

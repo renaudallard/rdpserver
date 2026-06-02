@@ -95,14 +95,50 @@
 #define RDP_FS_WRITE       3u
 #define RDP_FS_CLOSE       4u
 #define RDP_FS_LIST        5u
+#define RDP_FS_QUERY_INFO  6u
+#define RDP_FS_SET_INFO    7u
 
+/* Upper bound on the trailing FS_REQ payload (write data / SetBuffer /
+ * path) the worker will accept from the untrusted session. */
+#define RDP_BE_FS_MAX_PAYLOAD (4u * 1024u * 1024u)
+
+/*
+ * FS request header (session -> worker), followed by a per-op variable
+ * payload of `payload_len` bytes.  req_id is the correlation key echoed
+ * back in rdp_be_fs_rsp.req_id.  Fields used per op:
+ *
+ *   RDP_FS_OPEN       device_id; desired_access, disposition, options
+ *                     (the worker substitutes its read defaults when a
+ *                     field is 0); payload = UTF-8 path.
+ *   RDP_FS_READ       device_id, file_id, length, offset; no payload.
+ *   RDP_FS_WRITE      device_id, file_id, offset; payload = raw write
+ *                     data (its length is payload_len, not `length`).
+ *   RDP_FS_CLOSE      device_id, file_id; no payload.
+ *   RDP_FS_LIST       device_id, file_id; payload = UTF-8 search
+ *                     pattern (empty means "*").
+ *   RDP_FS_QUERY_INFO device_id, file_id, info_class; no payload.
+ *   RDP_FS_SET_INFO   device_id, file_id, info_class; payload = the
+ *                     MS-FSCC SetBuffer for info_class, forwarded
+ *                     verbatim (for rename this is the
+ *                     FileRenameInformation including the UTF-16LE
+ *                     target path, which the session builds).
+ *
+ * payload_len is the byte count of the trailing payload and must equal
+ * the FS_REQ frame length minus sizeof(struct rdp_be_fs_req); the
+ * worker bounds it against the received frame.
+ */
 struct rdp_be_fs_req {
-	uint32_t req_id;
-	uint32_t op;
-	uint32_t device_id;
-	uint32_t file_id;
-	uint32_t length;
-	uint64_t offset;
+	uint32_t req_id;          /* correlation key */
+	uint32_t op;             /* RDP_FS_* */
+	uint32_t device_id;      /* target RDPDR device */
+	uint32_t file_id;        /* open handle; 0 for OPEN */
+	uint32_t desired_access; /* OPEN: NT DesiredAccess (0 = default) */
+	uint32_t disposition;    /* OPEN: NT CreateDisposition (0 = default) */
+	uint32_t options;        /* OPEN: NT CreateOptions */
+	uint32_t info_class;     /* QUERY_INFO/SET_INFO: FileInformation class */
+	uint32_t length;         /* READ: bytes to read */
+	uint32_t payload_len;    /* trailing payload byte count */
+	uint64_t offset;         /* READ/WRITE: file offset */
 };
 
 struct rdp_be_fs_rsp {
