@@ -372,7 +372,8 @@ rdp_capset_build_demand_active(uint8_t *out, size_t cap,
 int
 rdp_capset_parse_confirm_active(const uint8_t *p, size_t len,
 		uint16_t *bpp_out, uint32_t *max_request_size_out,
-		uint16_t *color_ptr_out, uint16_t *large_ptr_flags_out)
+		uint16_t *color_ptr_out, uint16_t *large_ptr_flags_out,
+		uint16_t *pointer_cache_size_out)
 {
 	uint16_t lenSrc, lenComb, capCount;
 	size_t off = 0;
@@ -391,6 +392,7 @@ rdp_capset_parse_confirm_active(const uint8_t *p, size_t len,
 	if (max_request_size_out) *max_request_size_out = 0;
 	if (color_ptr_out) *color_ptr_out = 0;
 	if (large_ptr_flags_out) *large_ptr_flags_out = 0;
+	if (pointer_cache_size_out) *pointer_cache_size_out = 0;
 	/* Iterate caps; we just sanity-check lengths. */
 	{
 		size_t end = off + lenComb - 4;
@@ -417,6 +419,14 @@ rdp_capset_parse_confirm_active(const uint8_t *p, size_t len,
 			    && color_ptr_out)
 				*color_ptr_out = (uint16_t)p[off + 4]
 					| ((uint16_t)p[off + 5] << 8);          /* colorPointerFlag */
+			if (ctype == RDP_CAP_POINTER && pointer_cache_size_out) {
+				if (clen >= 4 + 6)
+					*pointer_cache_size_out = (uint16_t)p[off + 8]
+						| ((uint16_t)p[off + 9] << 8); /* pointerCacheSize */
+				else if (clen >= 4 + 4)
+					*pointer_cache_size_out = (uint16_t)p[off + 6]
+						| ((uint16_t)p[off + 7] << 8); /* colorPointerCacheSize */
+			}
 			if (ctype == RDP_CAP_LARGEPOINTER && clen >= 4 + 2
 			    && large_ptr_flags_out)
 				*large_ptr_flags_out = (uint16_t)p[off + 4]

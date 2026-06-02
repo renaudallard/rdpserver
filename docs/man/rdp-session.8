@@ -57,6 +57,8 @@ The
 .Xr rdpd 8
 proxy relays it to the client as a fast-path New Pointer update so the
 client shows the real session cursor instead of a static arrow.
+A cursor identical to one already sent is relayed as a cached-pointer
+reference into the client's pointer cache rather than re-sending the image.
 .Pp
 Audio from applications in the session is captured and forwarded to
 the RDP client via the backend protocol.

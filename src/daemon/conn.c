@@ -196,10 +196,28 @@ strip_tpkt_x224(const uint8_t *buf, size_t len,
 	return 0;
 }
 
+/* FNV-1a 64-bit hash; fold n bytes at p into the running state h. */
+static uint64_t
+fnv1a64(uint64_t h, const void *p, size_t n)
+{
+	const uint8_t *b = p;
+	size_t i;
+	for (i = 0; i < n; i++) {
+		h ^= b[i];
+		h *= 0x100000001b3ull;
+	}
+	return h;
+}
+
+#define PROXY_PTR_CACHE_MAX 32
+
 struct proxy_input_ctx {
 	int be_fd;
 	int last_mouse_x, last_mouse_y;
 	uint16_t pending_high;   /* stashed UTF-16 high surrogate */
+	uint16_t ptr_cache_n;    /* active slots, 0 = caching off */
+	uint16_t ptr_cache_next; /* round-robin victim */
+	struct { uint64_t hash; int valid; } ptr_cache[PROXY_PTR_CACHE_MAX];
 };
 
 struct clip_state {
@@ -1182,9 +1200,12 @@ run_proxy(struct rdp_tls *t, int be_fd,
 		uint16_t desktop_w, uint16_t desktop_h,
 		uint32_t client_max_request,
 		uint16_t client_color_ptr, uint16_t client_large_ptr,
+		uint16_t client_pointer_cache_size,
 		const char *peer)
 {
-	struct proxy_input_ctx ictx = { be_fd, 0, 0, 0 };
+	struct proxy_input_ctx ictx;
+	memset(&ictx, 0, sizeof ictx);
+	ictx.be_fd = be_fd;
 	/* Largest cursor edge we may send: 96x96 only when the client
 	 * advertises the large-pointer flag, else the legacy 32x32.  A New
 	 * Pointer update must fit one fast-path PDU, which caps a 32bpp
@@ -1193,6 +1214,13 @@ run_proxy(struct rdp_tls *t, int be_fd,
 	uint16_t ptr_maxdim = (client_large_ptr & 0x0001) ? 96 : 32;
 	int can_color_ptr = (client_color_ptr != 0);
 	if (ptr_maxdim > 60) ptr_maxdim = 60;
+	/* Pointer cache: bound the client's advertised slot count to our
+	 * table, and disable caching when color pointers are unsupported. */
+	ictx.ptr_cache_n = client_pointer_cache_size;
+	if (ictx.ptr_cache_n > PROXY_PTR_CACHE_MAX)
+		ictx.ptr_cache_n = PROXY_PTR_CACHE_MAX;
+	if (!can_color_ptr)
+		ictx.ptr_cache_n = 0;
 	uint8_t *frame_buf = NULL;
 	size_t   frame_cap = 0;
 	struct rdpgfx_state gfx = {0};
@@ -1884,13 +1912,44 @@ run_proxy(struct rdp_tls *t, int be_fd,
 						|| !(ch.width > ptr_maxdim
 						    || ch.height > ptr_maxdim))) {
 						uint8_t pkt[0x4000];
-						ssize_t pn =
-						    rdp_fp_build_pointer_new(
-						    pkt, sizeof pkt, 0, hx, hy,
-						    sw, sh, src, src_stride);
-						if (pn > 0)
-							(void)rdp_tls_write_full(
-							    t, pkt, (size_t)pn);
+						/* Hash the final post-scale cursor:
+						 * hotspot, geometry and each row's
+						 * sw*4 payload bytes (skipping any
+						 * stride padding). */
+						uint64_t hsh =
+						    0xcbf29ce484222325ull;
+						uint16_t dims[4];
+						uint16_t r;
+						dims[0] = hx; dims[1] = hy;
+						dims[2] = sw; dims[3] = sh;
+						hsh = fnv1a64(hsh, dims,
+						    sizeof dims);
+						for (r = 0; r < sh; r++)
+							hsh = fnv1a64(hsh,
+							    src + (size_t)r
+							    * src_stride,
+							    (size_t)sw * 4);
+						if (ictx.ptr_cache_n > 0) {
+							int hit = -1, i;
+							for (i = 0; i < (int)ictx.ptr_cache_n; i++)
+								if (ictx.ptr_cache[i].valid && ictx.ptr_cache[i].hash == hsh) { hit = i; break; }
+							if (hit >= 0) {
+								ssize_t pn = rdp_fp_build_pointer_cached(pkt, sizeof pkt, (uint16_t)hit);
+								if (pn > 0) (void)rdp_tls_write_full(t, pkt, (size_t)pn);
+							} else {
+								uint16_t slot = ictx.ptr_cache_next;
+								ssize_t pn = rdp_fp_build_pointer_new(pkt, sizeof pkt, slot, hx, hy, sw, sh, src, src_stride);
+								if (pn > 0) {
+									(void)rdp_tls_write_full(t, pkt, (size_t)pn);
+									ictx.ptr_cache[slot].hash = hsh;
+									ictx.ptr_cache[slot].valid = 1;
+									ictx.ptr_cache_next = (uint16_t)((slot + 1) % ictx.ptr_cache_n);
+								}
+							}
+						} else {
+							ssize_t pn = rdp_fp_build_pointer_new(pkt, sizeof pkt, 0, hx, hy, sw, sh, src, src_stride);
+							if (pn > 0) (void)rdp_tls_write_full(t, pkt, (size_t)pn);
+						}
 					}
 					free(scaled);
 				}
@@ -2071,6 +2130,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 	uint32_t client_lcid = 0;
 	uint32_t client_max_request = 0;
 	uint16_t client_color_ptr = 0, client_large_ptr = 0;
+	uint16_t client_pointer_cache_size = 0;
 	int use_nla = 0;
 	char nla_user[256] = {0}, nla_pass[256] = {0};
 	char client_ip[RDP_SESSMGR_IP_MAX];
@@ -2424,17 +2484,20 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 		 * confirm-active body follows the 6-byte share-control header. */
 		if (payload_len > 6) {
 			uint32_t mrq = 0;
-			uint16_t cptr = 0, lptr = 0;
+			uint16_t cptr = 0, lptr = 0, pcache = 0;
 			if (rdp_capset_parse_confirm_active(payload + 6,
-				payload_len - 6, NULL, &mrq, &cptr, &lptr) == 0) {
+				payload_len - 6, NULL, &mrq, &cptr, &lptr,
+				&pcache) == 0) {
 				client_max_request = mrq;
 				client_color_ptr = cptr;
 				client_large_ptr = lptr;
+				client_pointer_cache_size = pcache;
 			}
 		}
-		rdp_debug("conn[%s]: client MaxRequestSize=%u colorPtr=%u largePtr=0x%04x",
+		rdp_debug("conn[%s]: client MaxRequestSize=%u colorPtr=%u largePtr=0x%04x ptrCache=%u",
 			peer, (unsigned)client_max_request,
-			(unsigned)client_color_ptr, (unsigned)client_large_ptr);
+			(unsigned)client_color_ptr, (unsigned)client_large_ptr,
+			(unsigned)client_pointer_cache_size);
 	}
 
 	/* 9. Finalization handshake. */
@@ -2522,7 +2585,8 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 			run_proxy(t, be_fd, &clip, &dynvc, &snd, &devr,
 				user_id, io_channel,
 				desktop_w, desktop_h, client_max_request,
-				client_color_ptr, client_large_ptr, peer);
+				client_color_ptr, client_large_ptr,
+				client_pointer_cache_size, peer);
 			/* On disconnect: try to SUSPEND the session so it
 			 * survives for the next reconnect. */
 			if (rdp_sessmgr_suspend(cfg->sessmgr_sock,
@@ -2596,6 +2660,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 					desktop_w, desktop_h,
 					client_max_request,
 					client_color_ptr, client_large_ptr,
+					client_pointer_cache_size,
 					peer);
 				(void)close(be_fd);
 				goto done;
@@ -2663,6 +2728,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 							client_max_request,
 							client_color_ptr,
 							client_large_ptr,
+							client_pointer_cache_size,
 							peer);
 						(void)close(be_fd);
 						goto send_disconnect;
@@ -2707,6 +2773,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 					desktop_w, desktop_h,
 					client_max_request,
 					client_color_ptr, client_large_ptr,
+					client_pointer_cache_size,
 					peer);
 				(void)close(be_fd);
 				goto send_disconnect;
@@ -2773,7 +2840,8 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 			run_proxy(t, be_fd, &clip, &dynvc, &snd, &devr,
 				user_id, io_channel,
 				desktop_w, desktop_h, client_max_request,
-				client_color_ptr, client_large_ptr, peer);
+				client_color_ptr, client_large_ptr,
+				client_pointer_cache_size, peer);
 
 			/* On disconnect: try to SUSPEND so a reconnecting
 			 * client can resume without re-authenticating. */

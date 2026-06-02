@@ -128,6 +128,12 @@ ssize_t rdp_fp_build_pointer_new(uint8_t *out, size_t cap,
 		uint16_t cache_index, uint16_t hot_x, uint16_t hot_y,
 		uint16_t w, uint16_t h, const uint8_t *argb, size_t stride);
 
+/* Build a Cached Pointer fast-path update that recalls a previously
+ * sent New Pointer from client cache slot cache_index.  Body is a
+ * single u16 LE cacheIndex.  Returns total wire bytes, or -1 if it
+ * would not fit cap. */
+ssize_t rdp_fp_build_pointer_cached(uint8_t *out, size_t cap, uint16_t cache_index);
+
 /* Build a Bitmap fast-path update covering rect [x..x+w, y..y+h)
  * with `pixels` (24bpp packed BGR, top-down).  The wire format
  * expects bottom-up rows padded to a 4-pixel width, which this

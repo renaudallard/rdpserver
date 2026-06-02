@@ -166,6 +166,15 @@ rdp_fp_build_pointer_new(uint8_t *out, size_t cap,
 	return rc;
 }
 
+ssize_t
+rdp_fp_build_pointer_cached(uint8_t *out, size_t cap, uint16_t cache_index)
+{
+	uint8_t body[2];
+	body[0] = (uint8_t)(cache_index & 0xff);
+	body[1] = (uint8_t)(cache_index >> 8);
+	return rdp_fp_build_update(out, cap, RDP_FP_UPDATE_CACHED, body, sizeof body);
+}
+
 /* Convert a top-down 24bpp BGR frame slice into a bottom-up rows
  * padded to 4 pixels wide, packed contiguously.  This is what
  * TS_BITMAP_DATA expects when bitsPerPixel = 24 and compression = 0.
