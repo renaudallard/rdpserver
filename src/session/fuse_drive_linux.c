@@ -268,7 +268,20 @@ ln_emit_dirent_batch(struct fuse_drive *fd, uint64_t unique,
 				reclen - (FUSE_NAME_OFFSET + namelen));
 		off += reclen;
 	}
-	ln_reply_ok(fd, unique, out, off);
+	/* Write the header and the packed records directly.  ln_reply_ok is
+	 * sized for the fixed attr/entry replies and would reject a dirent
+	 * batch larger than 128 bytes, so a real directory must not route
+	 * through it. */
+	{
+		struct fuse_out_header oh;
+		memset(&oh, 0, sizeof oh);
+		oh.len = (uint32_t)(sizeof oh + off);
+		oh.error = 0;
+		oh.unique = unique;
+		(void)fd->write_reply(fd, &oh, sizeof oh);
+		if (off > 0)
+			(void)fd->write_reply(fd, out, off);
+	}
 	return off;
 }
 

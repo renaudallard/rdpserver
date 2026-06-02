@@ -2039,6 +2039,72 @@ test_rename_reparent(struct fuse_drive *fd)
 		"dir ok\n");
 }
 
+/*
+ * Regression: a root READDIR whose dirent batch exceeds 128 bytes (five
+ * or more drives) must return the whole batch.  The fixed-size reply
+ * buffer used to reject anything over 128 bytes with EIO, breaking the
+ * listing of any real directory.  Announce six more drives and confirm
+ * the full batch comes back.
+ */
+static void
+test_readdir_root_many(struct fuse_drive *fd)
+{
+	uint8_t buf[256];
+	struct fuse_read_in ri;
+	struct fuse_out_header oh;
+	size_t len, rlen, off;
+	const uint8_t *r, *p;
+	int i, found = 0;
+	static const char *names[6] = { "M0", "M1", "M2", "M3", "M4", "M5" };
+	char dn[9];
+
+	for (i = 0; i < 6; i++) {
+		memset(dn, ' ', 8);
+		dn[8] = '\0';
+		dn[0] = names[i][0];
+		dn[1] = names[i][1];
+		fuse_drive_add_device(fd, 200 + i, RDPDR_DTYP_FILESYSTEM, dn, 1);
+	}
+
+	memset(&ri, 0, sizeof ri);
+	ri.size = 4096;
+	fuse_drive_test_reset();
+	len = build_in(buf, FUSE_READDIR, 4, FUSE_ROOT_ID, &ri, sizeof ri);
+	fuse_drive_test_dispatch(fd, buf, len);
+
+	get_out(&oh);
+	if (oh.error != 0)
+		FAIL("root READDIR (many) error %d (the over-128-byte EIO bug)",
+			oh.error);
+	r = fuse_drive_test_reply(&rlen);
+	if (rlen - sizeof oh <= 128)
+		FAIL("root readdir batch %zu not over 128 (test ineffective)",
+			rlen - sizeof oh);
+	p = r + sizeof oh;
+	off = 0;
+	while (off + FUSE_NAME_OFFSET <= rlen - sizeof oh) {
+		struct fuse_dirent de;
+		size_t reclen;
+		char nm[256];
+		memcpy(&de, p + off, FUSE_NAME_OFFSET);
+		if (de.namelen > 255)
+			FAIL("dirent namelen %u", de.namelen);
+		reclen = FUSE_DIRENT_ALIGN(FUSE_NAME_OFFSET + de.namelen);
+		if (off + reclen > rlen - sizeof oh)
+			FAIL("dirent overruns reply");
+		memcpy(nm, p + off + FUSE_NAME_OFFSET, de.namelen);
+		nm[de.namelen] = '\0';
+		for (i = 0; i < 6; i++)
+			if (strcmp(nm, names[i]) == 0)
+				found++;
+		off += reclen;
+	}
+	if (found != 6)
+		FAIL("root readdir (many) found %d of 6 new drives", found);
+	printf("  readdir root (8 drives, batch over 128 bytes): full batch "
+		"returned ok\n");
+}
+
 int
 main(void)
 {
@@ -2088,6 +2154,7 @@ main(void)
 	test_rename_cross_device(fd);
 	test_rename_reparent(fd);
 	test_namespace_bounds(fd);
+	test_readdir_root_many(fd);
 
 	fuse_drive_free(fd);
 	printf("fuse_drive_test: all ok\n");
