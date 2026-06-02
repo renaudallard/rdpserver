@@ -27,28 +27,36 @@
  * POSSIBILITY OF SUCH DAMAGES.
  */
 /*
- * fuse_drive.c -- raw /dev/fuse read-write path for RDPDR drive
- * redirection.
+ * fuse_drive.c -- protocol agnostic core of the RDPDR drive redirection.
+ *
+ * This file owns everything that does not depend on a kernel wire format:
+ * the node table, the async in-flight model, the RDPDR FS_REQ senders, the
+ * FSCC encode/decode, the NTSTATUS to errno mapping, the op handlers, the
+ * FS_RSP completion handlers, and the device announce.  A wire backend
+ * (fuse_drive_linux.c for raw /dev/fuse, fuse_drive_obsd.c later for the
+ * OpenBSD fusebuf protocol) parses one request into struct fd_request and
+ * turns the core's OS neutral replies (struct fd_attr plus the emit_*
+ * calls) into the bytes its kernel expects.
  *
  * Design.
  *
- *   Node model.  A fixed table of nodes maps a FUSE nodeid (u64) to a
- *   path under one announced drive.  nodeid 1 is the synthetic root of
- *   the mount; its children are one directory node per announced drive
+ *   Node model.  A fixed table of nodes maps a node id (u64) to a path
+ *   under one announced drive.  nodeid 1 is the synthetic root of the
+ *   mount; its children are one directory node per announced drive
  *   (device_id, name = drive label).  Below a drive, each looked up name
  *   becomes a child node carrying device_id, parent nodeid, the leaf
  *   name, and whether it is a directory.  The full RDPDR path of a node
  *   is rebuilt by walking parents to the drive root.  A node also caches
  *   the open RDPDR handle (file_id) once OPEN/OPENDIR succeeds.
  *
- *   Async model.  FUSE ops that need the client store the kernel's
- *   fuse_unique in an in-flight slot keyed by a freshly allocated backend
- *   req_id, send the FS_REQ, and return WITHOUT writing a FUSE reply.
- *   When the matching RDP_BE_FS_RSP arrives, fuse_drive_handle_fs_rsp
- *   looks the slot up, maps NTSTATUS to errno, decodes the op payload,
- *   and writes the FUSE reply.  The in-flight table is bounded to
- *   FD_INFLIGHT_MAX; if it is full the op is failed immediately with
- *   ENOMEM so the kernel is never left waiting.
+ *   Async model.  Ops that need the client store the kernel's request id
+ *   in an in-flight slot keyed by a freshly allocated backend req_id, send
+ *   the FS_REQ, and return WITHOUT writing a reply.  When the matching
+ *   RDP_BE_FS_RSP arrives, fuse_drive_handle_fs_rsp looks the slot up,
+ *   maps NTSTATUS to errno, decodes the op payload, and writes the reply.
+ *   The in-flight table is bounded to FD_INFLIGHT_MAX; if it is full the
+ *   op is failed immediately with ENOMEM so the kernel is never left
+ *   waiting.
  *
  *   GETATTR / LOOKUP metadata chain.  Synthetic directories (root and the
  *   per-drive roots) answer immediately with a fabricated dir attr.  Any
@@ -56,30 +64,30 @@
  *   (opening it read-access first if no handle is held, and keeping it
  *   open as the read path does): FileStandardInformation yields the size
  *   and the dir/file split, then FileBasicInformation yields the
- *   timestamps and attributes.  The decoded attr is reported in the
- *   fuse_entry_out (LOOKUP) or fuse_attr_out (GETATTR/SETATTR).  Every
- *   FSCC field is bounds checked before use; on any query failure the
- *   chain falls back to a synthetic attr (size 0, zeroed times) and still
- *   replies so the kernel is never left waiting.  The open handle from the
- *   chain is reused for a following OPEN/OPENDIR so a browse does not
- *   reopen the same path twice.
+ *   timestamps and attributes.  The decoded attr is reported via
+ *   emit_entry (LOOKUP) or emit_attr (GETATTR/SETATTR).  Every FSCC field
+ *   is bounds checked before use; on any query failure the chain falls
+ *   back to a synthetic attr (size 0, zeroed times) and still replies so
+ *   the kernel is never left waiting.  The open handle from the chain is
+ *   reused for a following OPEN/OPENDIR so a browse does not reopen the
+ *   same path twice.
  *
- *   Write path.  FUSE_OPEN maps the open(2) access mode to an RDPDR
+ *   Write path.  OPEN maps the open(2) access mode to an RDPDR
  *   DesiredAccess (read, write, or both); a held read-only handle is
  *   upgraded by closing and reopening with the union of the old and new
- *   access (one handle per node, KISS).  FUSE_WRITE forwards the data with
- *   an RDP_FS_WRITE and reports the bytes the client acknowledges.
- *   FUSE_SETATTR turns a size change into a FileEndOfFileInformation
- *   SetInformation (truncate or extend, including save-with-truncate) and
- *   a time change into a FileBasicInformation SetInformation, then
- *   re-queries for the post-set attr.
+ *   access (one handle per node, KISS).  WRITE forwards the data with an
+ *   RDP_FS_WRITE and reports the bytes the client acknowledges.  SETATTR
+ *   turns a size change into a FileEndOfFileInformation SetInformation
+ *   (truncate or extend, including save-with-truncate) and a time change
+ *   into a FileBasicInformation SetInformation, then re-queries for the
+ *   post-set attr.
  *
  *   Trust.  Everything decoded out of an FS_RSP payload originates with
  *   the RDP client (its file system).  Every parse here is length
  *   bounded against the received payload before any byte is consumed.
  *
- * On hosts without <linux/fuse.h> (OpenBSD, macOS) the file compiles to
- * empty no-op stubs selected by HAVE_FUSE.
+ * On hosts without a supported drive wire format (no <linux/fuse.h> and no
+ * OpenBSD fusebuf) the file compiles to empty no-op stubs.
  */
 
 #define _GNU_SOURCE
@@ -88,15 +96,13 @@
 
 #if HAVE_FUSE
 
+#include "fuse_drive_internal.h"
+
 #include "../include/rdp_log.h"
 #include "../common/io.h"
 #include "../backend/proto.h"
 #include "../backend/proto_api.h"
 #include "../channels/rdpdr.h"   /* FileBothDirectoryInformation, NTSTATUS */
-
-#include <linux/fuse.h>
-
-#include <sys/stat.h>
 
 #include <errno.h>
 #include <fcntl.h>
@@ -104,127 +110,34 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
-/* Our supported FUSE protocol.  We answer INIT with major 7 and the
- * smaller of our and the kernel's minor.  7.27 predates every extended
- * input struct we touch, so the fixed sizes we parse are always present. */
-#define FD_FUSE_MINOR        27
-#define FD_MAX_WRITE         (128u * 1024u)
-#define FD_MAX_READ          (128u * 1024u)
+/* The synthetic mount root node id (matches the FUSE root id 1; the
+ * OpenBSD backend uses the same convention). */
+#define FD_ROOT_ID           1u
 
-#define FD_MAX_NODES         512
-#define FD_INFLIGHT_MAX      RDPDR_MAX_PENDING   /* 64 */
-#define FD_NAME_MAX          255
+/* Reply scratch: a READDIR fills at most the requested size, capped.  The
+ * core's dirent collectors size their working arrays to this. */
+#define FD_OUT_BUF_SZ        (128u * 1024u + 4096u)
+#define FD_MAX_READ          (128u * 1024u)
+#define FD_MAX_WRITE         (128u * 1024u)
 
 /* Private in-flight op tags above the wire RDP_FS_* range (1..7) so the
- * completion can tell which FUSE op a backend OPEN was serving.  These
- * never travel the wire: the backend FS_REQ always carries RDP_FS_OPEN. */
+ * completion can tell which op a backend OPEN was serving.  These never
+ * travel the wire: the backend FS_REQ always carries RDP_FS_OPEN. */
 #define RDP_FS_OPENDIR_TAG   101u
-#define RDP_FS_OPENFILE_TAG  102u   /* direct FUSE_OPEN of a regular file */
+#define RDP_FS_OPENFILE_TAG  102u   /* direct OPEN of a regular file */
 #define RDP_FS_GETATTR_TAG   103u   /* OPEN issued to drive a getattr chain */
 #define RDP_FS_SETATTR_TAG   104u   /* SET_INFO whose reply ends a setattr */
-#define RDP_FS_CREATE_TAG    105u   /* OPEN(FILE_CREATE) serving FUSE_CREATE */
-#define RDP_FS_MKNOD_TAG     106u   /* OPEN(FILE_CREATE) serving FUSE_MKNOD */
-#define RDP_FS_MKDIR_TAG     107u   /* OPEN(FILE_CREATE) serving FUSE_MKDIR */
-#define RDP_FS_UNLINK_TAG    108u   /* OPEN/SET chain serving FUSE_UNLINK/RMDIR */
-#define RDP_FS_RENAME_TAG    109u   /* OPEN/SET chain serving FUSE_RENAME */
+#define RDP_FS_CREATE_TAG    105u   /* OPEN(FILE_CREATE) serving CREATE */
+#define RDP_FS_MKNOD_TAG     106u   /* OPEN(FILE_CREATE) serving MKNOD */
+#define RDP_FS_MKDIR_TAG     107u   /* OPEN(FILE_CREATE) serving MKDIR */
+#define RDP_FS_UNLINK_TAG    108u   /* OPEN/SET chain serving UNLINK/RMDIR */
+#define RDP_FS_RENAME_TAG    109u   /* OPEN/SET chain serving RENAME */
 
-/* Read buffer: large enough for a 128 KiB write payload plus headers, so
- * one FUSE_WRITE request (fuse_write_in + up to max_write data bytes)
- * fits in a single read. */
-#define FD_IN_BUF_SZ         (FD_MAX_WRITE + 4096u)
-/* Reply scratch: a READDIR fills at most the requested size, capped. */
-#define FD_OUT_BUF_SZ        (128u * 1024u + 4096u)
-
-/*
- * Multi-step phase for an in-flight getattr/setattr chain.  A GETATTR or
- * LOOKUP on a real node walks PHASE_GETATTR_STD then PHASE_GETATTR_BASIC,
- * accumulating the decoded attributes between steps.  PHASE_NONE is a
- * single-step op (OPEN/READ/LIST/WRITE/CLOSE/SET_INFO).
- */
-enum fd_phase {
-	PHASE_NONE = 0,
-	PHASE_GETATTR_STD,    /* awaiting FileStandardInformation reply */
-	PHASE_GETATTR_BASIC,  /* awaiting FileBasicInformation reply */
-	PHASE_GETATTR_OPEN,   /* awaiting an OPEN before the query chain */
-	PHASE_SETATTR_EOF_THEN_TIME, /* EOF set done -> issue the time set next */
-	PHASE_UNLINK_OPEN,    /* delete: awaiting the OPEN(DELETE) */
-	PHASE_UNLINK_SETDISP, /* delete: awaiting the FileDispositionInformation set */
-	PHASE_RENAME_OPEN,    /* rename: awaiting the OPEN of the source */
-	PHASE_RENAME_SET      /* rename: awaiting the FileRenameInformation set */
-};
-
-/* Pending FileBasicInformation set carried across an EOF set completion for
- * a combined size+time SETATTR.  The times are already resolved to FILETIME
- * (ATIME_NOW/MTIME_NOW turned into a real wall-clock time). */
-struct fd_time_set {
-	int      set_atime, set_mtime;
-	uint64_t atime_ft, mtime_ft;
-};
-
-/* Decoded attributes accumulated across the getattr chain.  Unix times
- * are seconds since the epoch; 0 means "no value" (FILETIME was 0). */
-struct fd_attr_acc {
-	uint64_t size;
-	uint64_t mtime, atime, ctime;
-	int      is_dir;
-	int      readonly;
-};
-
-struct fd_node {
-	int      in_use;
-	uint64_t nodeid;
-	uint64_t parent;       /* parent nodeid; 0 for root */
-	uint32_t device_id;    /* owning RDPDR drive; 0 for the synthetic root */
-	int      is_drive;     /* a per-drive top-level directory */
-	int      is_dir;
-	uint32_t file_id;      /* open RDPDR handle, 0 when not open */
-	int      have_open;    /* file_id is valid */
-	unsigned open_refs;    /* kernel fds sharing this handle (open/release) */
-	uint32_t access;       /* DesiredAccess granted on the open handle */
-	uint64_t nlookup;      /* kernel lookup count, decremented by FORGET */
-	char     name[FD_NAME_MAX + 1];
-};
-
-struct fd_inflight {
-	int      in_use;
-	uint32_t req_id;
-	uint64_t fuse_unique;
-	uint32_t op;           /* RDP_FS_* (or a private *_TAG) */
-	uint64_t nodeid;       /* node the op concerns */
-	uint32_t read_size;    /* READ/WRITE: bytes the kernel asked for */
-	uint32_t req_access;   /* OPEN: DesiredAccess requested (0 = default) */
-	uint32_t reply_op;     /* getattr chain: FUSE_LOOKUP -> entry, else attr */
-	enum fd_phase phase;   /* getattr/setattr chain step */
-	struct fd_attr_acc acc;/* accumulated attrs for the getattr chain */
-	struct fd_time_set time_set; /* pending time set for combined SETATTR */
-	/* RENAME: the destination device-relative path (UTF-8) carried across
-	 * the source OPEN completion, plus the destination parent nodeid so the
-	 * source node can be re-parented once the rename lands. */
-	char     target[1024];
-	size_t   target_len;
-	uint64_t target_parent;
-};
-
-struct fuse_drive {
-	int      fuse_fd;
-	int      be_fd;
-	uint32_t next_req_id;
-	uint64_t next_nodeid;
-	struct fd_node nodes[FD_MAX_NODES];
-	struct fd_inflight inflight[FD_INFLIGHT_MAX];
-
-	/* Reply / request sinks.  The live session writes to the fds; the
-	 * regress harness substitutes in-memory capture sinks. */
-	int (*send_fs_req)(struct fuse_drive *, const struct rdp_be_fs_req *,
-		const void *payload, size_t payload_len);
-	int (*write_reply)(struct fuse_drive *, const void *buf, size_t len);
-	void *sink_ctx;
-};
-
-/* little-endian helpers (FUSE is host-endian; RDPDR FSCC is LE) */
+/* little-endian helpers (RDPDR FSCC is LE) */
 
 static uint32_t
 fd_ld32(const uint8_t *p)
@@ -303,7 +216,7 @@ fd_unix_to_filetime(uint64_t sec, uint32_t nsec)
 
 /* node table */
 
-static struct fd_node *
+struct fd_node *
 fd_node_find(struct fuse_drive *fd, uint64_t nodeid)
 {
 	int i;
@@ -314,7 +227,7 @@ fd_node_find(struct fuse_drive *fd, uint64_t nodeid)
 }
 
 /* Find an existing child of parent with this name, or NULL. */
-static struct fd_node *
+struct fd_node *
 fd_child_find(struct fuse_drive *fd, uint64_t parent,
 		const char *name, size_t namelen)
 {
@@ -349,7 +262,7 @@ fd_node_alloc(struct fuse_drive *fd)
 }
 
 /* Create-or-find a child node under parent with a copied leaf name. */
-static struct fd_node *
+struct fd_node *
 fd_child_make(struct fuse_drive *fd, uint64_t parent,
 		const char *name, size_t namelen, uint32_t device_id, int is_dir)
 {
@@ -389,7 +302,7 @@ fd_node_path(struct fuse_drive *fd, const struct fd_node *n,
 
 	/* Collect leaf names from the node up to (not including) the drive
 	 * root.  is_drive nodes contribute no path component. */
-	while (cur != NULL && !cur->is_drive && cur->nodeid != FUSE_ROOT_ID) {
+	while (cur != NULL && !cur->is_drive && cur->nodeid != FD_ROOT_ID) {
 		if (depth >= FD_MAX_NODES)
 			return (size_t)-1;
 		parts[depth++] = cur->name;
@@ -470,49 +383,17 @@ fd_status_to_errno(uint32_t status)
 	}
 }
 
-/* FUSE reply emit */
+/* reply emit (OS neutral, routed through the backend) */
 
-/* Write a fuse_out_header carrying an error (or success with no body). */
-static void
-fd_reply_error(struct fuse_drive *fd, uint64_t unique, int error)
-{
-	struct fuse_out_header oh;
-	memset(&oh, 0, sizeof oh);
-	oh.len = (uint32_t)sizeof oh;
-	oh.error = error;
-	oh.unique = unique;
-	(void)fd->write_reply(fd, &oh, sizeof oh);
-}
-
-/* Write a fuse_out_header followed by a fixed-size body. */
-static void
-fd_reply_ok(struct fuse_drive *fd, uint64_t unique,
-		const void *body, size_t body_len)
-{
-	uint8_t buf[sizeof(struct fuse_out_header)
-		+ sizeof(struct fuse_entry_out)];
-	struct fuse_out_header oh;
-
-	if (body_len > sizeof buf - sizeof oh) {
-		fd_reply_error(fd, unique, -EIO);
-		return;
-	}
-	memset(&oh, 0, sizeof oh);
-	oh.len = (uint32_t)(sizeof oh + body_len);
-	oh.error = 0;
-	oh.unique = unique;
-	memcpy(buf, &oh, sizeof oh);
-	if (body_len > 0)
-		memcpy(buf + sizeof oh, body, body_len);
-	(void)fd->write_reply(fd, buf, sizeof oh + body_len);
-}
-
-/* Fill a fuse_attr for a node.  Directories report mode 0500 (browse),
- * files 0400 (read), 0600 when write access has been granted.  When acc
- * is non-NULL the size and times come from a QUERY_INFO chain; otherwise
- * they are synthetic (size 0, zeroed times). */
-static void
-fd_fill_attr(const struct fd_node *n, struct fuse_attr *a,
+/*
+ * Fill an OS neutral attr for a node.  Directories report mode 0500
+ * (browse), files 0400 (read), 0600 when write access has been granted.
+ * When acc is non-NULL the size and times come from a QUERY_INFO chain;
+ * otherwise they are synthetic (size 0, zeroed times).  The backend turns
+ * the FD_S_IF* type bits into its own and adds any OS specific fields.
+ */
+void
+fd_node_to_attr(const struct fd_node *n, struct fd_attr *a,
 		const struct fd_attr_acc *acc)
 {
 	int is_dir = n->is_dir;
@@ -522,11 +403,11 @@ fd_fill_attr(const struct fd_node *n, struct fuse_attr *a,
 	if (acc != NULL)
 		is_dir = acc->is_dir;
 	if (is_dir) {
-		a->mode = S_IFDIR | 0500;
+		a->mode = FD_S_IFDIR | 0500;
 		a->nlink = 2;
 		a->size = acc != NULL ? acc->size : 0;
 	} else {
-		a->mode = S_IFREG | 0400;
+		a->mode = FD_S_IFREG | 0400;
 		a->nlink = 1;
 		a->size = acc != NULL ? acc->size : 0;
 		/* Reflect a writable handle, unless the file is read-only. */
@@ -539,20 +420,21 @@ fd_fill_attr(const struct fd_node *n, struct fuse_attr *a,
 		a->atime = acc->atime;
 		a->ctime = acc->ctime;
 	}
-	a->uid = (uint32_t)getuid();
-	a->gid = (uint32_t)getgid();
-	a->blksize = 4096;
+}
+
+static void
+fd_reply_error(struct fuse_drive *fd, uint64_t unique, int error)
+{
+	fd->backend->emit_error(fd, unique, error);
 }
 
 static void
 fd_reply_attr_acc(struct fuse_drive *fd, uint64_t unique,
 		const struct fd_node *n, const struct fd_attr_acc *acc)
 {
-	struct fuse_attr_out ao;
-	memset(&ao, 0, sizeof ao);
-	ao.attr_valid = 1;
-	fd_fill_attr(n, &ao.attr, acc);
-	fd_reply_ok(fd, unique, &ao, sizeof ao);
+	struct fd_attr a;
+	fd_node_to_attr(n, &a, acc);
+	fd->backend->emit_attr(fd, unique, &a);
 }
 
 static void
@@ -565,13 +447,9 @@ static void
 fd_reply_entry_acc(struct fuse_drive *fd, uint64_t unique,
 		const struct fd_node *n, const struct fd_attr_acc *acc)
 {
-	struct fuse_entry_out eo;
-	memset(&eo, 0, sizeof eo);
-	eo.nodeid = n->nodeid;
-	eo.entry_valid = 1;
-	eo.attr_valid = 1;
-	fd_fill_attr(n, &eo.attr, acc);
-	fd_reply_ok(fd, unique, &eo, sizeof eo);
+	struct fd_attr a;
+	fd_node_to_attr(n, &a, acc);
+	fd->backend->emit_entry(fd, unique, n->nodeid, &a);
 }
 
 static void
@@ -581,41 +459,16 @@ fd_reply_entry(struct fuse_drive *fd, uint64_t unique, const struct fd_node *n)
 }
 
 /*
- * Reply to a FUSE_CREATE: a fuse_out_header followed by fuse_entry_out and
- * then fuse_open_out.  A freshly created file is size 0, so a synthetic
+ * Reply to a CREATE.  A freshly created file is size 0, so a synthetic
  * regular-file attr is reported.  fh is the node id (one handle per node,
  * matching the rest of the module).
  */
 static void
 fd_reply_create(struct fuse_drive *fd, uint64_t unique, const struct fd_node *n)
 {
-	uint8_t buf[sizeof(struct fuse_out_header)
-		+ sizeof(struct fuse_entry_out)
-		+ sizeof(struct fuse_open_out)];
-	struct fuse_out_header oh;
-	struct fuse_entry_out eo;
-	struct fuse_open_out oo;
-	size_t off = 0;
-
-	memset(&eo, 0, sizeof eo);
-	eo.nodeid = n->nodeid;
-	eo.entry_valid = 1;
-	eo.attr_valid = 1;
-	fd_fill_attr(n, &eo.attr, NULL);
-
-	memset(&oo, 0, sizeof oo);
-	oo.fh = n->nodeid;
-	oo.open_flags = FOPEN_DIRECT_IO;
-
-	memset(&oh, 0, sizeof oh);
-	oh.len = (uint32_t)(sizeof oh + sizeof eo + sizeof oo);
-	oh.error = 0;
-	oh.unique = unique;
-
-	memcpy(buf + off, &oh, sizeof oh); off += sizeof oh;
-	memcpy(buf + off, &eo, sizeof eo); off += sizeof eo;
-	memcpy(buf + off, &oo, sizeof oo); off += sizeof oo;
-	(void)fd->write_reply(fd, buf, off);
+	struct fd_attr a;
+	fd_node_to_attr(n, &a, NULL);
+	fd->backend->emit_create(fd, unique, n->nodeid, n->nodeid, &a);
 }
 
 /* backend FS_REQ senders */
@@ -626,8 +479,8 @@ fd_reply_create(struct fuse_drive *fd, uint64_t unique, const struct fd_node *n)
  * and/or FILE_WRITE_DATA, or DELETE for a delete chain) requests that
  * access explicitly.  disposition selects open vs create; options carries
  * the NT CreateOptions (FILE_DIRECTORY_FILE, FILE_DELETE_ON_CLOSE, ...).
- * op_tag tells the completion which FUSE op the open was serving.  Returns
- * the new in-flight slot via *f_out (never NULL on success) so a caller
+ * op_tag tells the completion which op the open was serving.  Returns the
+ * new in-flight slot via *f_out (never NULL on success) so a caller
  * driving a multi-step chain can stash phase/path state on it.
  */
 static int
@@ -723,11 +576,11 @@ fd_send_query(struct fuse_drive *fd, struct fd_node *n, uint64_t unique,
 
 /*
  * Send a SET_INFO with a verbatim FSCC SetBuffer on the node's open
- * handle.  op_tag is the private tag identifying the FUSE op being
- * served (RDP_FS_SET_INFO when fire-and-forget, RDP_FS_SETATTR_TAG when
- * its reply must finish a setattr).  The new in-flight slot is returned
- * via *f_out (never NULL on success) so a caller chaining a combined
- * size+time setattr can stash phase/time_set state on it.
+ * handle.  op_tag is the private tag identifying the op being served
+ * (RDP_FS_SET_INFO when fire-and-forget, RDP_FS_SETATTR_TAG when its reply
+ * must finish a setattr).  The new in-flight slot is returned via *f_out
+ * (never NULL on success) so a caller chaining a combined size+time
+ * setattr can stash phase/time_set state on it.
  */
 static int
 fd_send_set_info(struct fuse_drive *fd, struct fd_node *n, uint64_t unique,
@@ -843,8 +696,8 @@ fd_send_close(struct fuse_drive *fd, struct fd_node *n)
 
 	if (!n->have_open)
 		return;
-	/* CLOSE has no FUSE reply to correlate, but we still allocate a slot
-	 * so the worker's FS_RSP for it is consumed cleanly. */
+	/* CLOSE has no reply to correlate, but we still allocate a slot so the
+	 * worker's FS_RSP for it is consumed cleanly. */
 	f = fd_inflight_alloc(fd, RDP_FS_CLOSE, 0, n->nodeid, &req_id);
 	if (f == NULL)
 		req_id = fd->next_req_id++;   /* fire and forget */
@@ -865,43 +718,15 @@ fd_send_close(struct fuse_drive *fd, struct fd_node *n)
 	n->access = 0;
 }
 
-/* FUSE opcode handlers */
+/* op handlers */
 
 static void
-fd_op_init(struct fuse_drive *fd, const struct fuse_in_header *ih,
-		const uint8_t *body, size_t body_len)
+fd_op_init(struct fuse_drive *fd, const struct fd_request *req)
 {
-	struct fuse_init_in in;
-	struct fuse_init_out out;
-	uint32_t kmajor, kminor;
-
-	if (body_len < sizeof(uint32_t) * 2) {
-		fd_reply_error(fd, ih->unique, -EINVAL);
-		return;
-	}
-	/* Only major/minor are guaranteed present in every INIT version. */
-	memset(&in, 0, sizeof in);
-	memcpy(&in, body, body_len < sizeof in ? body_len : sizeof in);
-	kmajor = in.major;
-	kminor = in.minor;
-
-	memset(&out, 0, sizeof out);
-	if (kmajor < FUSE_KERNEL_VERSION) {
-		/* Older kernel major: echo its major and let it re-INIT. */
-		out.major = kmajor;
-		out.minor = kminor;
-		fd_reply_ok(fd, ih->unique, &out, sizeof out);
-		return;
-	}
-	out.major = FUSE_KERNEL_VERSION;
-	out.minor = kminor < FD_FUSE_MINOR ? kminor : FD_FUSE_MINOR;
-	out.max_readahead = in.max_readahead;
-	out.flags = 0;   /* no optional features: keep the protocol minimal */
-	out.max_background = 0;
-	out.congestion_threshold = 0;
-	out.max_write = FD_MAX_WRITE;
-	out.time_gran = 1;
-	fd_reply_ok(fd, ih->unique, &out, sizeof out);
+	/* The wire backend's recv already produced and emitted the handshake
+	 * reply for its kernel; there is nothing OS neutral left to do. */
+	(void)fd;
+	(void)req;
 }
 
 /*
@@ -912,7 +737,7 @@ fd_op_init(struct fuse_drive *fd, const struct fuse_in_header *ih,
 static int
 fd_node_synthetic(const struct fd_node *n)
 {
-	return n->nodeid == FUSE_ROOT_ID || n->is_drive;
+	return n->nodeid == FD_ROOT_ID || n->is_drive;
 }
 
 /*
@@ -920,10 +745,10 @@ fd_node_synthetic(const struct fd_node *n)
  * chain is: optionally OPEN the node read-access if no handle is held,
  * then QUERY_INFO(FileStandardInformation), then
  * QUERY_INFO(FileBasicInformation), then reply with the decoded attr.
- * reply_op selects the final reply form: FUSE_LOOKUP yields a
- * fuse_entry_out, anything else a fuse_attr_out.  Returns 0 if the chain
- * was started (no FUSE reply written yet), or non-zero on a setup failure
- * (the caller then replies, typically with a synthetic fallback attr).
+ * reply_op selects the final reply form: FD_OP_LOOKUP yields an entry,
+ * anything else an attr.  Returns 0 if the chain was started (no reply
+ * written yet), or non-zero on a setup failure (the caller then replies,
+ * typically with a synthetic fallback attr).
  */
 static int
 fd_start_getattr(struct fuse_drive *fd, struct fd_node *n, uint64_t unique,
@@ -950,11 +775,11 @@ fd_start_getattr(struct fuse_drive *fd, struct fd_node *n, uint64_t unique,
 }
 
 static void
-fd_op_getattr(struct fuse_drive *fd, const struct fuse_in_header *ih)
+fd_op_getattr(struct fuse_drive *fd, const struct fd_request *req)
 {
-	struct fd_node *n = fd_node_find(fd, ih->nodeid);
+	struct fd_node *n = fd_node_find(fd, req->nodeid);
 	if (n == NULL) {
-		fd_reply_error(fd, ih->unique, -ENOENT);
+		fd_reply_error(fd, req->unique, -ENOENT);
 		return;
 	}
 	/* Synthetic directories (root, per-drive roots) answer immediately
@@ -962,59 +787,52 @@ fd_op_getattr(struct fuse_drive *fd, const struct fuse_in_header *ih)
 	 * for true size and times; on any failure the chain falls back to the
 	 * synthetic attr so the kernel is never left waiting. */
 	if (fd_node_synthetic(n)) {
-		fd_reply_attr(fd, ih->unique, n);
+		fd_reply_attr(fd, req->unique, n);
 		return;
 	}
-	if (fd_start_getattr(fd, n, ih->unique, FUSE_GETATTR) != 0) {
+	if (fd_start_getattr(fd, n, req->unique, FD_OP_GETATTR) != 0) {
 		/* Could not start the chain (no slot / path too long): fall
 		 * back to the synthetic attr rather than hang the kernel. */
-		fd_reply_attr(fd, ih->unique, n);
+		fd_reply_attr(fd, req->unique, n);
 	}
 }
 
 static void
-fd_op_lookup(struct fuse_drive *fd, const struct fuse_in_header *ih,
-		const uint8_t *body, size_t body_len)
+fd_op_lookup(struct fuse_drive *fd, const struct fd_request *req)
 {
-	struct fd_node *parent = fd_node_find(fd, ih->nodeid);
-	const char *name = (const char *)body;
-	size_t namelen;
+	struct fd_node *parent = fd_node_find(fd, req->nodeid);
+	const char *name = req->name;
+	size_t namelen = req->name_len;
 	struct fd_node *child;
 
 	if (parent == NULL || !parent->is_dir) {
-		fd_reply_error(fd, ih->unique, -ENOENT);
+		fd_reply_error(fd, req->unique, -ENOENT);
 		return;
 	}
-	/* The name is a NUL-terminated string filling the request body. */
-	if (body_len == 0 || body[body_len - 1] != '\0') {
-		fd_reply_error(fd, ih->unique, -EINVAL);
-		return;
-	}
-	namelen = strnlen(name, body_len);
-	if (namelen == 0 || namelen > FD_NAME_MAX) {
-		fd_reply_error(fd, ih->unique, -EINVAL);
+	if (name == NULL || namelen == 0 || namelen > FD_NAME_MAX) {
+		fd_reply_error(fd, req->unique, -EINVAL);
 		return;
 	}
 
 	/* Children of the synthetic root are the announced drives only; a
 	 * name that is not a known drive cannot exist. */
-	if (ih->nodeid == FUSE_ROOT_ID) {
-		child = fd_child_find(fd, FUSE_ROOT_ID, name, namelen);
+	if (req->nodeid == FD_ROOT_ID) {
+		child = fd_child_find(fd, FD_ROOT_ID, name, namelen);
 		if (child == NULL)
-			fd_reply_error(fd, ih->unique, -ENOENT);
+			fd_reply_error(fd, req->unique, -ENOENT);
 		else
-			fd_reply_entry(fd, ih->unique, child);
+			fd_reply_entry(fd, req->unique, child);
 		return;
 	}
 
 	/* Below a drive: create-or-find the child, then probe it with the
 	 * getattr chain.  Its OPEN establishes existence and the dir/file
 	 * split, and the QUERY_INFO steps fill in real size and times before
-	 * the fuse_entry_out is sent. */
+	 * the entry reply is sent. */
 	child = fd_child_make(fd, parent->nodeid, name, namelen,
 		parent->device_id, 0);
 	if (child == NULL) {
-		fd_reply_error(fd, ih->unique, -ENOMEM);
+		fd_reply_error(fd, req->unique, -ENOMEM);
 		return;
 	}
 	/* The kernel re-LOOKUPs each entry once its validity timeout lapses.
@@ -1022,33 +840,30 @@ fd_op_lookup(struct fuse_drive *fd, const struct fuse_in_header *ih,
 	 * a second OPEN that would leak the prior client handle; the query
 	 * chain still refreshes size and times over the held handle. */
 	child->nlookup++;
-	if (fd_start_getattr(fd, child, ih->unique, FUSE_LOOKUP) != 0) {
+	if (fd_start_getattr(fd, child, req->unique, FD_OP_LOOKUP) != 0) {
 		/* Could not start the chain: fall back to the synthetic entry
 		 * so the kernel still sees the node.  When the node has no open
 		 * handle this also drops the speculative lookup count. */
 		if (!child->have_open && child->nlookup > 0)
 			child->nlookup--;
-		fd_reply_entry(fd, ih->unique, child);
+		fd_reply_entry(fd, req->unique, child);
 	}
 }
 
 static void
-fd_op_opendir(struct fuse_drive *fd, const struct fuse_in_header *ih)
+fd_op_opendir(struct fuse_drive *fd, const struct fd_request *req)
 {
-	struct fd_node *n = fd_node_find(fd, ih->nodeid);
-	struct fuse_open_out out;
+	struct fd_node *n = fd_node_find(fd, req->nodeid);
 
 	if (n == NULL || !n->is_dir) {
-		fd_reply_error(fd, ih->unique, -ENOTDIR);
+		fd_reply_error(fd, req->unique, -ENOTDIR);
 		return;
 	}
 	/* The synthetic root and per-drive roots are listed without an RDPDR
 	 * handle.  A drive root needs a real open handle for READDIR, so open
 	 * it lazily; the synthetic root does not. */
-	if (ih->nodeid == FUSE_ROOT_ID) {
-		memset(&out, 0, sizeof out);
-		out.fh = ih->nodeid;
-		fd_reply_ok(fd, ih->unique, &out, sizeof out);
+	if (req->nodeid == FD_ROOT_ID) {
+		fd->backend->emit_open(fd, req->unique, req->nodeid, 0);
 		return;
 	}
 	if (n->have_open) {
@@ -1056,71 +871,54 @@ fd_op_opendir(struct fuse_drive *fd, const struct fuse_in_header *ih)
 		 * RELEASEDIR does not close the handle out from under another
 		 * still-open fd of the same node. */
 		n->open_refs++;
-		memset(&out, 0, sizeof out);
-		out.fh = ih->nodeid;
-		fd_reply_ok(fd, ih->unique, &out, sizeof out);
+		fd->backend->emit_open(fd, req->unique, req->nodeid, 0);
 		return;
 	}
-	if (fd_send_open(fd, n, ih->unique, RDP_FS_OPENDIR_TAG) != 0)
-		fd_reply_error(fd, ih->unique, -ENOMEM);
+	if (fd_send_open(fd, n, req->unique, RDP_FS_OPENDIR_TAG) != 0)
+		fd_reply_error(fd, req->unique, -ENOMEM);
+}
+
+/*
+ * Collect the dirents of the synthetic root (one per announced drive)
+ * into ents and emit them through the backend.  A non-zero offset means
+ * the kernel already consumed our single batch.
+ */
+static void
+fd_op_readdir_root(struct fuse_drive *fd, const struct fd_request *req)
+{
+	struct fd_dirent ents[FD_MAX_NODES];
+	size_t n = 0;
+	int i;
+
+	if (req->offset != 0) {
+		fd->backend->emit_dirent_batch(fd, req->unique, NULL, 0, 0);
+		return;
+	}
+	for (i = 0; i < FD_MAX_NODES; i++) {
+		struct fd_node *d = &fd->nodes[i];
+		if (!d->in_use || d->parent != FD_ROOT_ID || !d->is_drive)
+			continue;
+		ents[n].ino = d->nodeid;
+		ents[n].name = d->name;
+		ents[n].name_len = strlen(d->name);
+		ents[n].is_dir = 1;
+		n++;
+	}
+	fd->backend->emit_dirent_batch(fd, req->unique, ents, n, req->size);
 }
 
 static void
-fd_op_readdir(struct fuse_drive *fd, const struct fuse_in_header *ih,
-		const uint8_t *body, size_t body_len)
+fd_op_readdir(struct fuse_drive *fd, const struct fd_request *req)
 {
-	struct fuse_read_in ri;
-	struct fd_node *n = fd_node_find(fd, ih->nodeid);
+	struct fd_node *n = fd_node_find(fd, req->nodeid);
 
 	if (n == NULL || !n->is_dir) {
-		fd_reply_error(fd, ih->unique, -ENOTDIR);
+		fd_reply_error(fd, req->unique, -ENOTDIR);
 		return;
 	}
-	if (body_len < sizeof ri) {
-		fd_reply_error(fd, ih->unique, -EINVAL);
-		return;
-	}
-	memcpy(&ri, body, sizeof ri);
 
-	/* Root: synthesize one dirent per announced drive.  A non-zero
-	 * offset means the kernel already consumed our single batch. */
-	if (ih->nodeid == FUSE_ROOT_ID) {
-		uint8_t out[FD_OUT_BUF_SZ];
-		size_t off = 0;
-		uint64_t doff = 0;
-		int i;
-		size_t want = ri.size < sizeof out ? ri.size : sizeof out;
-
-		if (ri.offset != 0) {
-			fd_reply_ok(fd, ih->unique, NULL, 0);
-			return;
-		}
-		for (i = 0; i < FD_MAX_NODES; i++) {
-			struct fd_node *d = &fd->nodes[i];
-			struct fuse_dirent de;
-			size_t namelen, reclen;
-			if (!d->in_use || d->parent != FUSE_ROOT_ID
-			    || !d->is_drive)
-				continue;
-			namelen = strlen(d->name);
-			reclen = FUSE_DIRENT_ALIGN(FUSE_NAME_OFFSET + namelen);
-			if (off + reclen > want)
-				break;
-			doff++;
-			memset(&de, 0, sizeof de);
-			de.ino = d->nodeid;
-			de.off = doff;
-			de.namelen = (uint32_t)namelen;
-			de.type = S_IFDIR >> 12;   /* DT_DIR */
-			memcpy(out + off, &de, FUSE_NAME_OFFSET);
-			memcpy(out + off + FUSE_NAME_OFFSET, d->name, namelen);
-			/* Zero the alignment tail so no stack bytes leak. */
-			if (reclen > FUSE_NAME_OFFSET + namelen)
-				memset(out + off + FUSE_NAME_OFFSET + namelen, 0,
-					reclen - (FUSE_NAME_OFFSET + namelen));
-			off += reclen;
-		}
-		fd_reply_ok(fd, ih->unique, out, off);
+	if (req->nodeid == FD_ROOT_ID) {
+		fd_op_readdir_root(fd, req);
 		return;
 	}
 
@@ -1128,20 +926,20 @@ fd_op_readdir(struct fuse_drive *fd, const struct fuse_in_header *ih,
 	 * means the kernel wants more after our single batch, which we do not
 	 * paginate yet, so return EOF.  Known limitation: directories whose
 	 * full listing exceeds one batch are truncated to the first batch. */
-	if (ri.offset != 0) {
-		fd_reply_ok(fd, ih->unique, NULL, 0);
+	if (req->offset != 0) {
+		fd->backend->emit_dirent_batch(fd, req->unique, NULL, 0, 0);
 		return;
 	}
 	if (!n->have_open) {
-		fd_reply_error(fd, ih->unique, -EBADF);
+		fd_reply_error(fd, req->unique, -EBADF);
 		return;
 	}
-	if (fd_send_list(fd, n, ih->unique) != 0)
-		fd_reply_error(fd, ih->unique, -ENOMEM);
+	if (fd_send_list(fd, n, req->unique) != 0)
+		fd_reply_error(fd, req->unique, -ENOMEM);
 }
 
-/* Map the open(2) access mode from fuse_open_in.flags to an NT
- * DesiredAccess.  O_RDONLY grants read, O_WRONLY write, O_RDWR both. */
+/* Map the open(2) access mode to an NT DesiredAccess.  O_RDONLY grants
+ * read, O_WRONLY write, O_RDWR both. */
 static uint32_t
 fd_access_from_oflags(uint32_t oflags)
 {
@@ -1157,26 +955,20 @@ fd_access_from_oflags(uint32_t oflags)
 }
 
 static void
-fd_op_open(struct fuse_drive *fd, const struct fuse_in_header *ih,
-		const uint8_t *body, size_t body_len)
+fd_op_open(struct fuse_drive *fd, const struct fd_request *req)
 {
-	struct fd_node *n = fd_node_find(fd, ih->nodeid);
-	struct fuse_open_in oi;
-	struct fuse_open_out out;
+	struct fd_node *n = fd_node_find(fd, req->nodeid);
 	uint32_t want;
 
 	if (n == NULL) {
-		fd_reply_error(fd, ih->unique, -ENOENT);
+		fd_reply_error(fd, req->unique, -ENOENT);
 		return;
 	}
 	if (n->is_dir) {
-		fd_reply_error(fd, ih->unique, -EISDIR);
+		fd_reply_error(fd, req->unique, -EISDIR);
 		return;
 	}
-	memset(&oi, 0, sizeof oi);
-	if (body_len >= sizeof oi)
-		memcpy(&oi, body, sizeof oi);
-	want = fd_access_from_oflags(oi.flags);
+	want = fd_access_from_oflags(req->flags);
 
 	/*
 	 * Reopen-on-upgrade.  A held handle is reused only when it already
@@ -1190,10 +982,7 @@ fd_op_open(struct fuse_drive *fd, const struct fuse_in_header *ih,
 		 * kernel and count the extra fd so a later RELEASE does not
 		 * tear the shared handle down while another fd is still open. */
 		n->open_refs++;
-		memset(&out, 0, sizeof out);
-		out.fh = ih->nodeid;
-		out.open_flags = FOPEN_DIRECT_IO;
-		fd_reply_ok(fd, ih->unique, &out, sizeof out);
+		fd->backend->emit_open(fd, req->unique, req->nodeid, 1);
 		return;
 	}
 	if (n->have_open) {
@@ -1204,69 +993,49 @@ fd_op_open(struct fuse_drive *fd, const struct fuse_in_header *ih,
 		want |= n->access;
 		fd_send_close(fd, n);
 	}
-	if (fd_send_open_ex(fd, n, ih->unique, RDP_FS_OPENFILE_TAG, want,
+	if (fd_send_open_ex(fd, n, req->unique, RDP_FS_OPENFILE_TAG, want,
 	    NULL) != 0)
-		fd_reply_error(fd, ih->unique, -ENOMEM);
+		fd_reply_error(fd, req->unique, -ENOMEM);
 }
 
 static void
-fd_op_read(struct fuse_drive *fd, const struct fuse_in_header *ih,
-		const uint8_t *body, size_t body_len)
+fd_op_read(struct fuse_drive *fd, const struct fd_request *req)
 {
-	struct fuse_read_in ri;
-	struct fd_node *n = fd_node_find(fd, ih->nodeid);
+	struct fd_node *n = fd_node_find(fd, req->nodeid);
 	uint32_t size;
 
 	if (n == NULL || n->is_dir || !n->have_open) {
-		fd_reply_error(fd, ih->unique, -EBADF);
+		fd_reply_error(fd, req->unique, -EBADF);
 		return;
 	}
-	if (body_len < sizeof ri) {
-		fd_reply_error(fd, ih->unique, -EINVAL);
-		return;
-	}
-	memcpy(&ri, body, sizeof ri);
-	size = ri.size;
+	size = req->size;
 	if (size > FD_MAX_READ)
 		size = FD_MAX_READ;
-	if (fd_send_read(fd, n, ih->unique, ri.offset, size) != 0)
-		fd_reply_error(fd, ih->unique, -ENOMEM);
+	if (fd_send_read(fd, n, req->unique, req->offset, size) != 0)
+		fd_reply_error(fd, req->unique, -ENOMEM);
 }
 
 static void
-fd_op_write(struct fuse_drive *fd, const struct fuse_in_header *ih,
-		const uint8_t *body, size_t body_len)
+fd_op_write(struct fuse_drive *fd, const struct fd_request *req)
 {
-	struct fuse_write_in wi;
-	struct fd_node *n = fd_node_find(fd, ih->nodeid);
-	const uint8_t *data;
+	struct fd_node *n = fd_node_find(fd, req->nodeid);
 	uint32_t size;
 
 	if (n == NULL || n->is_dir || !n->have_open) {
-		fd_reply_error(fd, ih->unique, -EBADF);
+		fd_reply_error(fd, req->unique, -EBADF);
 		return;
 	}
 	if ((n->access & FILE_WRITE_DATA) == 0) {
 		/* The handle was opened read-only; the kernel should not write
 		 * to it, but reject rather than corrupt. */
-		fd_reply_error(fd, ih->unique, -EBADF);
+		fd_reply_error(fd, req->unique, -EBADF);
 		return;
 	}
-	if (body_len < sizeof wi) {
-		fd_reply_error(fd, ih->unique, -EINVAL);
-		return;
-	}
-	memcpy(&wi, body, sizeof wi);
-	size = wi.size;
-	/* The write data follows the fixed fuse_write_in.  Never read past
-	 * the bytes the kernel actually delivered in this request. */
-	if (size > body_len - sizeof wi)
-		size = (uint32_t)(body_len - sizeof wi);
+	size = req->data_len;
 	if (size > FD_MAX_WRITE)
 		size = FD_MAX_WRITE;
-	data = body + sizeof wi;
-	if (fd_send_write(fd, n, ih->unique, wi.offset, data, size) != 0)
-		fd_reply_error(fd, ih->unique, -ENOMEM);
+	if (fd_send_write(fd, n, req->unique, req->offset, req->data, size) != 0)
+		fd_reply_error(fd, req->unique, -ENOMEM);
 }
 
 /* Build a FileEndOfFileInformation SetBuffer (8 bytes) for a truncate. */
@@ -1297,31 +1066,28 @@ fd_build_basic_info(uint8_t buf[FSCC_BASIC_INFO_LEN],
 }
 
 /*
- * Resolve the requested atime/mtime from a fuse_setattr_in into FILETIME
- * values (ATIME_NOW/MTIME_NOW become the current wall-clock time).  The
- * unix seconds are mirrored into acc so a fallback reply still reflects
- * what was asked.  Only FATTR_ATIME/FATTR_MTIME bits select a field.
+ * Resolve the requested atime/mtime from a SETATTR request into FILETIME
+ * values.  The unix seconds are mirrored into acc so a fallback reply
+ * still reflects what was asked.  Only FD_FATTR_ATIME/FD_FATTR_MTIME bits
+ * select a field; the backend already resolved ATIME_NOW/MTIME_NOW into a
+ * real wall-clock time before filling the request.
  */
 static void
-fd_resolve_time_set(const struct fuse_setattr_in *si, struct fd_time_set *ts,
+fd_resolve_time_set(const struct fd_request *req, struct fd_time_set *ts,
 		struct fd_attr_acc *acc)
 {
-	uint64_t now = (uint64_t)time(NULL);
-
 	memset(ts, 0, sizeof *ts);
-	ts->set_atime = (si->valid & FATTR_ATIME) != 0;
-	ts->set_mtime = (si->valid & FATTR_MTIME) != 0;
+	ts->set_atime = (req->fattr_valid & FD_FATTR_ATIME) != 0;
+	ts->set_mtime = (req->fattr_valid & FD_FATTR_MTIME) != 0;
 	if (ts->set_atime) {
-		uint64_t sec = (si->valid & FATTR_ATIME_NOW) ? now : si->atime;
-		uint32_t nsec = (si->valid & FATTR_ATIME_NOW) ? 0u : si->atimensec;
-		ts->atime_ft = fd_unix_to_filetime(sec, nsec);
-		acc->atime = sec;
+		ts->atime_ft = fd_unix_to_filetime(req->set_atime,
+			req->set_atimensec);
+		acc->atime = req->set_atime;
 	}
 	if (ts->set_mtime) {
-		uint64_t sec = (si->valid & FATTR_MTIME_NOW) ? now : si->mtime;
-		uint32_t nsec = (si->valid & FATTR_MTIME_NOW) ? 0u : si->mtimensec;
-		ts->mtime_ft = fd_unix_to_filetime(sec, nsec);
-		acc->mtime = sec;
+		ts->mtime_ft = fd_unix_to_filetime(req->set_mtime,
+			req->set_mtimensec);
+		acc->mtime = req->set_mtime;
 	}
 }
 
@@ -1347,23 +1113,16 @@ fd_send_time_set(struct fuse_drive *fd, struct fd_node *n, uint64_t unique,
 }
 
 static void
-fd_op_setattr(struct fuse_drive *fd, const struct fuse_in_header *ih,
-		const uint8_t *body, size_t body_len)
+fd_op_setattr(struct fuse_drive *fd, const struct fd_request *req)
 {
-	struct fuse_setattr_in si;
-	struct fd_node *n = fd_node_find(fd, ih->nodeid);
+	struct fd_node *n = fd_node_find(fd, req->nodeid);
 	struct fd_attr_acc acc;
 	int want_time;
 
 	if (n == NULL) {
-		fd_reply_error(fd, ih->unique, -ENOENT);
+		fd_reply_error(fd, req->unique, -ENOENT);
 		return;
 	}
-	if (body_len < sizeof si) {
-		fd_reply_error(fd, ih->unique, -EINVAL);
-		return;
-	}
-	memcpy(&si, body, sizeof si);
 
 	/* A SETATTR needs an open handle to carry the SET_INFO.  Without one
 	 * we cannot honour size/time changes; report success on the parts we
@@ -1373,8 +1132,8 @@ fd_op_setattr(struct fuse_drive *fd, const struct fuse_in_header *ih,
 	if (!n->have_open) {
 		memset(&acc, 0, sizeof acc);
 		acc.is_dir = n->is_dir;
-		acc.size = si.valid & FATTR_SIZE ? si.size : 0;
-		fd_reply_attr_acc(fd, ih->unique, n, &acc);
+		acc.size = req->fattr_valid & FD_FATTR_SIZE ? req->set_size : 0;
+		fd_reply_attr_acc(fd, req->unique, n, &acc);
 		return;
 	}
 
@@ -1382,29 +1141,28 @@ fd_op_setattr(struct fuse_drive *fd, const struct fuse_in_header *ih,
 	 * post-set re-query cannot be started) still reflects what we set. */
 	memset(&acc, 0, sizeof acc);
 	acc.is_dir = n->is_dir;
-	want_time = (si.valid & (FATTR_ATIME | FATTR_MTIME)) != 0;
+	want_time = (req->fattr_valid & (FD_FATTR_ATIME | FD_FATTR_MTIME)) != 0;
 
-	if (si.valid & FATTR_SIZE) {
+	if (req->fattr_valid & FD_FATTR_SIZE) {
 		/* Truncate or extend.  Handles the O_TRUNC-on-save case where
 		 * the new size is 0. */
 		uint8_t eof[FSCC_EOF_INFO_LEN];
 		struct fd_inflight *f = NULL;
-		acc.size = si.size;
-		fd_build_eof_info(eof, si.size);
+		acc.size = req->set_size;
+		fd_build_eof_info(eof, req->set_size);
 
 		if (want_time) {
 			/* Combined size + time set (a common save sequence).  The
-			 * sets are async and must yield exactly one fuse reply, so
-			 * send the EOF set first, tagged with the intermediate
-			 * phase; resolve and stash the time set on the slot so the
-			 * EOF completion can issue it after the original
-			 * fuse_setattr_in is gone. */
+			 * sets are async and must yield exactly one reply, so send
+			 * the EOF set first, tagged with the intermediate phase;
+			 * resolve and stash the time set on the slot so the EOF
+			 * completion can issue it after the request is gone. */
 			struct fd_time_set ts;
-			fd_resolve_time_set(&si, &ts, &acc);
-			if (fd_send_set_info(fd, n, ih->unique,
+			fd_resolve_time_set(req, &ts, &acc);
+			if (fd_send_set_info(fd, n, req->unique,
 			    FileEndOfFileInformation, RDP_FS_SETATTR_TAG,
 			    eof, sizeof eof, &f) != 0 || f == NULL) {
-				fd_reply_attr_acc(fd, ih->unique, n, &acc);
+				fd_reply_attr_acc(fd, req->unique, n, &acc);
 				return;
 			}
 			f->phase = PHASE_SETATTR_EOF_THEN_TIME;
@@ -1414,211 +1172,151 @@ fd_op_setattr(struct fuse_drive *fd, const struct fuse_in_header *ih,
 		}
 
 		/* Size only: the EOF completion runs the single re-query. */
-		if (fd_send_set_info(fd, n, ih->unique, FileEndOfFileInformation,
+		if (fd_send_set_info(fd, n, req->unique, FileEndOfFileInformation,
 		    RDP_FS_SETATTR_TAG, eof, sizeof eof, &f) != 0)
-			fd_reply_attr_acc(fd, ih->unique, n, &acc);
+			fd_reply_attr_acc(fd, req->unique, n, &acc);
 		return;
 	}
 
 	if (want_time) {
-		/* Time only.  ATIME_NOW/MTIME_NOW request the current
-		 * wall-clock time. */
+		/* Time only.  ATIME_NOW/MTIME_NOW were resolved by the backend
+		 * into the request's wall-clock time. */
 		struct fd_time_set ts;
-		fd_resolve_time_set(&si, &ts, &acc);
-		if (fd_send_time_set(fd, n, ih->unique, &ts, &acc) != 0)
-			fd_reply_attr_acc(fd, ih->unique, n, &acc);
+		fd_resolve_time_set(req, &ts, &acc);
+		if (fd_send_time_set(fd, n, req->unique, &ts, &acc) != 0)
+			fd_reply_attr_acc(fd, req->unique, n, &acc);
 		return;
 	}
 
 	/* Mode/uid/gid/etc: nothing to push to RDPDR.  Reply with a fresh
 	 * attr via the getattr chain so the kernel sees current state. */
-	if (fd_start_getattr(fd, n, ih->unique, FUSE_SETATTR) != 0)
-		fd_reply_attr_acc(fd, ih->unique, n, &acc);
+	if (fd_start_getattr(fd, n, req->unique, FD_OP_SETATTR) != 0)
+		fd_reply_attr_acc(fd, req->unique, n, &acc);
 }
 
 /* namespace ops: create, mknod, mkdir, unlink/rmdir, rename */
 
 /*
- * Pull the leaf name out of a FUSE namespace request body.  The kernel
- * appends a single NUL-terminated component after the op's fixed struct
- * (offset fixed_len); for the RENAME body two components follow back to
- * back, so this is called once per component.  Returns a pointer to the
- * name and its length via *name_len, or NULL on a malformed (unterminated
- * or empty/over-long) body.  Every read is bounded against body_len.
- */
-static const char *
-fd_name_field(const uint8_t *body, size_t body_len, size_t off,
-		size_t *name_len)
-{
-	const char *name;
-	size_t avail, namelen;
-
-	if (off >= body_len)
-		return NULL;
-	name = (const char *)(body + off);
-	avail = body_len - off;
-	namelen = strnlen(name, avail);
-	if (namelen == avail)
-		return NULL;   /* no terminating NUL inside the body */
-	if (namelen == 0 || namelen > FD_NAME_MAX)
-		return NULL;
-	*name_len = namelen;
-	return name;
-}
-
-/*
- * FUSE_CREATE: atomic create + open of a new regular file under a parent
+ * CREATE: atomic create + open of a new regular file under a parent
  * directory node.  We make the child node and issue an OPEN with
  * disposition FILE_CREATE (which fails if the file already exists; the
  * kernel only sends CREATE after a LOOKUP miss, so that is the correct
  * semantics) and write access.  The completion stores the handle and
- * replies fuse_entry_out followed by fuse_open_out.
+ * replies the entry followed by the open handle.
  */
 static void
-fd_op_create(struct fuse_drive *fd, const struct fuse_in_header *ih,
-		const uint8_t *body, size_t body_len)
+fd_op_create(struct fuse_drive *fd, const struct fd_request *req)
 {
-	struct fuse_create_in ci;
-	struct fd_node *parent = fd_node_find(fd, ih->nodeid);
+	struct fd_node *parent = fd_node_find(fd, req->nodeid);
 	struct fd_node *child;
-	const char *name;
-	size_t namelen;
 	uint32_t access;
 	struct fd_inflight *f = NULL;
 
 	if (parent == NULL || !parent->is_dir || parent->device_id == 0) {
-		fd_reply_error(fd, ih->unique, -ENOENT);
+		fd_reply_error(fd, req->unique, -ENOENT);
 		return;
 	}
-	if (body_len < sizeof ci) {
-		fd_reply_error(fd, ih->unique, -EINVAL);
-		return;
-	}
-	memcpy(&ci, body, sizeof ci);
-	name = fd_name_field(body, body_len, sizeof ci, &namelen);
-	if (name == NULL) {
-		fd_reply_error(fd, ih->unique, -EINVAL);
+	if (req->name == NULL || req->name_len == 0
+	    || req->name_len > FD_NAME_MAX) {
+		fd_reply_error(fd, req->unique, -EINVAL);
 		return;
 	}
 
-	child = fd_child_make(fd, parent->nodeid, name, namelen,
+	child = fd_child_make(fd, parent->nodeid, req->name, req->name_len,
 		parent->device_id, 0);
 	if (child == NULL) {
-		fd_reply_error(fd, ih->unique, -ENOMEM);
+		fd_reply_error(fd, req->unique, -ENOMEM);
 		return;
 	}
 	/* Request at least write access; map the open(2) mode for read too so
 	 * an O_RDWR create can be read back over the same handle. */
-	access = fd_access_from_oflags(ci.flags) | FILE_WRITE_DATA;
-	if (fd_send_open_full(fd, child, ih->unique, RDP_FS_CREATE_TAG, access,
+	access = fd_access_from_oflags(req->flags) | FILE_WRITE_DATA;
+	if (fd_send_open_full(fd, child, req->unique, RDP_FS_CREATE_TAG, access,
 	    FILE_CREATE, FILE_NON_DIRECTORY_FILE, &f) != 0 || f == NULL) {
 		/* Drop the speculative node so a retry is clean. */
 		if (!child->have_open)
 			child->in_use = 0;
-		fd_reply_error(fd, ih->unique, -ENOMEM);
+		fd_reply_error(fd, req->unique, -ENOMEM);
 	}
 }
 
 /*
- * FUSE_MKNOD: create a regular file with no open handle left behind.  Only
- * regular files are supported (S_ISREG); anything else is rejected with
- * EPERM.  The OPEN(FILE_CREATE) completion closes the handle and replies
- * fuse_entry_out only.
+ * MKNOD: create a regular file with no open handle left behind.  Only
+ * regular files are supported (S_ISREG); the backend rejects anything
+ * else with EPERM before dispatch.  The OPEN(FILE_CREATE) completion
+ * closes the handle and replies the entry only.
  */
 static void
-fd_op_mknod(struct fuse_drive *fd, const struct fuse_in_header *ih,
-		const uint8_t *body, size_t body_len)
+fd_op_mknod(struct fuse_drive *fd, const struct fd_request *req)
 {
-	struct fuse_mknod_in mi;
-	struct fd_node *parent = fd_node_find(fd, ih->nodeid);
+	struct fd_node *parent = fd_node_find(fd, req->nodeid);
 	struct fd_node *child;
-	const char *name;
-	size_t namelen;
 	struct fd_inflight *f = NULL;
 
 	if (parent == NULL || !parent->is_dir || parent->device_id == 0) {
-		fd_reply_error(fd, ih->unique, -ENOENT);
+		fd_reply_error(fd, req->unique, -ENOENT);
 		return;
 	}
-	if (body_len < sizeof mi) {
-		fd_reply_error(fd, ih->unique, -EINVAL);
-		return;
-	}
-	memcpy(&mi, body, sizeof mi);
-	if (!S_ISREG(mi.mode)) {
-		/* Devices, FIFOs and sockets have no RDPDR representation. */
-		fd_reply_error(fd, ih->unique, -EPERM);
-		return;
-	}
-	name = fd_name_field(body, body_len, sizeof mi, &namelen);
-	if (name == NULL) {
-		fd_reply_error(fd, ih->unique, -EINVAL);
+	if (req->name == NULL || req->name_len == 0
+	    || req->name_len > FD_NAME_MAX) {
+		fd_reply_error(fd, req->unique, -EINVAL);
 		return;
 	}
 
-	child = fd_child_make(fd, parent->nodeid, name, namelen,
+	child = fd_child_make(fd, parent->nodeid, req->name, req->name_len,
 		parent->device_id, 0);
 	if (child == NULL) {
-		fd_reply_error(fd, ih->unique, -ENOMEM);
+		fd_reply_error(fd, req->unique, -ENOMEM);
 		return;
 	}
-	if (fd_send_open_full(fd, child, ih->unique, RDP_FS_MKNOD_TAG,
+	if (fd_send_open_full(fd, child, req->unique, RDP_FS_MKNOD_TAG,
 	    FILE_READ_DATA | FILE_WRITE_DATA, FILE_CREATE,
 	    FILE_NON_DIRECTORY_FILE, &f) != 0 || f == NULL) {
 		if (!child->have_open)
 			child->in_use = 0;
-		fd_reply_error(fd, ih->unique, -ENOMEM);
+		fd_reply_error(fd, req->unique, -ENOMEM);
 	}
 }
 
 /*
- * FUSE_MKDIR: create a directory.  OPEN(FILE_CREATE, FILE_DIRECTORY_FILE)
- * then close the handle in the completion and reply fuse_entry_out with an
- * S_IFDIR attr for the new child dir node.
+ * MKDIR: create a directory.  OPEN(FILE_CREATE, FILE_DIRECTORY_FILE) then
+ * close the handle in the completion and reply the entry with an S_IFDIR
+ * attr for the new child dir node.
  */
 static void
-fd_op_mkdir(struct fuse_drive *fd, const struct fuse_in_header *ih,
-		const uint8_t *body, size_t body_len)
+fd_op_mkdir(struct fuse_drive *fd, const struct fd_request *req)
 {
-	struct fuse_mkdir_in mi;
-	struct fd_node *parent = fd_node_find(fd, ih->nodeid);
+	struct fd_node *parent = fd_node_find(fd, req->nodeid);
 	struct fd_node *child;
-	const char *name;
-	size_t namelen;
 	struct fd_inflight *f = NULL;
 
 	if (parent == NULL || !parent->is_dir || parent->device_id == 0) {
-		fd_reply_error(fd, ih->unique, -ENOENT);
+		fd_reply_error(fd, req->unique, -ENOENT);
 		return;
 	}
-	if (body_len < sizeof mi) {
-		fd_reply_error(fd, ih->unique, -EINVAL);
-		return;
-	}
-	memcpy(&mi, body, sizeof mi);
-	name = fd_name_field(body, body_len, sizeof mi, &namelen);
-	if (name == NULL) {
-		fd_reply_error(fd, ih->unique, -EINVAL);
+	if (req->name == NULL || req->name_len == 0
+	    || req->name_len > FD_NAME_MAX) {
+		fd_reply_error(fd, req->unique, -EINVAL);
 		return;
 	}
 
-	child = fd_child_make(fd, parent->nodeid, name, namelen,
+	child = fd_child_make(fd, parent->nodeid, req->name, req->name_len,
 		parent->device_id, 1);
 	if (child == NULL) {
-		fd_reply_error(fd, ih->unique, -ENOMEM);
+		fd_reply_error(fd, req->unique, -ENOMEM);
 		return;
 	}
-	if (fd_send_open_full(fd, child, ih->unique, RDP_FS_MKDIR_TAG,
+	if (fd_send_open_full(fd, child, req->unique, RDP_FS_MKDIR_TAG,
 	    FILE_READ_DATA, FILE_CREATE, FILE_DIRECTORY_FILE, &f) != 0
 	    || f == NULL) {
 		if (!child->have_open)
 			child->in_use = 0;
-		fd_reply_error(fd, ih->unique, -ENOMEM);
+		fd_reply_error(fd, req->unique, -ENOMEM);
 	}
 }
 
 /*
- * FUSE_UNLINK / FUSE_RMDIR: delete a file or directory under a parent.
+ * UNLINK / RMDIR: delete a file or directory under a parent.
  *
  * Async 3-step chain (the standard RDP/Windows delete path):
  *   OPEN(DELETE, FILE_DELETE_ON_CLOSE | dir/non-dir option)
@@ -1626,36 +1324,33 @@ fd_op_mkdir(struct fuse_drive *fd, const struct fuse_in_header *ih,
  *     -> CLOSE (which actions the delete on the client) + reply 0.
  *
  * We reply on the FileDispositionInformation set landing and then issue the
- * CLOSE fire-and-forget, so exactly one fuse reply is produced.  On any step
+ * CLOSE fire-and-forget, so exactly one reply is produced.  On any step
  * failure the held handle is closed on the error path so no handle leaks,
  * and the mapped -errno is returned.
  */
 static void
-fd_op_unlink(struct fuse_drive *fd, const struct fuse_in_header *ih,
-		const uint8_t *body, size_t body_len, int is_dir)
+fd_op_unlink(struct fuse_drive *fd, const struct fd_request *req)
 {
-	struct fd_node *parent = fd_node_find(fd, ih->nodeid);
+	struct fd_node *parent = fd_node_find(fd, req->nodeid);
 	struct fd_node *child;
-	const char *name;
-	size_t namelen;
+	int is_dir = (req->op == FD_OP_RMDIR);
 	uint32_t options;
 	struct fd_inflight *f = NULL;
 
 	if (parent == NULL || !parent->is_dir || parent->device_id == 0) {
-		fd_reply_error(fd, ih->unique, -ENOENT);
+		fd_reply_error(fd, req->unique, -ENOENT);
 		return;
 	}
-	/* The name is a single NUL-terminated component filling the body. */
-	name = fd_name_field(body, body_len, 0, &namelen);
-	if (name == NULL) {
-		fd_reply_error(fd, ih->unique, -EINVAL);
+	if (req->name == NULL || req->name_len == 0
+	    || req->name_len > FD_NAME_MAX) {
+		fd_reply_error(fd, req->unique, -EINVAL);
 		return;
 	}
 
-	child = fd_child_make(fd, parent->nodeid, name, namelen,
+	child = fd_child_make(fd, parent->nodeid, req->name, req->name_len,
 		parent->device_id, is_dir);
 	if (child == NULL) {
-		fd_reply_error(fd, ih->unique, -ENOMEM);
+		fd_reply_error(fd, req->unique, -ENOMEM);
 		return;
 	}
 	/* A node we already hold open cannot also be opened DELETE-on-close
@@ -1665,9 +1360,9 @@ fd_op_unlink(struct fuse_drive *fd, const struct fuse_in_header *ih,
 
 	options = FILE_DELETE_ON_CLOSE
 		| (is_dir ? FILE_DIRECTORY_FILE : FILE_NON_DIRECTORY_FILE);
-	if (fd_send_open_full(fd, child, ih->unique, RDP_FS_UNLINK_TAG, DELETE,
+	if (fd_send_open_full(fd, child, req->unique, RDP_FS_UNLINK_TAG, DELETE,
 	    FILE_OPEN, options, &f) != 0 || f == NULL) {
-		fd_reply_error(fd, ih->unique, -ENOMEM);
+		fd_reply_error(fd, req->unique, -ENOMEM);
 		return;
 	}
 	f->phase = PHASE_UNLINK_OPEN;
@@ -1706,7 +1401,7 @@ fd_build_rename_info(uint8_t *buf, size_t cap, const char *target,
 }
 
 /*
- * FUSE_RENAME / FUSE_RENAME2: move a node to a new parent and/or name.
+ * RENAME: move a node to a new parent and/or name.
  *
  * Source and destination must live on the SAME RDPDR device (a cross device
  * rename is reported -EXDEV with no FS_REQ, so the kernel falls back to a
@@ -1715,87 +1410,52 @@ fd_build_rename_info(uint8_t *buf, size_t cap, const char *target,
  *     -> SET_INFO(FileRenameInformation, target path)
  *     -> CLOSE + reply 0
  * We reply on the rename set landing (that is where the server actually
- * renames) and close fire-and-forget afterwards, so exactly one fuse reply
- * is produced.  The destination path is built into the in-flight slot so it
- * survives the OPEN completion after the original request body is gone.
+ * renames) and close fire-and-forget afterwards, so exactly one reply is
+ * produced.  The destination path is built into the in-flight slot so it
+ * survives the OPEN completion after the original request is gone.
  *
- * RENAME2 carries extra flags (RENAME_NOREPLACE / RENAME_EXCHANGE); we only
- * support the plain replace-if-exists rename, so any non-zero flags are
- * rejected with -EINVAL rather than silently ignored.
+ * The extra rename flags (RENAME_NOREPLACE / RENAME_EXCHANGE) are rejected
+ * with -EINVAL by the backend before dispatch; we only support the plain
+ * replace-if-exists rename.
  */
 static void
-fd_op_rename(struct fuse_drive *fd, const struct fuse_in_header *ih,
-		const uint8_t *body, size_t body_len, int is_rename2)
+fd_op_rename(struct fuse_drive *fd, const struct fd_request *req)
 {
-	struct fuse_rename_in ri;
-	struct fd_node *src_parent = fd_node_find(fd, ih->nodeid);
+	struct fd_node *src_parent = fd_node_find(fd, req->nodeid);
 	struct fd_node *dst_parent;
 	struct fd_node *src;
-	const char *oldname, *newname;
-	size_t oldlen, newlen, off;
-	uint64_t newdir;
 	char dpath[1024];
 	size_t dplen;
 	struct fd_inflight *f = NULL;
 
 	if (src_parent == NULL || !src_parent->is_dir
 	    || src_parent->device_id == 0) {
-		fd_reply_error(fd, ih->unique, -ENOENT);
+		fd_reply_error(fd, req->unique, -ENOENT);
+		return;
+	}
+	if (req->name == NULL || req->name_len == 0
+	    || req->name_len > FD_NAME_MAX
+	    || req->name2 == NULL || req->name2_len == 0
+	    || req->name2_len > FD_NAME_MAX) {
+		fd_reply_error(fd, req->unique, -EINVAL);
 		return;
 	}
 
-	/* Parse the fixed head: newdir nodeid, plus RENAME2 flags. */
-	if (is_rename2) {
-		struct fuse_rename2_in r2;
-		if (body_len < sizeof r2) {
-			fd_reply_error(fd, ih->unique, -EINVAL);
-			return;
-		}
-		memcpy(&r2, body, sizeof r2);
-		newdir = r2.newdir;
-		off = sizeof r2;
-		if (r2.flags != 0) {
-			/* RENAME_NOREPLACE / RENAME_EXCHANGE not supported. */
-			fd_reply_error(fd, ih->unique, -EINVAL);
-			return;
-		}
-	} else {
-		if (body_len < sizeof ri) {
-			fd_reply_error(fd, ih->unique, -EINVAL);
-			return;
-		}
-		memcpy(&ri, body, sizeof ri);
-		newdir = ri.newdir;
-		off = sizeof ri;
-	}
-
-	/* Two NUL-terminated names follow: oldname then newname. */
-	oldname = fd_name_field(body, body_len, off, &oldlen);
-	if (oldname == NULL) {
-		fd_reply_error(fd, ih->unique, -EINVAL);
-		return;
-	}
-	newname = fd_name_field(body, body_len, off + oldlen + 1, &newlen);
-	if (newname == NULL) {
-		fd_reply_error(fd, ih->unique, -EINVAL);
-		return;
-	}
-
-	dst_parent = fd_node_find(fd, newdir);
+	dst_parent = fd_node_find(fd, req->newdir);
 	if (dst_parent == NULL || !dst_parent->is_dir) {
-		fd_reply_error(fd, ih->unique, -ENOENT);
+		fd_reply_error(fd, req->unique, -ENOENT);
 		return;
 	}
 	/* Same-device requirement: RDPDR cannot rename across drives. */
 	if (dst_parent->device_id != src_parent->device_id) {
-		fd_reply_error(fd, ih->unique, -EXDEV);
+		fd_reply_error(fd, req->unique, -EXDEV);
 		return;
 	}
 
-	src = fd_child_make(fd, src_parent->nodeid, oldname, oldlen,
+	src = fd_child_make(fd, src_parent->nodeid, req->name, req->name_len,
 		src_parent->device_id, 0);
 	if (src == NULL) {
-		fd_reply_error(fd, ih->unique, -ENOMEM);
+		fd_reply_error(fd, req->unique, -ENOMEM);
 		return;
 	}
 
@@ -1804,18 +1464,18 @@ fd_op_rename(struct fuse_drive *fd, const struct fuse_in_header *ih,
 	 * doubled separator there. */
 	dplen = fd_node_path(fd, dst_parent, dpath, sizeof dpath);
 	if (dplen == (size_t)-1) {
-		fd_reply_error(fd, ih->unique, -ENAMETOOLONG);
+		fd_reply_error(fd, req->unique, -ENAMETOOLONG);
 		return;
 	}
 	if (dplen == 1 && dpath[0] == '\\')
 		dplen = 0;   /* drive root: start fresh so we get "\leaf" */
-	if (dplen + 1 + newlen + 1 > sizeof dpath) {
-		fd_reply_error(fd, ih->unique, -ENAMETOOLONG);
+	if (dplen + 1 + req->name2_len + 1 > sizeof dpath) {
+		fd_reply_error(fd, req->unique, -ENAMETOOLONG);
 		return;
 	}
 	dpath[dplen++] = '\\';
-	memcpy(dpath + dplen, newname, newlen);
-	dplen += newlen;
+	memcpy(dpath + dplen, req->name2, req->name2_len);
+	dplen += req->name2_len;
 	dpath[dplen] = '\0';
 
 	/* A cached handle on the source blocks an exclusive rename; close it so
@@ -1823,9 +1483,9 @@ fd_op_rename(struct fuse_drive *fd, const struct fuse_in_header *ih,
 	if (src->have_open)
 		fd_send_close(fd, src);
 
-	if (fd_send_open_full(fd, src, ih->unique, RDP_FS_RENAME_TAG,
+	if (fd_send_open_full(fd, src, req->unique, RDP_FS_RENAME_TAG,
 	    DELETE | FILE_WRITE_DATA, FILE_OPEN, 0, &f) != 0 || f == NULL) {
-		fd_reply_error(fd, ih->unique, -ENOMEM);
+		fd_reply_error(fd, req->unique, -ENOMEM);
 		return;
 	}
 	f->phase = PHASE_RENAME_OPEN;
@@ -1838,9 +1498,9 @@ fd_op_rename(struct fuse_drive *fd, const struct fuse_in_header *ih,
 }
 
 static void
-fd_op_release(struct fuse_drive *fd, const struct fuse_in_header *ih)
+fd_op_release(struct fuse_drive *fd, const struct fd_request *req)
 {
-	struct fd_node *n = fd_node_find(fd, ih->nodeid);
+	struct fd_node *n = fd_node_find(fd, req->nodeid);
 	/* One RDPDR handle is shared across every fd of a node, so close it
 	 * only when the last fd releases.  Decrement the open count (guarding
 	 * against underflow if a stray RELEASE arrives with none outstanding)
@@ -1851,20 +1511,20 @@ fd_op_release(struct fuse_drive *fd, const struct fuse_in_header *ih)
 		if (n->open_refs == 0)
 			fd_send_close(fd, n);
 	}
-	fd_reply_error(fd, ih->unique, 0);   /* success, no body */
+	fd->backend->emit_ok(fd, req->unique);   /* success, no body */
 }
 
 /*
  * Drop nlookup references from a node, freeing it when the count reaches
- * zero (closing any open RDPDR handle first).  Shared by FUSE_FORGET and
- * FUSE_BATCH_FORGET.  The synthetic root and per-drive roots are never
- * forgotten. */
+ * zero (closing any open RDPDR handle first).  The synthetic root and
+ * per-drive roots are never forgotten.
+ */
 static void
 fd_forget_node(struct fuse_drive *fd, uint64_t nodeid, uint64_t nlookup)
 {
 	struct fd_node *n;
 
-	if (nodeid == FUSE_ROOT_ID)
+	if (nodeid == FD_ROOT_ID)
 		return;
 	n = fd_node_find(fd, nodeid);
 	if (n == NULL || n->is_drive)
@@ -1881,125 +1541,74 @@ fd_forget_node(struct fuse_drive *fd, uint64_t nodeid, uint64_t nlookup)
 }
 
 static void
-fd_op_forget(struct fuse_drive *fd, const struct fuse_in_header *ih,
-		const uint8_t *body, size_t body_len)
+fd_op_forget(struct fuse_drive *fd, const struct fd_request *req)
 {
-	struct fuse_forget_in in;
-
-	if (body_len < sizeof in)
-		return;   /* FORGET has no reply regardless */
-	memcpy(&in, body, sizeof in);
-	fd_forget_node(fd, ih->nodeid, in.nlookup);
+	fd_forget_node(fd, req->nodeid, req->nlookup);
 }
 
 /*
- * BATCH_FORGET carries a count followed by that many (nodeid, nlookup)
- * records.  The kernel uses it by default at minor 27.  Like FORGET it
- * has no reply; each record is bounds checked against the body before it
- * is consumed. */
-static void
-fd_op_batch_forget(struct fuse_drive *fd, const struct fuse_in_header *ih,
-		const uint8_t *body, size_t body_len)
-{
-	struct fuse_batch_forget_in in;
-	struct fuse_forget_one one;
-	size_t off;
-	uint32_t i;
-
-	(void)ih;
-	if (body_len < sizeof in)
-		return;   /* BATCH_FORGET has no reply regardless */
-	memcpy(&in, body, sizeof in);
-	off = sizeof in;
-	for (i = 0; i < in.count; i++) {
-		if (off + sizeof one > body_len)
-			break;
-		memcpy(&one, body + off, sizeof one);
-		off += sizeof one;
-		fd_forget_node(fd, one.nodeid, one.nlookup);
-	}
-}
-
-/*
- * Dispatch a single fully framed FUSE request.  buf points at the
- * fuse_in_header; len is the byte count the kernel reported in the
- * header and is guaranteed by the caller to be in [sizeof header, avail].
+ * Dispatch one OS neutral request.  The backend has parsed the wire bytes
+ * into *req and asked us to run the op.
  */
-static void
-fd_dispatch(struct fuse_drive *fd, const uint8_t *buf, size_t len)
+void
+fd_dispatch(struct fuse_drive *fd, const struct fd_request *req)
 {
-	struct fuse_in_header ih;
-	const uint8_t *body;
-	size_t body_len;
-
-	memcpy(&ih, buf, sizeof ih);
-	body = buf + sizeof ih;
-	body_len = len - sizeof ih;
-
-	switch (ih.opcode) {
-	case FUSE_INIT:
-		fd_op_init(fd, &ih, body, body_len);
+	switch (req->op) {
+	case FD_OP_INIT:
+		fd_op_init(fd, req);
 		break;
-	case FUSE_GETATTR:
-		fd_op_getattr(fd, &ih);
+	case FD_OP_GETATTR:
+		fd_op_getattr(fd, req);
 		break;
-	case FUSE_SETATTR:
-		fd_op_setattr(fd, &ih, body, body_len);
+	case FD_OP_SETATTR:
+		fd_op_setattr(fd, req);
 		break;
-	case FUSE_LOOKUP:
-		fd_op_lookup(fd, &ih, body, body_len);
+	case FD_OP_LOOKUP:
+		fd_op_lookup(fd, req);
 		break;
-	case FUSE_OPENDIR:
-		fd_op_opendir(fd, &ih);
+	case FD_OP_OPENDIR:
+		fd_op_opendir(fd, req);
 		break;
-	case FUSE_READDIR:
-		fd_op_readdir(fd, &ih, body, body_len);
+	case FD_OP_READDIR:
+		fd_op_readdir(fd, req);
 		break;
-	case FUSE_OPEN:
-		fd_op_open(fd, &ih, body, body_len);
+	case FD_OP_OPEN:
+		fd_op_open(fd, req);
 		break;
-	case FUSE_READ:
-		fd_op_read(fd, &ih, body, body_len);
+	case FD_OP_READ:
+		fd_op_read(fd, req);
 		break;
-	case FUSE_WRITE:
-		fd_op_write(fd, &ih, body, body_len);
+	case FD_OP_WRITE:
+		fd_op_write(fd, req);
 		break;
-	case FUSE_CREATE:
-		fd_op_create(fd, &ih, body, body_len);
+	case FD_OP_CREATE:
+		fd_op_create(fd, req);
 		break;
-	case FUSE_MKNOD:
-		fd_op_mknod(fd, &ih, body, body_len);
+	case FD_OP_MKNOD:
+		fd_op_mknod(fd, req);
 		break;
-	case FUSE_MKDIR:
-		fd_op_mkdir(fd, &ih, body, body_len);
+	case FD_OP_MKDIR:
+		fd_op_mkdir(fd, req);
 		break;
-	case FUSE_UNLINK:
-		fd_op_unlink(fd, &ih, body, body_len, 0);
+	case FD_OP_UNLINK:
+	case FD_OP_RMDIR:
+		fd_op_unlink(fd, req);
 		break;
-	case FUSE_RMDIR:
-		fd_op_unlink(fd, &ih, body, body_len, 1);
+	case FD_OP_RENAME:
+		fd_op_rename(fd, req);
 		break;
-	case FUSE_RENAME:
-		fd_op_rename(fd, &ih, body, body_len, 0);
+	case FD_OP_RELEASE:
+	case FD_OP_RELEASEDIR:
+		fd_op_release(fd, req);
 		break;
-	case FUSE_RENAME2:
-		fd_op_rename(fd, &ih, body, body_len, 1);
+	case FD_OP_FLUSH:
+		fd->backend->emit_ok(fd, req->unique);
 		break;
-	case FUSE_RELEASE:
-	case FUSE_RELEASEDIR:
-		fd_op_release(fd, &ih);
-		break;
-	case FUSE_FLUSH:
-		fd_reply_error(fd, ih.unique, 0);
-		break;
-	case FUSE_FORGET:
-		fd_op_forget(fd, &ih, body, body_len);
-		break;   /* no reply */
-	case FUSE_BATCH_FORGET:
-		fd_op_batch_forget(fd, &ih, body, body_len);
+	case FD_OP_FORGET:
+		fd_op_forget(fd, req);
 		break;   /* no reply */
 	default:
-		fd_reply_error(fd, ih.unique, -ENOSYS);
+		fd_reply_error(fd, req->unique, -ENOSYS);
 		break;
 	}
 }
@@ -2008,10 +1617,10 @@ fd_dispatch(struct fuse_drive *fd, const uint8_t *buf, size_t len)
 
 /*
  * Parse one FileBothDirectoryInformation record at fdi[0..avail) and emit
- * a fuse_dirent into out at *off (bounded by out_cap).  Returns the
- * number of FSCC bytes consumed (the record's NextEntryOffset, or the
- * remaining bytes for the last record), or 0 to stop.  Every field is
- * bounds checked against avail before use.
+ * an OS neutral dirent into ents at *count.  Returns the number of FSCC
+ * bytes consumed (the record's NextEntryOffset, or the remaining bytes for
+ * the last record), or 0 to stop.  Every field is bounds checked against
+ * avail before use.
  *
  * FILE_BOTH_DIR_INFORMATION layout (MS-FSCC 2.4.8):
  *   0  NextEntryOffset  u32
@@ -2034,16 +1643,16 @@ fd_dispatch(struct fuse_drive *fd, const uint8_t *buf, size_t len)
 #define FILE_ATTRIBUTE_DIRECTORY 0x00000010u
 
 static size_t
-fd_emit_one_dirent(struct fuse_drive *fd, const uint8_t *fdi, size_t avail,
-		uint8_t *out, size_t *off, size_t out_cap,
-		uint32_t device_id, uint64_t parent, uint64_t *doff)
+fd_decode_one_dirent(struct fuse_drive *fd, const uint8_t *fdi, size_t avail,
+		uint32_t device_id, uint64_t parent,
+		struct fd_dirent *ents, size_t *count, size_t cap,
+		char (*names)[FD_NAME_MAX + 1])
 {
 	uint32_t next, name_bytes, attrs;
-	size_t name_chars, i, reclen;
-	struct fuse_dirent de;
-	char name[FD_NAME_MAX + 1];
+	size_t name_chars, i;
 	struct fd_node *child;
 	int is_dir;
+	char *name;
 
 	if (avail < FDI_FIXED)
 		return 0;
@@ -2056,6 +1665,9 @@ fd_emit_one_dirent(struct fuse_drive *fd, const uint8_t *fdi, size_t avail,
 	name_chars = name_bytes / 2;   /* UTF-16LE; we keep the low byte */
 	if (name_chars > FD_NAME_MAX)
 		name_chars = FD_NAME_MAX;
+	if (*count >= cap)
+		return 0;   /* dirent array full: stop without overflowing */
+	name = names[*count];
 	for (i = 0; i < name_chars; i++)
 		name[i] = (char)fdi[FDI_FIXED + i * 2];
 	name[name_chars] = '\0';
@@ -2068,21 +1680,11 @@ fd_emit_one_dirent(struct fuse_drive *fd, const uint8_t *fdi, size_t avail,
 
 	is_dir = (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
 	child = fd_child_make(fd, parent, name, name_chars, device_id, is_dir);
-	reclen = FUSE_DIRENT_ALIGN(FUSE_NAME_OFFSET + name_chars);
-	if (*off + reclen > out_cap)
-		return 0;   /* buffer full: stop without overflowing */
-	(*doff)++;
-	memset(&de, 0, sizeof de);
-	de.ino = child != NULL ? child->nodeid : 0;
-	de.off = *doff;
-	de.namelen = (uint32_t)name_chars;
-	de.type = is_dir ? (S_IFDIR >> 12) : (S_IFREG >> 12);
-	memcpy(out + *off, &de, FUSE_NAME_OFFSET);
-	memcpy(out + *off + FUSE_NAME_OFFSET, name, name_chars);
-	if (reclen > FUSE_NAME_OFFSET + name_chars)
-		memset(out + *off + FUSE_NAME_OFFSET + name_chars, 0,
-			reclen - (FUSE_NAME_OFFSET + name_chars));
-	*off += reclen;
+	ents[*count].ino = child != NULL ? child->nodeid : 0;
+	ents[*count].name = name;
+	ents[*count].name_len = name_chars;
+	ents[*count].is_dir = is_dir;
+	(*count)++;
 
 advance:
 	/* NextEntryOffset of 0 marks the final record. */
@@ -2098,9 +1700,12 @@ fd_complete_list(struct fuse_drive *fd, struct fd_inflight *f, uint32_t status,
 		const uint8_t *payload, size_t payload_len)
 {
 	struct fd_node *n = fd_node_find(fd, f->nodeid);
-	uint8_t out[FD_OUT_BUF_SZ];
-	size_t outoff = 0;
-	uint64_t doff = 0;
+	/* Decoded entries and a backing name store, sized to the directory
+	 * batch.  The backend lays the entries out into its wire dirents and
+	 * decides how many fit in the kernel's requested size. */
+	static struct fd_dirent ents[FD_MAX_NODES];
+	static char names[FD_MAX_NODES][FD_NAME_MAX + 1];
+	size_t count = 0;
 	const uint8_t *fdi;
 	size_t avail;
 	uint32_t fscc_len;
@@ -2112,7 +1717,8 @@ fd_complete_list(struct fuse_drive *fd, struct fd_inflight *f, uint32_t status,
 	if (status != STATUS_SUCCESS) {
 		/* No-more-files on the very first query is an empty dir. */
 		if (status == STATUS_NO_MORE_FILES)
-			fd_reply_ok(fd, f->fuse_unique, NULL, 0);
+			fd->backend->emit_dirent_batch(fd, f->fuse_unique,
+				NULL, 0, 0);
 		else
 			fd_reply_error(fd, f->fuse_unique,
 				-fd_status_to_errno(status));
@@ -2122,7 +1728,7 @@ fd_complete_list(struct fuse_drive *fd, struct fd_inflight *f, uint32_t status,
 	 * buffer (the worker forwards the DR_DRIVE_QUERY_DIRECTORY_RSP body
 	 * verbatim).  Bound the inner length against what we actually got. */
 	if (payload_len < 4) {
-		fd_reply_ok(fd, f->fuse_unique, NULL, 0);
+		fd->backend->emit_dirent_batch(fd, f->fuse_unique, NULL, 0, 0);
 		return;
 	}
 	fscc_len = fd_ld32(payload);
@@ -2131,16 +1737,21 @@ fd_complete_list(struct fuse_drive *fd, struct fd_inflight *f, uint32_t status,
 	if (fscc_len < avail)
 		avail = fscc_len;
 
-	while (avail >= FDI_FIXED && outoff < sizeof out) {
-		size_t used = fd_emit_one_dirent(fd, fdi, avail,
-			out, &outoff, sizeof out, n->device_id, n->nodeid,
-			&doff);
+	while (avail >= FDI_FIXED && count < FD_MAX_NODES) {
+		size_t used = fd_decode_one_dirent(fd, fdi, avail,
+			n->device_id, n->nodeid, ents, &count, FD_MAX_NODES,
+			names);
 		if (used == 0 || used > avail)
 			break;
 		fdi += used;
 		avail -= used;
 	}
-	fd_reply_ok(fd, f->fuse_unique, out, outoff);
+	/* Emit the batch.  The directory is listed in one shot; the backend
+	 * trims the records to its own reply-buffer cap (FD_OUT_BUF_SZ).
+	 * Passing that cap reproduces the original "fill the whole buffer"
+	 * behavior (LIST never carried the kernel's requested size). */
+	fd->backend->emit_dirent_batch(fd, f->fuse_unique, ents, count,
+		FD_OUT_BUF_SZ);
 }
 
 static void
@@ -2157,7 +1768,7 @@ fd_complete_read(struct fuse_drive *fd, struct fd_inflight *f, uint32_t status,
 	/* READ payload is FSCC Length(u32) + ReadData.  Bound the declared
 	 * length against the bytes received and the size the kernel asked. */
 	if (payload_len < 4) {
-		fd_reply_ok(fd, f->fuse_unique, NULL, 0);
+		fd->backend->emit_read(fd, f->fuse_unique, NULL, 0);
 		return;
 	}
 	data_len = fd_ld32(payload);
@@ -2167,16 +1778,7 @@ fd_complete_read(struct fuse_drive *fd, struct fd_inflight *f, uint32_t status,
 	if (data_len > f->read_size)
 		data_len = f->read_size;
 
-	{
-		struct fuse_out_header oh;
-		memset(&oh, 0, sizeof oh);
-		oh.len = (uint32_t)(sizeof oh + data_len);
-		oh.error = 0;
-		oh.unique = f->fuse_unique;
-		(void)fd->write_reply(fd, &oh, sizeof oh);
-		if (data_len > 0)
-			(void)fd->write_reply(fd, data, data_len);
-	}
+	fd->backend->emit_read(fd, f->fuse_unique, data, data_len);
 }
 
 /*
@@ -2202,7 +1804,7 @@ static void
 fd_getattr_reply(struct fuse_drive *fd, struct fd_inflight *f,
 		struct fd_node *n)
 {
-	if (f->reply_op == FUSE_LOOKUP)
+	if (f->reply_op == FD_OP_LOOKUP)
 		fd_reply_entry_acc(fd, f->fuse_unique, n, &f->acc);
 	else
 		fd_reply_attr_acc(fd, f->fuse_unique, n, &f->acc);
@@ -2292,7 +1894,6 @@ fd_complete_open(struct fuse_drive *fd, struct fd_inflight *f, uint32_t status,
 		uint32_t file_id)
 {
 	struct fd_node *n = fd_node_find(fd, f->nodeid);
-	struct fuse_open_out out;
 
 	if (n == NULL) {
 		fd_reply_error(fd, f->fuse_unique, -ENOENT);
@@ -2303,7 +1904,7 @@ fd_complete_open(struct fuse_drive *fd, struct fd_inflight *f, uint32_t status,
 		 * LOOKUP can retry cleanly.  The getattr chain bumped nlookup
 		 * before the open, so undo it here. */
 		if ((f->op == RDP_FS_OPEN || f->op == RDP_FS_GETATTR_TAG)
-		    && f->reply_op == FUSE_LOOKUP && !n->is_drive) {
+		    && f->reply_op == FD_OP_LOOKUP && !n->is_drive) {
 			if (n->nlookup > 0)
 				n->nlookup--;
 			if (n->nlookup == 0)
@@ -2340,46 +1941,39 @@ fd_complete_open(struct fuse_drive *fd, struct fd_inflight *f, uint32_t status,
 		n->nlookup++;
 		fd_reply_entry(fd, f->fuse_unique, n);
 		break;
-	case RDP_FS_OPENFILE_TAG:   /* a direct FUSE_OPEN of a regular file */
+	case RDP_FS_OPENFILE_TAG:   /* a direct OPEN of a regular file */
 		/* A real open or access upgrade grants this kernel fd the
 		 * handle.  On an upgrade fd_send_close left open_refs holding
 		 * the still-open fds, so this single bump counts only the new
-		 * FUSE_OPEN and never double-counts the upgrade. */
+		 * OPEN and never double-counts the upgrade. */
 		n->open_refs++;
-		memset(&out, 0, sizeof out);
-		out.fh = n->nodeid;
-		out.open_flags = FOPEN_DIRECT_IO;
-		fd_reply_ok(fd, f->fuse_unique, &out, sizeof out);
+		fd->backend->emit_open(fd, f->fuse_unique, n->nodeid, 1);
 		break;
 	case RDP_FS_OPENDIR_TAG:
-		/* FUSE_OPENDIR grants this kernel fd the handle; count it so the
+		/* OPENDIR grants this kernel fd the handle; count it so the
 		 * matching RELEASEDIR (routed through fd_op_release) only closes
 		 * once every dir fd is gone. */
 		n->open_refs++;
-		memset(&out, 0, sizeof out);
-		out.fh = n->nodeid;
-		fd_reply_ok(fd, f->fuse_unique, &out, sizeof out);
+		fd->backend->emit_open(fd, f->fuse_unique, n->nodeid, 0);
 		break;
 	case RDP_FS_CREATE_TAG:
-		/* FUSE_CREATE: the new file is created and stays open for this
-		 * kernel fd.  Reply fuse_entry_out + fuse_open_out and count the
-		 * lookup and the open ref so a later RELEASE/FORGET tears down
-		 * cleanly. */
+		/* CREATE: the new file is created and stays open for this kernel
+		 * fd.  Reply the entry + open handle and count the lookup and the
+		 * open ref so a later RELEASE/FORGET tears down cleanly. */
 		n->open_refs++;
 		n->nlookup++;
 		fd_reply_create(fd, f->fuse_unique, n);
 		break;
 	case RDP_FS_MKNOD_TAG:
-		/* FUSE_MKNOD: the file is created; we do not keep the handle, so
-		 * close it and reply fuse_entry_out only. */
+		/* MKNOD: the file is created; we do not keep the handle, so
+		 * close it and reply the entry only. */
 		n->nlookup++;
 		fd_send_close(fd, n);
 		fd_reply_entry(fd, f->fuse_unique, n);
 		break;
 	case RDP_FS_MKDIR_TAG:
-		/* FUSE_MKDIR: the directory is created; close the handle and reply
-		 * fuse_entry_out (the node is a dir, so fd_fill_attr reports
-		 * S_IFDIR). */
+		/* MKDIR: the directory is created; close the handle and reply the
+		 * entry (the node is a dir, so fd_node_to_attr reports S_IFDIR). */
 		n->is_dir = 1;
 		n->nlookup++;
 		fd_send_close(fd, n);
@@ -2401,7 +1995,6 @@ static void
 fd_complete_write(struct fuse_drive *fd, struct fd_inflight *f, uint32_t status,
 		uint32_t rsp_length, const uint8_t *payload, size_t payload_len)
 {
-	struct fuse_write_out out;
 	uint32_t written;
 
 	if (status != STATUS_SUCCESS) {
@@ -2415,9 +2008,7 @@ fd_complete_write(struct fuse_drive *fd, struct fd_inflight *f, uint32_t status,
 	if (written > f->read_size)
 		written = f->read_size;   /* never claim more than requested */
 
-	memset(&out, 0, sizeof out);
-	out.size = written;
-	fd_reply_ok(fd, f->fuse_unique, &out, sizeof out);
+	fd->backend->emit_write(fd, f->fuse_unique, written);
 }
 
 /*
@@ -2430,7 +2021,7 @@ static void
 fd_drop_node(struct fuse_drive *fd, struct fd_node *n)
 {
 	(void)fd;
-	if (n == NULL || n->nodeid == FUSE_ROOT_ID || n->is_drive)
+	if (n == NULL || n->nodeid == FD_ROOT_ID || n->is_drive)
 		return;
 	n->in_use = 0;
 	n->have_open = 0;
@@ -2443,7 +2034,7 @@ fd_drop_node(struct fuse_drive *fd, struct fd_node *n)
  * the phase.  On the OPEN landing we chain the disposition set; on the set
  * landing we CLOSE the handle (which actions the client delete) and reply 0,
  * then drop the node.  Every error path closes any held handle so none
- * leaks, and produces exactly one fuse reply.
+ * leaks, and produces exactly one reply.
  */
 static void
 fd_complete_unlink(struct fuse_drive *fd, struct fd_inflight *f, uint32_t status,
@@ -2492,7 +2083,7 @@ fd_complete_unlink(struct fuse_drive *fd, struct fd_inflight *f, uint32_t status
 	/* The close actions the delete (FILE_DELETE_ON_CLOSE plus the pending
 	 * disposition).  Then reply success and drop the node. */
 	fd_send_close(fd, n);
-	fd_reply_error(fd, unique, 0);
+	fd->backend->emit_ok(fd, unique);
 	fd_drop_node(fd, n);
 }
 
@@ -2502,7 +2093,7 @@ fd_complete_unlink(struct fuse_drive *fd, struct fd_inflight *f, uint32_t status
  * we build the rename SetBuffer from the destination path stashed on the
  * slot and chain the set; on the set landing we CLOSE the source handle,
  * re-parent the source node to the destination, and reply 0.  Error paths
- * close any held handle and produce exactly one fuse reply.
+ * close any held handle and produce exactly one reply.
  */
 static void
 fd_complete_rename(struct fuse_drive *fd, struct fd_inflight *f, uint32_t status,
@@ -2595,20 +2186,20 @@ fd_complete_rename(struct fuse_drive *fd, struct fd_inflight *f, uint32_t status
 			n->name[leaflen] = '\0';
 		}
 	}
-	fd_reply_error(fd, unique, 0);
+	fd->backend->emit_ok(fd, unique);
 }
 
 /*
  * SET_INFO completion.  When the op tag is RDP_FS_SETATTR_TAG the reply
- * must finish a FUSE_SETATTR with a fresh attr; we re-run the getattr
- * chain over the open handle for accuracy.  On a query setup failure (or
- * a set failure) we fall back to the accumulated/synthetic attr.  A plain
- * RDP_FS_SET_INFO tag is fire-and-forget (no FUSE reply expected).
+ * must finish a SETATTR with a fresh attr; we re-run the getattr chain
+ * over the open handle for accuracy.  On a query setup failure (or a set
+ * failure) we fall back to the accumulated/synthetic attr.  A plain
+ * RDP_FS_SET_INFO tag is fire-and-forget (no reply expected).
  *
  * For a combined size+time setattr the first completion carries phase
  * PHASE_SETATTR_EOF_THEN_TIME: the EOF set succeeded, so issue the saved
  * FileBasicInformation set next (tagged setattr-final) and reply only once
- * that second set completes.  This keeps exactly one fuse reply per op. */
+ * that second set completes.  This keeps exactly one reply per op. */
 static void
 fd_complete_set_info(struct fuse_drive *fd, struct fd_inflight *f,
 		uint32_t status)
@@ -2638,8 +2229,8 @@ fd_complete_set_info(struct fuse_drive *fd, struct fd_inflight *f,
 	if (f->phase == PHASE_SETATTR_EOF_THEN_TIME) {
 		/* The EOF set landed; now push the saved time set.  Its
 		 * completion (setattr-final, no phase) runs the single
-		 * re-query and emits the one fuse reply.  A setattr always
-		 * replies with an attr, so on a setup failure fall back to the
+		 * re-query and emits the one reply.  A setattr always replies
+		 * with an attr, so on a setup failure fall back to the
 		 * accumulated attr so the kernel still gets exactly one reply. */
 		if (fd_send_time_set(fd, n, unique, &ts, &acc) != 0)
 			fd_reply_attr_acc(fd, unique, n, &acc);
@@ -2650,7 +2241,7 @@ fd_complete_set_info(struct fuse_drive *fd, struct fd_inflight *f,
 	 * reply with whatever the accumulator holds.  Use the snapshot since
 	 * fd_send_query may already have reused this slot. */
 	if (fd_send_query(fd, n, unique, FileStandardInformation,
-	    PHASE_GETATTR_STD, &acc, FUSE_SETATTR) != 0)
+	    PHASE_GETATTR_STD, &acc, FD_OP_SETATTR) != 0)
 		fd_reply_attr_acc(fd, unique, n, &acc);
 }
 
@@ -2755,16 +2346,16 @@ fd_live_write_reply(struct fuse_drive *fd, const void *buf, size_t len)
 
 /* public API */
 
-static void
+void
 fd_common_init(struct fuse_drive *fd)
 {
 	struct fd_node *root;
 	fd->next_req_id = 1;
-	fd->next_nodeid = FUSE_ROOT_ID + 1;
+	fd->next_nodeid = FD_ROOT_ID + 1;
 	root = &fd->nodes[0];
 	memset(root, 0, sizeof *root);
 	root->in_use = 1;
-	root->nodeid = FUSE_ROOT_ID;
+	root->nodeid = FD_ROOT_ID;
 	root->parent = 0;
 	root->is_dir = 1;
 }
@@ -2800,6 +2391,7 @@ fuse_drive_init(int fuse_fd, int be_fd)
 		return NULL;
 	fd->fuse_fd = fuse_fd;
 	fd->be_fd = be_fd;
+	fd->backend = &fd_backend_linux;
 	fd->send_fs_req = fd_live_send_fs_req;
 	fd->write_reply = fd_live_write_reply;
 	fd_common_init(fd);
@@ -2861,10 +2453,10 @@ fuse_drive_add_device(struct fuse_drive *fd, uint32_t device_id,
 	}
 
 	/* Idempotent announce. */
-	n = fd_child_find(fd, FUSE_ROOT_ID, label, ln);
+	n = fd_child_find(fd, FD_ROOT_ID, label, ln);
 	if (n != NULL && n->is_drive)
 		return;
-	n = fd_child_make(fd, FUSE_ROOT_ID, label, ln, device_id, 1);
+	n = fd_child_make(fd, FD_ROOT_ID, label, ln, device_id, 1);
 	if (n == NULL) {
 		rdp_warn("fuse drive: node table full, dropping drive '%s'",
 			label);
@@ -2878,49 +2470,18 @@ fuse_drive_add_device(struct fuse_drive *fd, uint32_t device_id,
 int
 fuse_drive_process(struct fuse_drive *fd)
 {
-	uint8_t buf[FD_IN_BUF_SZ];
-	int handled = 0;
-
 	if (fd == NULL)
 		return 0;
-	/* Drain a bounded number of requests per call so one busy directory
-	 * cannot starve the rest of the session loop. */
-	while (handled < 64) {
-		ssize_t r;
-		struct fuse_in_header ih;
-		size_t len;
-		do {
-			r = read(fd->fuse_fd, buf, sizeof buf);
-		} while (r < 0 && errno == EINTR);
-		if (r < 0) {
-			if (errno == EAGAIN || errno == EWOULDBLOCK)
-				return 0;
-			/* ENODEV means the mount was torn down. */
-			return -1;
-		}
-		if (r == 0)
-			return -1;
-		if ((size_t)r < sizeof ih)
-			return 0;   /* runt: ignore */
-		memcpy(&ih, buf, sizeof ih);
-		len = ih.len;
-		/* The header length must be self-consistent and within the
-		 * bytes the kernel actually delivered. */
-		if (len < sizeof ih || len > (size_t)r)
-			return 0;
-		fd_dispatch(fd, buf, len);
-		handled++;
-	}
-	return 0;
+	return fd->backend->recv == NULL ? 0 : fuse_drive_backend_process(fd);
 }
 
 #ifdef RDP_FUSE_TEST
 /*
  * Test harness hooks.  Compiled only into the regress binary
- * (-DRDP_FUSE_TEST).  They let the test drive fd_dispatch and the FS_RSP
- * path on in-memory buffers and inspect the captured FS_REQ frame and
- * FUSE reply bytes through accessors, so the test never needs the layout
- * of the private capture struct.
+ * (-DRDP_FUSE_TEST).  They let the test drive the backend recv + dispatch
+ * and the FS_RSP path on in-memory buffers and inspect the captured
+ * FS_REQ frame and reply bytes through accessors, so the test never needs
+ * the layout of the private capture struct.
  */
 
 struct fuse_drive *fuse_drive_test_new(void);
@@ -2988,6 +2549,7 @@ fuse_drive_test_new(void)
 		return NULL;
 	fd->fuse_fd = -1;
 	fd->be_fd = -1;
+	fd->backend = &fd_backend_linux;
 	fd->sink_ctx = &fd_test_cap;
 	fd->send_fs_req = fd_test_send_fs_req;
 	fd->write_reply = fd_test_write_reply;
@@ -3005,7 +2567,10 @@ fuse_drive_test_reset(void)
 void
 fuse_drive_test_dispatch(struct fuse_drive *fd, const uint8_t *buf, size_t len)
 {
-	fd_dispatch(fd, buf, len);
+	struct fd_request req;
+	memset(&req, 0, sizeof req);
+	if (fd->backend->recv(fd, buf, len, &req) == 1)
+		fd_dispatch(fd, &req);
 }
 
 /* Accessors for the captured FS_REQ. */
@@ -3035,7 +2600,7 @@ fuse_drive_test_req_payload(size_t *len_out)
 	return fd_test_cap.req_payload;
 }
 
-/* Accessors for the captured FUSE reply. */
+/* Accessors for the captured reply. */
 const uint8_t *
 fuse_drive_test_reply(size_t *len_out)
 {
@@ -3055,7 +2620,7 @@ fuse_drive_test_find_child(struct fuse_drive *fd, uint64_t parent,
 }
 #endif /* RDP_FUSE_TEST */
 
-#else /* !HAVE_FUSE: no-op stubs */
+#else /* no supported drive wire format: no-op stubs */
 
 struct fuse_drive *
 fuse_drive_init(int fuse_fd, int be_fd)
