@@ -43,6 +43,7 @@
 
 #include <sys/stat.h>
 
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -68,15 +69,29 @@ uint32_t fuse_drive_test_req_length(void);
 uint64_t fuse_drive_test_req_offset(void);
 uint32_t fuse_drive_test_req_info_class(void);
 uint32_t fuse_drive_test_req_access(void);
+uint32_t fuse_drive_test_req_disposition(void);
+uint32_t fuse_drive_test_req_options(void);
 const uint8_t *fuse_drive_test_req_payload(size_t *);
 const uint8_t *fuse_drive_test_reply(size_t *);
+uint64_t fuse_drive_test_find_child(struct fuse_drive *, uint64_t,
+		const char *);
 
 /* FSCC info-class and FileAttributes constants used by the metadata tests
  * (mirrors src/channels/rdpdr.h and the FSCC bit we honour). */
 #define IC_FILE_BASIC      0x00000004u
 #define IC_FILE_STANDARD   0x00000005u
 #define IC_FILE_EOF        0x00000014u
+#define IC_FILE_RENAME     0x0000000Au
+#define IC_FILE_DISP       0x0000000Du
 #define FATTR_DIRECTORY    0x00000010u
+
+/* CreateDisposition / CreateOptions mirrored from rdpdr.h for the
+ * namespace-op assertions. */
+#define DISP_FILE_CREATE   0x00000002u
+#define OPT_DIRECTORY_FILE 0x00000001u
+#define OPT_NON_DIR_FILE   0x00000040u
+#define OPT_DELETE_ON_CLOSE 0x00001000u
+#define ACC_DELETE         0x00010000u
 
 static void
 put32le(uint8_t *p, uint32_t v)
@@ -1410,6 +1425,620 @@ test_bounds_meta(struct fuse_drive *fd)
 		"clamped, no over-read ok\n");
 }
 
+/*
+ * FUSE_CREATE under a drive emits an OPEN with disposition FILE_CREATE and
+ * write access; the success completion yields a reply containing
+ * fuse_entry_out immediately followed by fuse_open_out (correct total
+ * length, fh set to the new node id).
+ */
+static void
+test_create(struct fuse_drive *fd)
+{
+	uint8_t buf[256];
+	struct fuse_create_in ci;
+	struct fuse_out_header oh;
+	struct fuse_entry_out eo;
+	struct fuse_open_out oo;
+	const char *name = "new.txt";
+	size_t len, plen, hdr;
+	const uint8_t *r, *pl;
+	uint32_t open_req;
+	size_t rlen;
+
+	memset(&ci, 0, sizeof ci);
+	ci.flags = O_RDWR;
+	ci.mode = S_IFREG | 0644;
+	hdr = sizeof(struct fuse_in_header);
+	fuse_drive_test_reset();
+	(void)build_in(buf, FUSE_CREATE, 500, DRIVE_C_NODE, &ci, sizeof ci);
+	memcpy(buf + hdr + sizeof ci, name, strlen(name) + 1);
+	{
+		struct fuse_in_header ih;
+		memcpy(&ih, buf, sizeof ih);
+		ih.len = (uint32_t)(hdr + sizeof ci + strlen(name) + 1);
+		memcpy(buf, &ih, sizeof ih);
+		len = ih.len;
+	}
+	fuse_drive_test_dispatch(fd, buf, len);
+
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_op() != RDP_FS_OPEN)
+		FAIL("CREATE did not emit an OPEN FS_REQ");
+	if (fuse_drive_test_req_disposition() != DISP_FILE_CREATE)
+		FAIL("CREATE disposition 0x%x != FILE_CREATE",
+			fuse_drive_test_req_disposition());
+	if ((fuse_drive_test_req_access() & FILE_WRITE_DATA) == 0)
+		FAIL("CREATE access 0x%x lacks FILE_WRITE_DATA",
+			fuse_drive_test_req_access());
+	if ((fuse_drive_test_req_options() & OPT_NON_DIR_FILE) == 0)
+		FAIL("CREATE options 0x%x lacks FILE_NON_DIRECTORY_FILE",
+			fuse_drive_test_req_options());
+	pl = fuse_drive_test_req_payload(&plen);
+	if (plen == 0 || strcmp((const char *)pl, "\\new.txt") != 0)
+		FAIL("CREATE path '%.*s'", (int)plen, pl);
+	open_req = fuse_drive_test_req_id();
+
+	/* The create OPEN succeeds with a handle. */
+	feed_rsp(fd, open_req, STATUS_SUCCESS, 0x600, 0, NULL, 0);
+	get_out(&oh);
+	if (oh.error != 0)
+		FAIL("CREATE reply error %d", oh.error);
+	if (oh.unique != 500)
+		FAIL("CREATE reply unique %llu", (unsigned long long)oh.unique);
+	r = fuse_drive_test_reply(&rlen);
+	if (rlen != sizeof oh + sizeof eo + sizeof oo)
+		FAIL("CREATE reply size %zu (not entry_out+open_out)", rlen);
+	memcpy(&eo, r + sizeof oh, sizeof eo);
+	memcpy(&oo, r + sizeof oh + sizeof eo, sizeof oo);
+	if (eo.nodeid == 0 || eo.nodeid == FUSE_ROOT_ID)
+		FAIL("CREATE child nodeid %llu",
+			(unsigned long long)eo.nodeid);
+	if ((eo.attr.mode & S_IFMT) != S_IFREG)
+		FAIL("CREATE attr not S_IFREG, mode 0%o", eo.attr.mode);
+	if (eo.attr.size != 0)
+		FAIL("CREATE fresh file size %llu != 0",
+			(unsigned long long)eo.attr.size);
+	if (oo.fh != eo.nodeid)
+		FAIL("CREATE open_out fh %llu != nodeid %llu",
+			(unsigned long long)oo.fh,
+			(unsigned long long)eo.nodeid);
+	printf("  create new.txt: OPEN FILE_CREATE write access, reply "
+		"entry_out+open_out fh set ok\n");
+}
+
+/*
+ * FUSE_MKDIR emits an OPEN with options FILE_DIRECTORY_FILE and disposition
+ * FILE_CREATE; the success completion closes the handle and replies
+ * fuse_entry_out with an S_IFDIR attr.
+ */
+static void
+test_mkdir(struct fuse_drive *fd)
+{
+	uint8_t buf[256];
+	struct fuse_mkdir_in mi;
+	struct fuse_out_header oh;
+	struct fuse_entry_out eo;
+	const char *name = "newdir";
+	size_t len, hdr, rlen;
+	const uint8_t *r;
+	uint32_t open_req;
+
+	memset(&mi, 0, sizeof mi);
+	mi.mode = 0755;
+	hdr = sizeof(struct fuse_in_header);
+	fuse_drive_test_reset();
+	(void)build_in(buf, FUSE_MKDIR, 510, DRIVE_C_NODE, &mi, sizeof mi);
+	memcpy(buf + hdr + sizeof mi, name, strlen(name) + 1);
+	{
+		struct fuse_in_header ih;
+		memcpy(&ih, buf, sizeof ih);
+		ih.len = (uint32_t)(hdr + sizeof mi + strlen(name) + 1);
+		memcpy(buf, &ih, sizeof ih);
+		len = ih.len;
+	}
+	fuse_drive_test_dispatch(fd, buf, len);
+
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_op() != RDP_FS_OPEN)
+		FAIL("MKDIR did not emit an OPEN FS_REQ");
+	if (fuse_drive_test_req_disposition() != DISP_FILE_CREATE)
+		FAIL("MKDIR disposition 0x%x != FILE_CREATE",
+			fuse_drive_test_req_disposition());
+	if ((fuse_drive_test_req_options() & OPT_DIRECTORY_FILE) == 0)
+		FAIL("MKDIR options 0x%x lacks FILE_DIRECTORY_FILE",
+			fuse_drive_test_req_options());
+	open_req = fuse_drive_test_req_id();
+
+	/* The mkdir OPEN succeeds with a handle; the completion closes it and
+	 * replies the entry.  The CLOSE overwrites the captured FS_REQ. */
+	feed_rsp(fd, open_req, STATUS_SUCCESS, 0x610, 0, NULL, 0);
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_op() != RDP_FS_CLOSE)
+		FAIL("MKDIR did not close the create handle");
+	get_out(&oh);
+	if (oh.error != 0)
+		FAIL("MKDIR reply error %d", oh.error);
+	r = fuse_drive_test_reply(&rlen);
+	if (rlen != sizeof oh + sizeof eo)
+		FAIL("MKDIR reply size %zu (not one entry_out)", rlen);
+	memcpy(&eo, r + sizeof oh, sizeof eo);
+	if ((eo.attr.mode & S_IFMT) != S_IFDIR)
+		FAIL("MKDIR attr not S_IFDIR, mode 0%o", eo.attr.mode);
+	printf("  mkdir newdir: OPEN FILE_CREATE FILE_DIRECTORY_FILE, close, "
+		"entry_out S_IFDIR ok\n");
+}
+
+/*
+ * FUSE_MKNOD of a regular file emits an OPEN with disposition FILE_CREATE,
+ * closes the handle, and replies a single entry_out.  A non-regular mode is
+ * rejected with -EPERM and emits no FS_REQ.
+ */
+static void
+test_mknod(struct fuse_drive *fd)
+{
+	uint8_t buf[256];
+	struct fuse_mknod_in mi;
+	struct fuse_out_header oh;
+	struct fuse_entry_out eo;
+	const char *name = "node.bin";
+	size_t len, hdr, rlen;
+	const uint8_t *r;
+	uint32_t open_req;
+
+	/* Non-regular mode (a FIFO) must be refused with EPERM, no FS_REQ. */
+	memset(&mi, 0, sizeof mi);
+	mi.mode = S_IFIFO | 0644;
+	hdr = sizeof(struct fuse_in_header);
+	fuse_drive_test_reset();
+	(void)build_in(buf, FUSE_MKNOD, 515, DRIVE_C_NODE, &mi, sizeof mi);
+	memcpy(buf + hdr + sizeof mi, name, strlen(name) + 1);
+	{
+		struct fuse_in_header ih;
+		memcpy(&ih, buf, sizeof ih);
+		ih.len = (uint32_t)(hdr + sizeof mi + strlen(name) + 1);
+		memcpy(buf, &ih, sizeof ih);
+		len = ih.len;
+	}
+	fuse_drive_test_dispatch(fd, buf, len);
+	if (fuse_drive_test_have_req())
+		FAIL("MKNOD of a FIFO emitted an FS_REQ");
+	get_out(&oh);
+	if (oh.error != -EPERM)
+		FAIL("MKNOD non-regular error %d != -EPERM", oh.error);
+
+	/* A regular file is created via OPEN(FILE_CREATE), then closed. */
+	memset(&mi, 0, sizeof mi);
+	mi.mode = S_IFREG | 0644;
+	fuse_drive_test_reset();
+	(void)build_in(buf, FUSE_MKNOD, 516, DRIVE_C_NODE, &mi, sizeof mi);
+	memcpy(buf + hdr + sizeof mi, name, strlen(name) + 1);
+	{
+		struct fuse_in_header ih;
+		memcpy(&ih, buf, sizeof ih);
+		ih.len = (uint32_t)(hdr + sizeof mi + strlen(name) + 1);
+		memcpy(buf, &ih, sizeof ih);
+		len = ih.len;
+	}
+	fuse_drive_test_dispatch(fd, buf, len);
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_op() != RDP_FS_OPEN)
+		FAIL("MKNOD regular did not emit an OPEN");
+	if (fuse_drive_test_req_disposition() != DISP_FILE_CREATE)
+		FAIL("MKNOD disposition 0x%x != FILE_CREATE",
+			fuse_drive_test_req_disposition());
+	open_req = fuse_drive_test_req_id();
+	feed_rsp(fd, open_req, STATUS_SUCCESS, 0x620, 0, NULL, 0);
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_op() != RDP_FS_CLOSE)
+		FAIL("MKNOD did not close the create handle");
+	get_out(&oh);
+	if (oh.error != 0)
+		FAIL("MKNOD reply error %d", oh.error);
+	r = fuse_drive_test_reply(&rlen);
+	if (rlen != sizeof oh + sizeof eo)
+		FAIL("MKNOD reply size %zu (not one entry_out)", rlen);
+	memcpy(&eo, r + sizeof oh, sizeof eo);
+	if ((eo.attr.mode & S_IFMT) != S_IFREG)
+		FAIL("MKNOD attr not S_IFREG, mode 0%o", eo.attr.mode);
+	printf("  mknod node.bin: FIFO -> EPERM, regular -> OPEN FILE_CREATE "
+		"+ close + entry_out ok\n");
+}
+
+/*
+ * FUSE_UNLINK emits an OPEN(DELETE, FILE_DELETE_ON_CLOSE) then a
+ * SET_INFO(FileDispositionInformation) carrying a 1-byte DeletePending=1
+ * SetBuffer, then a CLOSE; the chain replies 0.
+ */
+static void
+test_unlink(struct fuse_drive *fd)
+{
+	uint8_t buf[256];
+	struct fuse_out_header oh;
+	const char *name = "del.txt";
+	size_t len, plen;
+	const uint8_t *pl;
+	uint32_t open_req, set_req;
+
+	fuse_drive_test_reset();
+	len = build_in(buf, FUSE_UNLINK, 520, DRIVE_C_NODE,
+		name, strlen(name) + 1);
+	fuse_drive_test_dispatch(fd, buf, len);
+
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_op() != RDP_FS_OPEN)
+		FAIL("UNLINK did not emit an OPEN FS_REQ");
+	if ((fuse_drive_test_req_access() & ACC_DELETE) == 0)
+		FAIL("UNLINK access 0x%x lacks DELETE",
+			fuse_drive_test_req_access());
+	if ((fuse_drive_test_req_options() & OPT_DELETE_ON_CLOSE) == 0)
+		FAIL("UNLINK options 0x%x lacks FILE_DELETE_ON_CLOSE",
+			fuse_drive_test_req_options());
+	if ((fuse_drive_test_req_options() & OPT_NON_DIR_FILE) == 0)
+		FAIL("UNLINK options 0x%x lacks FILE_NON_DIRECTORY_FILE",
+			fuse_drive_test_req_options());
+	open_req = fuse_drive_test_req_id();
+
+	/* OPEN(DELETE) succeeds; the completion must emit the disposition set. */
+	feed_rsp(fd, open_req, STATUS_SUCCESS, 0x630, 0, NULL, 0);
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_op() != RDP_FS_SET_INFO)
+		FAIL("UNLINK did not emit a SET_INFO after the OPEN");
+	if (fuse_drive_test_req_info_class() != IC_FILE_DISP)
+		FAIL("UNLINK set info_class 0x%x != FileDispositionInformation",
+			fuse_drive_test_req_info_class());
+	pl = fuse_drive_test_req_payload(&plen);
+	if (plen != 1 || pl[0] != 1)
+		FAIL("UNLINK disposition SetBuffer (%zu bytes, DeletePending %u)",
+			plen, plen > 0 ? pl[0] : 0);
+	set_req = fuse_drive_test_req_id();
+
+	/* The disposition set succeeds; the completion closes (emits CLOSE)
+	 * and replies 0. */
+	feed_rsp(fd, set_req, STATUS_SUCCESS, 0, 0, NULL, 0);
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_op() != RDP_FS_CLOSE)
+		FAIL("UNLINK did not close the delete handle");
+	get_out(&oh);
+	if (oh.error != 0)
+		FAIL("UNLINK reply error %d != 0", oh.error);
+	if (oh.unique != 520)
+		FAIL("UNLINK reply unique %llu", (unsigned long long)oh.unique);
+	printf("  unlink del.txt: OPEN(DELETE) + SET FileDispositionInformation "
+		"(DeletePending=1) + CLOSE, reply 0 ok\n");
+}
+
+/*
+ * FUSE_RMDIR emits the same chain as UNLINK but with FILE_DIRECTORY_FILE in
+ * the open options.
+ */
+static void
+test_rmdir(struct fuse_drive *fd)
+{
+	uint8_t buf[256];
+	struct fuse_out_header oh;
+	const char *name = "deldir";
+	size_t len;
+	uint32_t open_req, set_req;
+
+	fuse_drive_test_reset();
+	len = build_in(buf, FUSE_RMDIR, 525, DRIVE_C_NODE,
+		name, strlen(name) + 1);
+	fuse_drive_test_dispatch(fd, buf, len);
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_op() != RDP_FS_OPEN)
+		FAIL("RMDIR did not emit an OPEN FS_REQ");
+	if ((fuse_drive_test_req_options() & OPT_DIRECTORY_FILE) == 0)
+		FAIL("RMDIR options 0x%x lacks FILE_DIRECTORY_FILE",
+			fuse_drive_test_req_options());
+	open_req = fuse_drive_test_req_id();
+	feed_rsp(fd, open_req, STATUS_SUCCESS, 0x640, 0, NULL, 0);
+	if (fuse_drive_test_req_op() != RDP_FS_SET_INFO
+	    || fuse_drive_test_req_info_class() != IC_FILE_DISP)
+		FAIL("RMDIR did not emit the disposition set");
+	set_req = fuse_drive_test_req_id();
+	feed_rsp(fd, set_req, STATUS_SUCCESS, 0, 0, NULL, 0);
+	get_out(&oh);
+	if (oh.error != 0)
+		FAIL("RMDIR reply error %d != 0", oh.error);
+	printf("  rmdir deldir: OPEN(DELETE, FILE_DIRECTORY_FILE) chain, "
+		"reply 0 ok\n");
+}
+
+/*
+ * FUSE_RENAME on the same device emits an OPEN(source) then a
+ * SET_INFO(FileRenameInformation) whose SetBuffer carries ReplaceIfExists=1,
+ * RootDirectory=0, the correct FileNameLength, and the UTF-16LE target path
+ * bytes.  The chain replies 0.
+ */
+static void
+test_rename_same_device(struct fuse_drive *fd)
+{
+	uint8_t buf[256];
+	struct fuse_rename_in ri;
+	struct fuse_out_header oh;
+	const char *oldname = "src.txt";
+	const char *newname = "dst.txt";
+	const char *expect = "\\dst.txt";   /* dest is the drive root */
+	size_t len, hdr, plen, i;
+	const uint8_t *pl;
+	uint32_t open_req, set_req, name_bytes;
+
+	memset(&ri, 0, sizeof ri);
+	ri.newdir = DRIVE_C_NODE;   /* same drive root as the source parent */
+	hdr = sizeof(struct fuse_in_header);
+	fuse_drive_test_reset();
+	(void)build_in(buf, FUSE_RENAME, 530, DRIVE_C_NODE, &ri, sizeof ri);
+	memcpy(buf + hdr + sizeof ri, oldname, strlen(oldname) + 1);
+	memcpy(buf + hdr + sizeof ri + strlen(oldname) + 1,
+		newname, strlen(newname) + 1);
+	{
+		struct fuse_in_header ih;
+		size_t total = hdr + sizeof ri + strlen(oldname) + 1
+			+ strlen(newname) + 1;
+		memcpy(&ih, buf, sizeof ih);
+		ih.len = (uint32_t)total;
+		memcpy(buf, &ih, sizeof ih);
+		len = total;
+	}
+	fuse_drive_test_dispatch(fd, buf, len);
+
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_op() != RDP_FS_OPEN)
+		FAIL("RENAME did not emit an OPEN FS_REQ");
+	if ((fuse_drive_test_req_access() & ACC_DELETE) == 0)
+		FAIL("RENAME access 0x%x lacks DELETE",
+			fuse_drive_test_req_access());
+	pl = fuse_drive_test_req_payload(&plen);
+	if (plen == 0 || strcmp((const char *)pl, "\\src.txt") != 0)
+		FAIL("RENAME source path '%.*s'", (int)plen, pl);
+	open_req = fuse_drive_test_req_id();
+
+	/* OPEN(source) succeeds; the completion must emit the rename set. */
+	feed_rsp(fd, open_req, STATUS_SUCCESS, 0x650, 0, NULL, 0);
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_op() != RDP_FS_SET_INFO)
+		FAIL("RENAME did not emit a SET_INFO after the OPEN");
+	if (fuse_drive_test_req_info_class() != IC_FILE_RENAME)
+		FAIL("RENAME set info_class 0x%x != FileRenameInformation",
+			fuse_drive_test_req_info_class());
+	pl = fuse_drive_test_req_payload(&plen);
+	name_bytes = (uint32_t)(strlen(expect) * 2);
+	if (plen != 6 + name_bytes)
+		FAIL("RENAME SetBuffer %zu != %u", plen, 6 + name_bytes);
+	if (pl[0] != 1)
+		FAIL("RENAME ReplaceIfExists %u != 1", pl[0]);
+	if (pl[1] != 0)
+		FAIL("RENAME RootDirectory %u != 0", pl[1]);
+	{
+		uint32_t flen = pl[2] | ((uint32_t)pl[3] << 8)
+			| ((uint32_t)pl[4] << 16) | ((uint32_t)pl[5] << 24);
+		if (flen != name_bytes)
+			FAIL("RENAME FileNameLength %u != %u", flen, name_bytes);
+	}
+	for (i = 0; i < strlen(expect); i++) {
+		if (pl[6 + i * 2] != (uint8_t)expect[i] || pl[6 + i * 2 + 1] != 0)
+			FAIL("RENAME UTF-16LE target mismatch at char %zu", i);
+	}
+	set_req = fuse_drive_test_req_id();
+
+	/* The rename set succeeds; the completion closes and replies 0. */
+	feed_rsp(fd, set_req, STATUS_SUCCESS, 0, 0, NULL, 0);
+	if (!fuse_drive_test_have_req()
+	    || fuse_drive_test_req_op() != RDP_FS_CLOSE)
+		FAIL("RENAME did not close the source handle");
+	get_out(&oh);
+	if (oh.error != 0)
+		FAIL("RENAME reply error %d != 0", oh.error);
+	if (oh.unique != 530)
+		FAIL("RENAME reply unique %llu", (unsigned long long)oh.unique);
+	printf("  rename src.txt -> dst.txt (same device): OPEN + SET "
+		"FileRenameInformation (replace=1, root=0, UTF-16LE target), "
+		"reply 0 ok\n");
+}
+
+/*
+ * A cross-device FUSE_RENAME (source under drive C, destination under drive
+ * DOCS) must reply -EXDEV without emitting any FS_REQ.
+ */
+static void
+test_rename_cross_device(struct fuse_drive *fd)
+{
+	uint8_t buf[256];
+	struct fuse_rename_in ri;
+	struct fuse_out_header oh;
+	const char *oldname = "a.txt";
+	const char *newname = "b.txt";
+	size_t hdr, total;
+
+	memset(&ri, 0, sizeof ri);
+	ri.newdir = 3;   /* DOCS drive root: a different device than C */
+	hdr = sizeof(struct fuse_in_header);
+	fuse_drive_test_reset();
+	(void)build_in(buf, FUSE_RENAME, 540, DRIVE_C_NODE, &ri, sizeof ri);
+	memcpy(buf + hdr + sizeof ri, oldname, strlen(oldname) + 1);
+	memcpy(buf + hdr + sizeof ri + strlen(oldname) + 1,
+		newname, strlen(newname) + 1);
+	total = hdr + sizeof ri + strlen(oldname) + 1 + strlen(newname) + 1;
+	{
+		struct fuse_in_header ih;
+		memcpy(&ih, buf, sizeof ih);
+		ih.len = (uint32_t)total;
+		memcpy(buf, &ih, sizeof ih);
+	}
+	fuse_drive_test_dispatch(fd, buf, total);
+
+	if (fuse_drive_test_have_req())
+		FAIL("cross-device RENAME emitted an FS_REQ");
+	get_out(&oh);
+	if (oh.error != -EXDEV)
+		FAIL("cross-device RENAME error %d != -EXDEV", oh.error);
+	printf("  rename cross-device: -EXDEV, no FS_REQ ok\n");
+}
+
+/*
+ * Bounds: an over-long create name is rejected safely, and a truncated
+ * RENAME body (the second name missing its terminator) replies -EINVAL with
+ * no over-read (ASan/UBSan fails the run on any OOB).
+ */
+static void
+test_namespace_bounds(struct fuse_drive *fd)
+{
+	uint8_t buf[1024];
+	struct fuse_out_header oh;
+	size_t hdr = sizeof(struct fuse_in_header);
+
+	/* Over-long create name (> FD_NAME_MAX = 255).  The name field has no
+	 * NUL within the first 255 bytes plus more, so it is rejected. */
+	{
+		struct fuse_create_in ci;
+		size_t nlen = 400, total;
+		memset(&ci, 0, sizeof ci);
+		ci.flags = O_RDWR;
+		ci.mode = S_IFREG | 0644;
+		fuse_drive_test_reset();
+		(void)build_in(buf, FUSE_CREATE, 550, DRIVE_C_NODE,
+			&ci, sizeof ci);
+		memset(buf + hdr + sizeof ci, 'x', nlen);
+		buf[hdr + sizeof ci + nlen] = '\0';
+		total = hdr + sizeof ci + nlen + 1;
+		{
+			struct fuse_in_header ih;
+			memcpy(&ih, buf, sizeof ih);
+			ih.len = (uint32_t)total;
+			memcpy(buf, &ih, sizeof ih);
+		}
+		fuse_drive_test_dispatch(fd, buf, total);
+		if (fuse_drive_test_have_req())
+			FAIL("over-long CREATE name emitted an FS_REQ");
+		get_out(&oh);
+		if (oh.error != -EINVAL)
+			FAIL("over-long CREATE name error %d != -EINVAL", oh.error);
+	}
+
+	/* Truncated RENAME: a first name but the second name runs to the end of
+	 * the body with no terminating NUL.  fd_name_field must detect the
+	 * missing NUL and the op must reply -EINVAL without reading past the
+	 * body. */
+	{
+		struct fuse_rename_in ri;
+		const char *oldname = "one";
+		size_t off, total;
+		memset(&ri, 0, sizeof ri);
+		ri.newdir = DRIVE_C_NODE;
+		fuse_drive_test_reset();
+		(void)build_in(buf, FUSE_RENAME, 551, DRIVE_C_NODE,
+			&ri, sizeof ri);
+		off = hdr + sizeof ri;
+		memcpy(buf + off, oldname, strlen(oldname) + 1);
+		off += strlen(oldname) + 1;
+		/* Second name with no terminating NUL: fill 4 non-NUL bytes. */
+		memset(buf + off, 'y', 4);
+		off += 4;
+		total = off;
+		{
+			struct fuse_in_header ih;
+			memcpy(&ih, buf, sizeof ih);
+			ih.len = (uint32_t)total;
+			memcpy(buf, &ih, sizeof ih);
+		}
+		fuse_drive_test_dispatch(fd, buf, total);
+		if (fuse_drive_test_have_req())
+			FAIL("truncated RENAME body emitted an FS_REQ");
+		get_out(&oh);
+		if (oh.error != -EINVAL)
+			FAIL("truncated RENAME error %d != -EINVAL", oh.error);
+	}
+
+	printf("  namespace bounds: over-long CREATE name + truncated RENAME "
+		"body -> EINVAL, no over-read ok\n");
+}
+
+/*
+ * Regression: renaming a file into a SUBDIRECTORY must re-parent the local
+ * node.  A slot-aliasing bug zeroed the saved destination parent after the
+ * follow-up SET_INFO reused and memset the freed inflight slot, so the node
+ * kept its old parent while the kernel saw the rename succeed.
+ */
+static void
+test_rename_reparent(struct fuse_drive *fd)
+{
+	uint8_t buf[256];
+	struct fuse_mkdir_in mi;
+	struct fuse_rename_in ri;
+	struct fuse_out_header oh;
+	struct fuse_entry_out eo;
+	const char *sub = "sub";
+	const char *oldname = "src.txt";
+	const char *newname = "moved.txt";
+	size_t hdr = sizeof(struct fuse_in_header);
+	size_t len, rlen;
+	const uint8_t *r;
+	uint64_t sub_node;
+	uint32_t open_req, set_req;
+
+	/* Create the destination subdirectory under drive C. */
+	memset(&mi, 0, sizeof mi);
+	mi.mode = 0755;
+	fuse_drive_test_reset();
+	(void)build_in(buf, FUSE_MKDIR, 600, DRIVE_C_NODE, &mi, sizeof mi);
+	memcpy(buf + hdr + sizeof mi, sub, strlen(sub) + 1);
+	{
+		struct fuse_in_header ih;
+		memcpy(&ih, buf, sizeof ih);
+		ih.len = (uint32_t)(hdr + sizeof mi + strlen(sub) + 1);
+		memcpy(buf, &ih, sizeof ih);
+		len = ih.len;
+	}
+	fuse_drive_test_dispatch(fd, buf, len);
+	open_req = fuse_drive_test_req_id();
+	feed_rsp(fd, open_req, STATUS_SUCCESS, 0x620, 0, NULL, 0);
+	get_out(&oh);
+	r = fuse_drive_test_reply(&rlen);
+	if (rlen != sizeof oh + sizeof eo)
+		FAIL("reparent: mkdir reply size %zu", rlen);
+	memcpy(&eo, r + sizeof oh, sizeof eo);
+	sub_node = eo.nodeid;
+	if (sub_node == 0)
+		FAIL("reparent: subdir nodeid is 0");
+
+	/* Rename src.txt (drive root) into the subdir as moved.txt. */
+	memset(&ri, 0, sizeof ri);
+	ri.newdir = sub_node;
+	fuse_drive_test_reset();
+	(void)build_in(buf, FUSE_RENAME, 601, DRIVE_C_NODE, &ri, sizeof ri);
+	memcpy(buf + hdr + sizeof ri, oldname, strlen(oldname) + 1);
+	memcpy(buf + hdr + sizeof ri + strlen(oldname) + 1,
+		newname, strlen(newname) + 1);
+	{
+		struct fuse_in_header ih;
+		memcpy(&ih, buf, sizeof ih);
+		ih.len = (uint32_t)(hdr + sizeof ri + strlen(oldname) + 1
+			+ strlen(newname) + 1);
+		memcpy(buf, &ih, sizeof ih);
+		len = ih.len;
+	}
+	fuse_drive_test_dispatch(fd, buf, len);
+
+	open_req = fuse_drive_test_req_id();
+	feed_rsp(fd, open_req, STATUS_SUCCESS, 0x650, 0, NULL, 0);
+	if (fuse_drive_test_req_op() != RDP_FS_SET_INFO)
+		FAIL("reparent: no SET_INFO after the source OPEN");
+	set_req = fuse_drive_test_req_id();
+	feed_rsp(fd, set_req, STATUS_SUCCESS, 0, 0, NULL, 0);
+	get_out(&oh);
+	if (oh.error != 0)
+		FAIL("reparent: rename reply error %d", oh.error);
+
+	/* The renamed node must now live under the destination subdir as
+	 * moved.txt.  The slot-aliasing bug left it under the old parent, so
+	 * the destination lookup would miss. */
+	if (fuse_drive_test_find_child(fd, sub_node, newname) == 0)
+		FAIL("reparent: renamed node not under the destination subdir "
+			"(rename did not re-parent)");
+	printf("  rename into subdir: node re-parented to the destination "
+		"dir ok\n");
+}
+
 int
 main(void)
 {
@@ -1448,6 +2077,17 @@ main(void)
 	 * fast-path (read-only handle held from the LOOKUP getattr chain). */
 	rnode = lookup_open_file(fd, "shared.bin", 0x200, 91);
 	test_open_refcount(fd, rnode, 0x200);
+
+	/* Stage 5: namespace ops (create, mknod, mkdir, unlink/rmdir, rename). */
+	test_create(fd);
+	test_mkdir(fd);
+	test_mknod(fd);
+	test_unlink(fd);
+	test_rmdir(fd);
+	test_rename_same_device(fd);
+	test_rename_cross_device(fd);
+	test_rename_reparent(fd);
+	test_namespace_bounds(fd);
 
 	fuse_drive_free(fd);
 	printf("fuse_drive_test: all ok\n");

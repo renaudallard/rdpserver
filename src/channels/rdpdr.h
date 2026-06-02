@@ -115,6 +115,7 @@ struct rdpdr_device {
 #define STATUS_UNSUCCESSFUL        0xC0000001
 #define STATUS_NOT_IMPLEMENTED     0xC0000002
 #define STATUS_NO_SUCH_FILE        0xC000000F
+#define STATUS_OBJECT_NAME_COLLISION 0xC0000035
 #define STATUS_OBJECT_NAME_NOT_FOUND 0xC0000034
 
 /* CreateDisposition values */
@@ -128,11 +129,13 @@ struct rdpdr_device {
 /* CreateOptions */
 #define FILE_DIRECTORY_FILE        0x00000001
 #define FILE_NON_DIRECTORY_FILE    0x00000040
+#define FILE_DELETE_ON_CLOSE       0x00001000
 
 /* DesiredAccess */
 #define FILE_READ_DATA             0x00000001
 #define FILE_WRITE_DATA            0x00000002
 #define FILE_LIST_DIRECTORY        0x00000001
+#define DELETE                     0x00010000
 
 #define RDPDR_MAX_PENDING 64
 

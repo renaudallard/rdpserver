@@ -113,8 +113,8 @@ the FUSE device on file descriptor 4.
 .Nm
 speaks the raw FUSE kernel protocol on that descriptor (no
 .Sy libfuse
-dependency) and translates browse, read, and write requests
-.Pq lookup, getattr, setattr, opendir, readdir, open, read, and write
+dependency) and translates browse, read, write, and namespace requests
+.Pq lookup, getattr, setattr, opendir, readdir, open, read, write, create, mknod, mkdir, unlink, rmdir, and rename
 into RDPDR file operations carried to the
 .Xr rdpd 8
 worker over the backend socket.
@@ -127,6 +127,13 @@ Writing, truncating
 .Pq including save-with-truncate ,
 and timestamp updates are forwarded to the client; the mount is
 read-write.
+Creating a file or directory opens it with disposition FILE_CREATE;
+deleting opens with DELETE and FILE_DELETE_ON_CLOSE and then sets
+FileDispositionInformation; renaming sets FileRenameInformation.
+A rename is only honoured when the source and destination are on the
+same redirected drive; a cross-drive rename returns
+.Er EXDEV
+so the kernel falls back to a copy plus delete.
 If
 .Pa /dev/fuse
 is unavailable, the kernel is too old, or the host is not Linux, the
@@ -136,7 +143,7 @@ The mount is removed when the session process exits.
 .Sh FILES
 .Bl -tag -width Ds
 .It Pa ~/RemoteDrive
-Mount point for redirected client drives (Linux, read path).
+Mount point for redirected client drives (Linux, read-write).
 .El
 .Sh SEE ALSO
 .Xr rdpd 8 ,
