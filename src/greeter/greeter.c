@@ -107,6 +107,8 @@ struct g {
 	int     shift;
 	enum state state;
 
+	struct rdp_keymap kbd;
+
 	struct rdp_rect dirty;
 
 	const char *status_msg;
@@ -358,7 +360,7 @@ on_input(void *ctx, const struct rdp_fp_input_event *ev)
 		}
 		if (release) return;
 
-		char c = rdp_keymap_us(sc, ev->flags, g->shift);
+		char c = rdp_keymap_lookup(&g->kbd, sc, ev->flags, g->shift);
 		if (c == 0) return;
 		if (c == RDP_KEY_ESC) { e->want_exit = 1; return; }
 		if (c == RDP_KEY_TAB) {
@@ -438,7 +440,7 @@ read_one_pdu(struct rdp_tls *t, uint8_t *buf, size_t cap, size_t *len_out)
 
 int
 rdp_greeter_run(struct rdp_tls *t,
-		uint16_t desktop_w, uint16_t desktop_h,
+		uint16_t desktop_w, uint16_t desktop_h, uint32_t lcid,
 		rdp_greeter_auth_fn auth, void *auth_ctx,
 		struct rdp_greeter_result *out)
 {
@@ -449,6 +451,7 @@ rdp_greeter_run(struct rdp_tls *t,
 	if (auth == NULL) auth = stub_auth;
 
 	memset(&state, 0, sizeof state);
+	rdp_keymap_for_lcid(lcid, &state.kbd);
 	fb_bytes = (size_t)desktop_w * desktop_h * 3;
 	state.fb.data = malloc(fb_bytes);
 	if (state.fb.data == NULL) return -1;

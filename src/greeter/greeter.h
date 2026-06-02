@@ -62,7 +62,7 @@ typedef int (*rdp_greeter_auth_fn)(const char *user,
 		const char *password, void *ctx);
 
 int rdp_greeter_run(struct rdp_tls *t,
-		uint16_t desktop_w, uint16_t desktop_h,
+		uint16_t desktop_w, uint16_t desktop_h, uint32_t lcid,
 		rdp_greeter_auth_fn auth, void *auth_ctx,
 		struct rdp_greeter_result *out);
 

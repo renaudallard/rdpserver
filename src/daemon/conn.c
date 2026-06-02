@@ -2725,7 +2725,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 			auth_fn  = sessmgr_auth_thunk;
 			auth_ctx = &actx;
 		}
-		if (rdp_greeter_run(t, desktop_w, desktop_h,
+		if (rdp_greeter_run(t, desktop_w, desktop_h, client_lcid,
 			auth_fn, auth_ctx, &gr) != 0) {
 			rdp_info("conn[%s]: greeter cancelled or failed", peer);
 			if (sm.fd >= 0) rdp_sessmgr_close(&sm);

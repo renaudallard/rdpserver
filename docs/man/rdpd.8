@@ -47,6 +47,15 @@ Multi-monitor layouts are parsed from the GCC CS_MONITOR block, and
 dynamic resize is supported over the RDPEDISP Display Control channel,
 which the server opens and on which it advertises its monitor limits.
 .Pp
+The greeter follows the client's reported keyboard layout (LCID) for
+US, UK, French, Belgian, German, and Swiss keyboards, so the username
+and password are typed with the right keys.  Only ASCII letters and
+digits are mapped at the login field; AltGr, dead keys, and accented
+characters are unavailable there because the greeter uses an ASCII
+bitmap font.  Unknown layouts fall back to US.  The logged-in session
+follows the client layout in full
+.Pq see Xr rdp-session 8 .
+.Pp
 The options are as follows:
 .Bl -tag -width Ds
 .It Fl A

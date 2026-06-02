@@ -28,8 +28,8 @@
  */
 /*
  * keymap.h -- minimal PC/AT scancode (set 1) -> ASCII map for the
- * greeter.  US layout only in this drop; per-LCID tables are a
- * Phase D follow-up.
+ * greeter.  A small set of per-LCID tables is selected by the client
+ * keyboard layout; unknown layouts fall back to US.
  */
 
 #ifndef RDP_KEYMAP_H
@@ -51,5 +51,22 @@
  * bit 1 = extended (E0 prefix), bit 2 = extended1 (Pause sequence).
  * Modifier state is supplied separately via `shift`. */
 char rdp_keymap_us(uint8_t scancode, uint16_t flags, int shift);
+
+/* A scancode->ASCII layout: two 0x80-entry tables, unshifted and
+ * shifted.  Only ASCII 0x20-0x7e and the RDP_KEY_* tokens are emitted;
+ * every other key is 0 (unmapped) because the greeter font is ASCII. */
+struct rdp_keymap {
+	const char *base;
+	const char *shifted;
+};
+
+/* Pick the layout that matches a client keyboard LCID.  Only the low
+ * 16 bits (the primary language id) are inspected; layouts we do not
+ * carry a table for fall back to US. */
+void rdp_keymap_for_lcid(uint32_t lcid, struct rdp_keymap *out);
+
+/* Like rdp_keymap_us, but using the tables in `km`. */
+char rdp_keymap_lookup(const struct rdp_keymap *km, uint8_t scancode,
+		uint16_t flags, int shift);
 
 #endif /* RDP_KEYMAP_H */
