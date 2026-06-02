@@ -70,6 +70,7 @@
 #include "clip_x11.h"
 #include "audio.h"
 #include "kbdmap.h"
+#include "fuse_drive.h"
 #if HAVE_WLROOTS
 #include "wayland_comp.h"
 #endif
@@ -97,6 +98,7 @@
 #include <sys/mman.h>
 
 #define BE_FD 3
+#define FUSE_FD 4   /* RDPDR drive mount, set up by rdp-sessionmgr (Linux) */
 #define FRAME_INTERVAL_MS 66
 
 #ifndef RDP_XVFB_PATH
@@ -1406,8 +1408,15 @@ main(int argc, char *argv[])
 		rdp_info("audio capture active");
 	}
 
+	/* Probe the inherited fd 4 for an RDPDR drive FUSE mount.  Returns
+	 * NULL on non-Linux builds, old kernels, or when sessionmgr did not
+	 * set up a mount, in which case the session runs without drives. */
+	struct fuse_drive *drive = fuse_drive_init(FUSE_FD, BE_FD);
+	int drive_fd = fuse_drive_fd(drive);
+
 	while (!want_shutdown) {
-		struct pollfd pfd[2];
+		struct pollfd pfd[3];
+		int npfd = 2;
 		int xfd = ConnectionNumber(dpy);
 		struct timespec now;
 		long elapsed_ms;
@@ -1418,8 +1427,14 @@ main(int argc, char *argv[])
 		pfd[1].fd = xfd;
 		pfd[1].events = POLLIN;
 		pfd[1].revents = 0;
+		if (drive_fd >= 0) {
+			pfd[2].fd = drive_fd;
+			pfd[2].events = POLLIN;
+			pfd[2].revents = 0;
+			npfd = 3;
+		}
 
-		(void)poll(pfd, 2, FRAME_INTERVAL_MS);
+		(void)poll(pfd, (nfds_t)npfd, FRAME_INTERVAL_MS);
 
 		if (pfd[0].revents & POLLIN) {
 			uint32_t type;
@@ -1490,8 +1505,28 @@ main(int argc, char *argv[])
 						(void)rdp_h264_resize(h264,
 						    w, h);
 				}
+			} else if (type == RDP_BE_FS_DEVICE
+			    && n >= (ssize_t)sizeof(struct rdp_be_fs_device)) {
+				struct rdp_be_fs_device fsd;
+				memcpy(&fsd, buf, sizeof fsd);
+				fsd.name[sizeof fsd.name - 1] = '\0';
+				fuse_drive_add_device(drive, fsd.device_id,
+				    fsd.device_type, fsd.name, fsd.added);
+			} else if (type == RDP_BE_FS_RSP
+			    && n >= (ssize_t)sizeof(struct rdp_be_fs_rsp)) {
+				struct rdp_be_fs_rsp rsp;
+				memcpy(&rsp, buf, sizeof rsp);
+				fuse_drive_handle_fs_rsp(drive, &rsp,
+				    buf + sizeof rsp,
+				    (size_t)n - sizeof rsp);
 			} else if (type == RDP_BE_BYE) {
 				break;
+			}
+		}
+		if (drive_fd >= 0 && (pfd[2].revents & POLLIN)) {
+			if (fuse_drive_process(drive) < 0) {
+				/* The mount went away: stop polling the fd. */
+				drive_fd = -1;
 			}
 		}
 		if (pfd[1].revents & POLLIN) {
@@ -1561,6 +1596,7 @@ main(int argc, char *argv[])
 	}
 
 	rdp_info("rdp-session shutting down");
+	fuse_drive_free(drive);
 	rdp_h264_close(h264);
 	rdp_audio_close(audio);
 	free(audio_buf);

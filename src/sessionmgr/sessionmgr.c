@@ -63,6 +63,9 @@
 #include <sys/types.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#if HAVE_FUSE
+#include <sys/mount.h>   /* mount(2), umount2(2), MS_* */
+#endif
 
 #include <errno.h>
 #include <fcntl.h>
@@ -93,13 +96,24 @@ on_signal(int sig)
 	want_shutdown = 1;
 }
 
+#if HAVE_FUSE
+static void fuse_mount_reap(pid_t pid);
+#endif
+
 static void
 on_sigchld(int sig)
 {
 	int saved = errno;
+	pid_t p;
 	(void)sig;
-	while (waitpid(-1, NULL, WNOHANG) > 0)
-		;
+	while ((p = waitpid(-1, NULL, WNOHANG)) > 0) {
+#if HAVE_FUSE
+		/* Unmount the dead session's RemoteDrive, if any. */
+		fuse_mount_reap(p);
+#else
+		(void)p;
+#endif
+	}
 	errno = saved;
 }
 
@@ -198,17 +212,185 @@ reply(int cfd, uint8_t status, int attach_fd)
 	return 0;
 }
 
+#if HAVE_FUSE
+/*
+ * FUSE mount bookkeeping.  rdp-sessionmgr opens /dev/fuse and mounts it
+ * on $HOME/RemoteDrive before forking the session; the kernel speaks the
+ * FUSE protocol to the session over the inherited fd.  When the session
+ * process dies (clean exit or crash) the mount must be torn down so no
+ * stale mount lingers, so we keep a small pid -> mountpoint table and
+ * unmount it from on_sigchld / sweep_expired.  The mount deliberately
+ * survives suspend/resume: only the actual death of the session pid
+ * removes it.
+ */
+#define FUSE_MOUNT_MAX  64
+#define FUSE_MOUNT_PATH 512   /* matches the spawn_session mountpoint buffer */
+
+struct fuse_mount {
+	int   in_use;
+	pid_t pid;
+	char  mountpoint[FUSE_MOUNT_PATH];
+};
+
+static struct fuse_mount fuse_mounts[FUSE_MOUNT_MAX];
+
+/* The caller must hold SIGCHLD blocked so the reaper cannot interrupt the
+ * table walk. */
+static void
+fuse_mount_record(pid_t pid, const char *mountpoint)
+{
+	int i;
+	if (strlen(mountpoint) >= sizeof fuse_mounts[0].mountpoint) {
+		rdp_warn("fuse: mountpoint too long, %s will not be "
+			"auto-unmounted", mountpoint);
+		return;
+	}
+	for (i = 0; i < FUSE_MOUNT_MAX; i++) {
+		if (!fuse_mounts[i].in_use) {
+			fuse_mounts[i].pid = pid;
+			(void)strlcpy(fuse_mounts[i].mountpoint, mountpoint,
+				sizeof fuse_mounts[i].mountpoint);
+			fuse_mounts[i].in_use = 1;
+			return;
+		}
+	}
+	rdp_warn("fuse: mount table full, %s will not be auto-unmounted",
+		mountpoint);
+}
+
+/* Tear down the mount belonging to a dead session pid.  Called from the
+ * SIGCHLD handler and from the main flow (with SIGCHLD blocked), so it must
+ * stay async-signal-safe: umount2 is a bare syscall and the table writes
+ * touch only a fixed-size buffer, with no malloc/free. */
+static void
+fuse_mount_reap(pid_t pid)
+{
+	int i;
+	for (i = 0; i < FUSE_MOUNT_MAX; i++) {
+		if (fuse_mounts[i].in_use && fuse_mounts[i].pid == pid) {
+			(void)umount2(fuse_mounts[i].mountpoint, MNT_DETACH);
+			fuse_mounts[i].in_use = 0;
+		}
+	}
+}
+
+/*
+ * Open /dev/fuse and mount it on $HOME/RemoteDrive as the target user's
+ * directory.  Returns the fuse fd on success (caller dup2s it to fd 4 in
+ * the child and records the mount), or -1 if drive support is
+ * unavailable.  A failure here is never fatal to the spawn: the session
+ * simply runs without a drive mount.  *mp_out receives the mountpoint
+ * path (caller-owned static buffer).
+ */
+static int
+fuse_mount_setup(const struct passwd *pw, char *mp_out, size_t mp_cap)
+{
+	int fusefd, dfd;
+	char opts[256];
+	char target[64];
+	struct stat sb;
+
+	(void)snprintf(mp_out, mp_cap, "%s/RemoteDrive", pw->pw_dir);
+
+	fusefd = open("/dev/fuse", O_RDWR | O_CLOEXEC);
+	if (fusefd < 0) {
+		rdp_info("fuse: /dev/fuse unavailable (%s); no drive mount",
+			strerror(errno));
+		return -1;
+	}
+
+	/* $HOME is user-controlled, so RemoteDrive may already exist as a
+	 * symlink the user planted.  Never touch the path as root: create it
+	 * (ignoring EEXIST) then open it with O_NOFOLLOW|O_DIRECTORY and do
+	 * every ownership and mode change through the resulting fd, so a
+	 * symlink yields ELOOP rather than an arbitrary-target chown. */
+	(void)mkdir(mp_out, 0700);
+	dfd = open(mp_out, O_RDONLY | O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC);
+	if (dfd < 0) {
+		rdp_warn("fuse: open %s: %s; no drive mount",
+			mp_out, strerror(errno));
+		(void)close(fusefd);
+		return -1;
+	}
+	if (fstat(dfd, &sb) != 0 || !S_ISDIR(sb.st_mode)) {
+		rdp_warn("fuse: %s is not a directory; no drive mount", mp_out);
+		(void)close(dfd);
+		(void)close(fusefd);
+		return -1;
+	}
+	if (fchown(dfd, pw->pw_uid, pw->pw_gid) != 0) {
+		rdp_warn("fuse: fchown %s: %s; no drive mount",
+			mp_out, strerror(errno));
+		(void)close(dfd);
+		(void)close(fusefd);
+		return -1;
+	}
+	(void)fchmod(dfd, 0700);
+
+	/* default_permissions delegates access checks to the kernel against
+	 * the attrs we report; rootmode is the synthetic root dir mode. */
+	(void)snprintf(opts, sizeof opts,
+		"fd=%d,rootmode=040000,user_id=%u,group_id=%u,"
+		"default_permissions",
+		fusefd, (unsigned)pw->pw_uid, (unsigned)pw->pw_gid);
+
+	/* Mount onto the directory we already verified through /proc/self/fd
+	 * rather than re-resolving mp_out, closing the window where the user
+	 * could swap the directory for a symlink between open and mount. */
+	(void)snprintf(target, sizeof target, "/proc/self/fd/%d", dfd);
+	if (mount("rdpdrive", target, "fuse",
+	    MS_NOSUID | MS_NODEV | MS_NOEXEC, opts) != 0) {
+		rdp_warn("fuse: mount %s: %s", mp_out, strerror(errno));
+		(void)close(dfd);
+		(void)close(fusefd);
+		return -1;
+	}
+	(void)close(dfd);
+	rdp_info("fuse: mounted RemoteDrive at %s", mp_out);
+	return fusefd;
+}
+#endif /* HAVE_FUSE */
+
 static int
 spawn_session(const struct passwd *pw, uint16_t w, uint16_t h,
 		uint32_t lcid, int *out_fd)
 {
 	int sv[2];
 	pid_t pid;
+#if HAVE_FUSE
+	int fusefd = -1;
+	char mountpoint[512];
+	sigset_t chld_mask, old_mask;
+	int masked = 0;
+	mountpoint[0] = '\0';
+#endif
 
 	if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0)
 		return -1;
+#if HAVE_FUSE
+	/* Set up the mount before fork so the privileged daemon owns it; the
+	 * fuse fd is passed to the child on fd 4. */
+	fusefd = fuse_mount_setup(pw, mountpoint, sizeof mountpoint);
+	/* Block SIGCHLD across fork + fuse_mount_record so the reaper can
+	 * never run for this pid before its mount is recorded (the child
+	 * could otherwise exit and be reaped before we record it). */
+	if (fusefd >= 0) {
+		sigemptyset(&chld_mask);
+		sigaddset(&chld_mask, SIGCHLD);
+		if (sigprocmask(SIG_BLOCK, &chld_mask, &old_mask) == 0)
+			masked = 1;
+	}
+#endif
 	pid = fork();
 	if (pid < 0) {
+#if HAVE_FUSE
+		if (masked)
+			(void)sigprocmask(SIG_SETMASK, &old_mask, NULL);
+		if (fusefd >= 0) {
+			(void)umount2(mountpoint, MNT_DETACH);
+			(void)close(fusefd);
+		}
+#endif
 		(void)close(sv[0]); (void)close(sv[1]);
 		return -1;
 	}
@@ -217,14 +399,38 @@ spawn_session(const struct passwd *pw, uint16_t w, uint16_t h,
 		int i;
 
 		(void)close(sv[0]);
+#if HAVE_FUSE
+		/* Restore the inherited SIGCHLD mask so the session starts
+		 * with default signal handling. */
+		if (masked)
+			(void)sigprocmask(SIG_SETMASK, &old_mask, NULL);
+#endif
 		if (sv[1] != 3) {
 			if (dup2(sv[1], 3) < 0) _exit(127);
 			(void)close(sv[1]);
 		}
+#if HAVE_FUSE
+		/* The session probes fd 4 for a FUSE device; nothing new on
+		 * argv.  If there is no mount, fd 4 stays closed and the
+		 * session simply runs without drive support.  dup2 clears
+		 * FD_CLOEXEC on the target, but when /dev/fuse opened as fd 4
+		 * already there is no dup2, so clear it explicitly or the fd
+		 * would close at exec and drop the mount. */
+		if (fusefd >= 0 && fusefd != 4) {
+			if (dup2(fusefd, 4) < 0) _exit(127);
+			(void)close(fusefd);
+		} else if (fusefd == 4) {
+			(void)fcntl(4, F_SETFD, 0);
+		}
+		/* Close all fds except 0-4 (3 = backend RPC, 4 = fuse). */
+		for (i = 5; i < 64; i++)
+			(void)close(i);
+#else
 		/* Close all fds except 0-3 so leaked sessmgr sockets
 		 * don't persist into the user session. */
 		for (i = 4; i < 64; i++)
 			(void)close(i);
+#endif
 		(void)setsid();
 		if (chdir(pw->pw_dir) != 0) {
 			if (chdir("/") != 0) { /* unreachable in practice */ }
@@ -262,6 +468,18 @@ spawn_session(const struct passwd *pw, uint16_t w, uint16_t h,
 		_exit(127);
 	}
 	(void)close(sv[1]);
+#if HAVE_FUSE
+	/* Parent keeps no copy of the fuse fd; the kernel holds the mount via
+	 * the child's fd 4.  Remember the mountpoint so we can unmount when
+	 * the session pid dies, then re-enable SIGCHLD now that the record
+	 * is in place. */
+	if (fusefd >= 0) {
+		(void)close(fusefd);
+		fuse_mount_record(pid, mountpoint);
+	}
+	if (masked)
+		(void)sigprocmask(SIG_SETMASK, &old_mask, NULL);
+#endif
 	*out_fd = sv[0];
 	rdp_info("spawned rdp-session pid %d for uid %u (%ux%u)",
 		(int)pid, (unsigned)pw->pw_uid, (unsigned)w, (unsigned)h);
@@ -572,6 +790,27 @@ sweep_expired(void)
 {
 	time_t now = time(NULL);
 	int i;
+#if HAVE_FUSE
+	/* Safety net for any SIGCHLD that was coalesced and lost: unmount
+	 * RemoteDrive for session pids that are no longer alive.  Block
+	 * SIGCHLD across the table walk so the reaper cannot interrupt it. */
+	{
+		sigset_t chld_mask, old_mask;
+		int masked = 0;
+		sigemptyset(&chld_mask);
+		sigaddset(&chld_mask, SIGCHLD);
+		if (sigprocmask(SIG_BLOCK, &chld_mask, &old_mask) == 0)
+			masked = 1;
+		for (i = 0; i < FUSE_MOUNT_MAX; i++) {
+			if (fuse_mounts[i].in_use
+			    && kill(fuse_mounts[i].pid, 0) != 0
+			    && errno == ESRCH)
+				fuse_mount_reap(fuse_mounts[i].pid);
+		}
+		if (masked)
+			(void)sigprocmask(SIG_SETMASK, &old_mask, NULL);
+	}
+#endif
 	for (i = 0; i < RDP_SESSMGR_SUSPEND_MAX; i++) {
 		if (!suspended[i].in_use) continue;
 		if (now - suspended[i].suspended_at

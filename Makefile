@@ -72,6 +72,7 @@ BACKEND_LIB  = src/backend/libbackend.a
 
 # Per-user session helper (X11).
 SESSION_OBJS = src/session/rdp_session.o src/session/clip_x11.o \
+	src/session/fuse_drive.o \
 	$(WAYLAND_OBJ) $(AUDIO_OBJ)
 SESSION_PROG = src/session/rdp-session
 
@@ -93,7 +94,8 @@ REGRESS_PROGS = \
 	regress/wire/mcs_test \
 	regress/wire/capset_test \
 	regress/wire/rdp_pdu_test \
-	regress/wire/rdpdr_test
+	regress/wire/rdpdr_test \
+	$(FUSE_REGRESS)
 
 FUZZ_PROG = regress/fuzz/fuzz_parsers
 
@@ -208,6 +210,16 @@ regress/wire/rdpdr_test: regress/wire/rdpdr_test.c src/channels/rdpdr.c \
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -Isrc/include \
 		-o $@ regress/wire/rdpdr_test.c src/channels/rdpdr.c \
 		src/common/log.c
+
+# Drive read-path FUSE protocol test.  fuse_drive.c is recompiled with
+# -DRDP_FUSE_TEST so its dispatch is callable on in-memory buffers; ASan
+# and UBSan cover the untrusted FSCC/read decode.
+regress/wire/fuse_drive_test: regress/wire/fuse_drive_test.c \
+		src/session/fuse_drive.c src/common/io.c src/common/log.c
+	$(CC) $(CFLAGS) -fsanitize=address,undefined -DRDP_FUSE_TEST \
+		-Isrc/include \
+		-o $@ regress/wire/fuse_drive_test.c \
+		src/session/fuse_drive.c src/common/io.c src/common/log.c
 
 regress/fuzz/fuzz_parsers: regress/fuzz/fuzz_parsers.o \
 		$(WIRE_LIB) $(CHANNELS_LIB) $(SEC_LIB) $(COMMON_LIB)

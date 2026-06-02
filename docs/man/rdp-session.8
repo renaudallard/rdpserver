@@ -101,6 +101,36 @@ Client keyboard layout identifier (Windows LCID, decimal) used to set
 the Xvfb keyboard layout.
 0 or an unknown value selects the US layout.
 .El
+.Sh DRIVE REDIRECTION
+On Linux the drives the client redirects over the RDPDR channel are
+presented inside the session as a real file system mounted at
+.Pa ~/RemoteDrive .
+.Xr rdp-sessionmgr 8
+opens
+.Pa /dev/fuse
+and mounts it on that directory before dropping privileges, then passes
+the FUSE device on file descriptor 4.
+.Nm
+speaks the raw FUSE kernel protocol on that descriptor (no
+.Sy libfuse
+dependency) and translates browse and read requests
+.Pq lookup, getattr, opendir, readdir, open, and read
+into RDPDR file operations carried to the
+.Xr rdpd 8
+worker over the backend socket.
+The mount is currently read-only: write and metadata changes are not
+yet forwarded.
+If
+.Pa /dev/fuse
+is unavailable, the kernel is too old, or the host is not Linux, the
+session simply runs without the mount and drive operations remain
+reachable only through the backend protocol.
+The mount is removed when the session process exits.
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa ~/RemoteDrive
+Mount point for redirected client drives (Linux, read path).
+.El
 .Sh SEE ALSO
 .Xr rdpd 8 ,
 .Xr rdp-sessionmgr 8

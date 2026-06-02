@@ -86,6 +86,7 @@
 #define RDP_BE_INPUT_UNICODE 14u
 #define RDP_BE_CURSOR      15u   /* session -> worker */
 #define RDP_BE_INPUT_SYNC  16u   /* worker -> session: lock-key state; 1..16 used */
+#define RDP_BE_FS_DEVICE   17u   /* worker -> session: announce/remove a drive */
 
 #define RDP_BE_FS_REQ      11u
 #define RDP_BE_FS_RSP      12u
@@ -146,6 +147,19 @@ struct rdp_be_fs_rsp {
 	uint32_t status;
 	uint32_t file_id;
 	uint32_t length;
+};
+
+/* FS_DEVICE payload (worker -> session): announce or remove one RDPDR
+ * file system device.  added=1 announces a drive (the session creates a
+ * top-level directory node for it); added=0 removes it.  name is the
+ * 8-byte client drive label plus a NUL.  pad rounds the struct to a
+ * clean 20 bytes and is sent zeroed. */
+struct rdp_be_fs_device {
+	uint32_t device_id;
+	uint32_t device_type;
+	uint8_t  added;       /* 1 = announce, 0 = remove */
+	char     name[9];
+	uint8_t  pad[2];
 };
 
 #define RDP_BE_CLIP_FMT_TEXT  0x00000001u

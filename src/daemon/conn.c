@@ -870,6 +870,34 @@ maybe_dispatch_clip(struct rdp_tls *t, int be_fd,
 					    compl_info.data,
 					    compl_info.data_len);
 			}
+			/* Announce any newly enumerated file system drives to
+			 * the session so its FUSE mount can present them.  The
+			 * device list is parsed inside rdp_rdpdr_handle, so we
+			 * scan for unannounced filesystem devices here. */
+			if (be_fd >= 0) {
+				uint32_t di;
+				for (di = 0; di < dr->dr.device_count
+				    && di < RDPDR_MAX_DEVICES; di++) {
+					struct rdpdr_device *d =
+					    &dr->dr.devices[di];
+					struct rdp_be_fs_device fsd;
+					if (!d->in_use || d->announced)
+						continue;
+					if (d->device_type
+					    != RDPDR_DTYP_FILESYSTEM)
+						continue;
+					memset(&fsd, 0, sizeof fsd);
+					fsd.device_id = d->device_id;
+					fsd.device_type = d->device_type;
+					fsd.added = 1;
+					memcpy(fsd.name, d->name,
+					    sizeof d->name);
+					if (rdp_be_send(be_fd,
+					    RDP_BE_FS_DEVICE,
+					    &fsd, sizeof fsd) == 0)
+						d->announced = 1;
+				}
+			}
 		}
 		return 1;
 	}

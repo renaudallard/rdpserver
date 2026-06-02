@@ -77,6 +77,7 @@
 
 struct rdpdr_device {
 	int      in_use;
+	int      announced;   /* an FS_DEVICE was already sent to the session */
 	uint32_t device_type;
 	uint32_t device_id;
 	char     name[9];

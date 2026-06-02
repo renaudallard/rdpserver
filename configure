@@ -177,6 +177,13 @@ probe "for kqueue(2)" '#include <sys/types.h>
 #include <sys/event.h>
 int main(void) { return kqueue(); }' && HAVE_KQUEUE=1
 
+# Raw /dev/fuse kernel protocol for RDPDR drive redirection (Linux only,
+# header-only check; we speak the protocol ourselves without libfuse).
+HAVE_FUSE=0
+probe "for <linux/fuse.h>" '#include <linux/fuse.h>
+int main(void) { struct fuse_in_header h; h.opcode = FUSE_INIT; return (int)h.opcode; }' \
+	&& HAVE_FUSE=1
+
 if [ "$HAVE_EPOLL" = 0 ] && [ "$HAVE_KQUEUE" = 0 ]; then
 	echo "configure: warning: no epoll or kqueue; falling back to poll(2)"
 fi
@@ -602,6 +609,7 @@ cat > src/include/config.h <<EOF
 #define HAVE_SECCOMP          $HAVE_SECCOMP
 #define HAVE_EPOLL            $HAVE_EPOLL
 #define HAVE_KQUEUE           $HAVE_KQUEUE
+#define HAVE_FUSE             $HAVE_FUSE
 #define HAVE_X11              $HAVE_X11
 #define HAVE_X264             $HAVE_X264
 #define HAVE_PULSEAUDIO       $HAVE_PULSEAUDIO
@@ -661,6 +669,12 @@ HAVE_WLROOTS    = $HAVE_WLROOTS
 WLROOTS_CFLAGS  = $WLROOTS_CFLAGS
 WLROOTS_LIBS    = $WLROOTS_LIBS
 WAYLAND_OBJ     = $([ "$HAVE_WLROOTS" = 1 ] && echo "src/session/wayland_comp.o")
+
+# Raw /dev/fuse drive redirection (Linux).  fuse_drive.o is always
+# compiled (body gated by HAVE_FUSE); the regress test only runs when
+# the host has <linux/fuse.h>.
+HAVE_FUSE       = $HAVE_FUSE
+FUSE_REGRESS    = $([ "$HAVE_FUSE" = 1 ] && echo "regress/wire/fuse_drive_test")
 
 HAVE_XORG_DDX  = $HAVE_XORG_DDX
 XORG_CFLAGS    = $XORG_CFLAGS
