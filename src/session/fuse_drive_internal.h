@@ -298,6 +298,11 @@ struct fd_backend {
 extern const struct fd_backend fd_backend_linux;
 #endif
 
+/* The OpenBSD fusebuf backend (defined in fuse_drive_obsd.c). */
+#if HAVE_OBSD_FUSE
+extern const struct fd_backend fd_backend_obsd;
+#endif
+
 /* node table (fuse_drive.c) */
 struct fd_node *fd_node_find(struct fuse_drive *fd, uint64_t nodeid);
 struct fd_node *fd_child_find(struct fuse_drive *fd, uint64_t parent,

@@ -97,7 +97,8 @@ REGRESS_PROGS = \
 	regress/wire/capset_test \
 	regress/wire/rdp_pdu_test \
 	regress/wire/rdpdr_test \
-	$(FUSE_REGRESS)
+	$(FUSE_REGRESS) \
+	$(OBSD_FUSE_REGRESS)
 
 FUZZ_PROG = regress/fuzz/fuzz_parsers
 
@@ -204,26 +205,42 @@ regress/wire/capset_test: regress/wire/capset_test.o $(WIRE_LIB) $(COMMON_LIB)
 regress/wire/rdp_pdu_test: regress/wire/rdp_pdu_test.o $(WIRE_LIB) $(COMMON_LIB)
 	$(CC) $(LDFLAGS) -o $@ regress/wire/rdp_pdu_test.o $(WIRE_LIB) $(COMMON_LIB)
 
-# Built with ASan + UBSan to catch any out-of-bounds in the IRP builders.
-# rdpdr.o and the common log object are recompiled with the sanitizers so
-# the instrumentation covers the code under test.
+# Built with ASan + UBSan (where the toolchain supports them, via
+# $(TEST_SAN); empty on OpenBSD) to catch out-of-bounds in the IRP builders.
+# rdpdr.o and the common log object are recompiled so the instrumentation
+# covers the code under test.
 regress/wire/rdpdr_test: regress/wire/rdpdr_test.c src/channels/rdpdr.c \
 		src/common/log.c
-	$(CC) $(CFLAGS) -fsanitize=address,undefined -Isrc/include \
+	$(CC) $(CFLAGS) $(TEST_SAN) -Isrc/include \
 		-o $@ regress/wire/rdpdr_test.c src/channels/rdpdr.c \
 		src/common/log.c
 
 # Drive read-path FUSE protocol test.  The protocol agnostic core
 # (fuse_drive.c) and the Linux raw /dev/fuse backend (fuse_drive_linux.c)
 # are recompiled together with -DRDP_FUSE_TEST so the dispatch is callable
-# on in-memory buffers; ASan and UBSan cover the untrusted FSCC/read decode.
+# on in-memory buffers; $(TEST_SAN) covers the untrusted FSCC/read decode
+# where supported.
 regress/wire/fuse_drive_test: regress/wire/fuse_drive_test.c \
 		src/session/fuse_drive.c src/session/fuse_drive_linux.c \
 		src/common/io.c src/common/log.c
-	$(CC) $(CFLAGS) -fsanitize=address,undefined -DRDP_FUSE_TEST \
+	$(CC) $(CFLAGS) $(TEST_SAN) -DRDP_FUSE_TEST \
 		-Isrc/include \
 		-o $@ regress/wire/fuse_drive_test.c \
 		src/session/fuse_drive.c src/session/fuse_drive_linux.c \
+		src/common/io.c src/common/log.c
+
+# Drive read-path fusebuf protocol test (OpenBSD).  The core (fuse_drive.c)
+# and the OpenBSD fusebuf backend (fuse_drive_obsd.c) are recompiled together
+# with -DRDP_FUSE_TEST so the dispatch is callable on in-memory buffers, the
+# same way the Linux test works.  The OpenBSD toolchain ships no ASan/UBSan
+# runtime, so the sanitizers the Linux rule uses are omitted here.
+regress/wire/fuse_drive_obsd_test: regress/wire/fuse_drive_obsd_test.c \
+		src/session/fuse_drive.c src/session/fuse_drive_obsd.c \
+		src/common/io.c src/common/log.c
+	$(CC) $(CFLAGS) -DRDP_FUSE_TEST \
+		-Isrc/include \
+		-o $@ regress/wire/fuse_drive_obsd_test.c \
+		src/session/fuse_drive.c src/session/fuse_drive_obsd.c \
 		src/common/io.c src/common/log.c
 
 regress/fuzz/fuzz_parsers: regress/fuzz/fuzz_parsers.o \

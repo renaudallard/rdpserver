@@ -184,9 +184,9 @@ probe "for <linux/fuse.h>" '#include <linux/fuse.h>
 int main(void) { struct fuse_in_header h; h.opcode = FUSE_INIT; return (int)h.opcode; }' \
 	&& HAVE_FUSE=1
 
-# OpenBSD fusebuf kernel protocol for the same drive redirection (the
-# OpenBSD wire backend is added in a later stage; this only probes the
-# header so the build scaffolding can select it).
+# OpenBSD fusebuf kernel protocol for the same drive redirection.  The
+# OpenBSD wire backend (src/session/fuse_drive_obsd.c) speaks this protocol
+# directly; we only probe the header here so the backend object is selected.
 HAVE_OBSD_FUSE=0
 probe "for <sys/fusebuf.h>" '#include <sys/types.h>
 #include <sys/queue.h>
@@ -196,14 +196,23 @@ probe "for <sys/fusebuf.h>" '#include <sys/types.h>
 int main(void) { struct fusebuf f; return (int)sizeof f.fb_hdr; }' \
 	&& HAVE_OBSD_FUSE=1
 
-# Pick the drive wire backend object.  The Linux raw /dev/fuse backend
-# is built and shipping; the OpenBSD fusebuf backend
-# (src/session/fuse_drive_obsd.o) is detected by HAVE_OBSD_FUSE but not
-# yet wired in here, so the OpenBSD build stays clean until it lands.
+# Pick the drive wire backend object.  HAVE_FUSE selects the Linux raw
+# /dev/fuse backend; HAVE_OBSD_FUSE the OpenBSD fusebuf backend.  Exactly one
+# host can match (the two headers never coexist), so this is a plain elif.
 FUSE_BACKEND_OBJ=
 if [ "$HAVE_FUSE" = 1 ]; then
 	FUSE_BACKEND_OBJ=src/session/fuse_drive_linux.o
+elif [ "$HAVE_OBSD_FUSE" = 1 ]; then
+	FUSE_BACKEND_OBJ=src/session/fuse_drive_obsd.o
 fi
+
+# Address/UB sanitizers for the unit tests that opt into them.  Left empty
+# when the toolchain has no runtime (e.g. OpenBSD clang rejects the option),
+# so those tests still build and run, just without the instrumentation.
+TEST_SAN=
+probe "for -fsanitize=address,undefined" 'int main(void) { return 0; }' \
+	'-fsanitize=address,undefined' '-fsanitize=address,undefined' \
+	&& TEST_SAN="-fsanitize=address,undefined"
 
 if [ "$HAVE_EPOLL" = 0 ] && [ "$HAVE_KQUEUE" = 0 ]; then
 	echo "configure: warning: no epoll or kqueue; falling back to poll(2)"
@@ -694,13 +703,14 @@ WAYLAND_OBJ     = $([ "$HAVE_WLROOTS" = 1 ] && echo "src/session/wayland_comp.o"
 
 # Drive redirection.  The protocol agnostic core (fuse_drive.o) is always
 # compiled; the wire backend object depends on the host.  HAVE_FUSE selects
-# the Linux raw /dev/fuse backend, HAVE_OBSD_FUSE the OpenBSD fusebuf one
-# (not built yet).  The regress test only runs when the host has
-# <linux/fuse.h>.
+# the Linux raw /dev/fuse backend, HAVE_OBSD_FUSE the OpenBSD fusebuf one.
+# Each host runs only its own protocol-level regress test.
 HAVE_FUSE       = $HAVE_FUSE
 HAVE_OBSD_FUSE  = $HAVE_OBSD_FUSE
 FUSE_BACKEND_OBJ = $FUSE_BACKEND_OBJ
 FUSE_REGRESS    = $([ "$HAVE_FUSE" = 1 ] && echo "regress/wire/fuse_drive_test")
+OBSD_FUSE_REGRESS = $([ "$HAVE_OBSD_FUSE" = 1 ] && echo "regress/wire/fuse_drive_obsd_test")
+TEST_SAN        = $TEST_SAN
 
 HAVE_XORG_DDX  = $HAVE_XORG_DDX
 XORG_CFLAGS    = $XORG_CFLAGS

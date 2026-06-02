@@ -94,7 +94,7 @@
 
 #include "fuse_drive.h"
 
-#if HAVE_FUSE
+#if HAVE_FUSE || HAVE_OBSD_FUSE
 
 #include "fuse_drive_internal.h"
 
@@ -2391,7 +2391,11 @@ fuse_drive_init(int fuse_fd, int be_fd)
 		return NULL;
 	fd->fuse_fd = fuse_fd;
 	fd->be_fd = be_fd;
+#if HAVE_OBSD_FUSE
+	fd->backend = &fd_backend_obsd;
+#else
 	fd->backend = &fd_backend_linux;
+#endif
 	fd->send_fs_req = fd_live_send_fs_req;
 	fd->write_reply = fd_live_write_reply;
 	fd_common_init(fd);
@@ -2500,6 +2504,7 @@ uint32_t fuse_drive_test_req_disposition(void);
 uint32_t fuse_drive_test_req_options(void);
 const uint8_t *fuse_drive_test_req_payload(size_t *);
 const uint8_t *fuse_drive_test_reply(size_t *);
+int fuse_drive_test_reply_writes(void);
 uint64_t fuse_drive_test_find_child(struct fuse_drive *, uint64_t,
 		const char *);
 
@@ -2510,6 +2515,7 @@ struct fd_test_capture {
 	size_t   req_payload_len;
 	uint8_t  reply[FD_OUT_BUF_SZ];
 	size_t   reply_len;
+	int      reply_writes;   /* write_reply call count for this reply */
 };
 
 static struct fd_test_capture fd_test_cap;
@@ -2538,6 +2544,7 @@ fd_test_write_reply(struct fuse_drive *fd, const void *buf, size_t len)
 		return -1;
 	memcpy(c->reply + c->reply_len, buf, len);
 	c->reply_len += len;
+	c->reply_writes++;
 	return 0;
 }
 
@@ -2549,7 +2556,11 @@ fuse_drive_test_new(void)
 		return NULL;
 	fd->fuse_fd = -1;
 	fd->be_fd = -1;
+#if HAVE_OBSD_FUSE
+	fd->backend = &fd_backend_obsd;
+#else
 	fd->backend = &fd_backend_linux;
+#endif
 	fd->sink_ctx = &fd_test_cap;
 	fd->send_fs_req = fd_test_send_fs_req;
 	fd->write_reply = fd_test_write_reply;
@@ -2609,6 +2620,15 @@ fuse_drive_test_reply(size_t *len_out)
 	return fd_test_cap.reply;
 }
 
+/* Number of write_reply calls that built the last reply.  The OpenBSD
+ * fusebuf kernel requires each reply in a single write, so a data-bearing
+ * reply must be exactly one. */
+int
+fuse_drive_test_reply_writes(void)
+{
+	return fd_test_cap.reply_writes;
+}
+
 /* Nodeid of the child named `name` under `parent`, or 0 if none.  Used
  * to check that rename re-parents the node into the destination dir. */
 uint64_t
@@ -2620,7 +2640,7 @@ fuse_drive_test_find_child(struct fuse_drive *fd, uint64_t parent,
 }
 #endif /* RDP_FUSE_TEST */
 
-#else /* no supported drive wire format: no-op stubs */
+#else /* !HAVE_FUSE && !HAVE_OBSD_FUSE: no-op stubs */
 
 struct fuse_drive *
 fuse_drive_init(int fuse_fd, int be_fd)
@@ -2648,4 +2668,4 @@ fuse_drive_handle_fs_rsp(struct fuse_drive *fd, const void *rsp,
 	(void)fd; (void)rsp; (void)payload; (void)payload_len;
 }
 
-#endif /* HAVE_FUSE */
+#endif /* HAVE_FUSE || HAVE_OBSD_FUSE */
