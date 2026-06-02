@@ -7,7 +7,7 @@
 .Nd Remote Desktop Protocol server
 .Sh SYNOPSIS
 .Nm
-.Op Fl AdfPV
+.Op Fl AdfPVW
 .Op Fl h Ar host
 .Op Fl p Ar port
 .Op Fl S Ar socket
@@ -94,6 +94,11 @@ GPU, so it accelerates GPU-less clients
 without the AVC teardown described above.
 Off by default; the per-frame codec is selected by the WireToSurface2
 command, so it does not affect clients that receive AVC.
+.It Fl W
+Prefer G.711 A-law audio output when the client supports it.
+A-law is half the wire bandwidth of 16-bit PCM at a small quality cost,
+so it suits WAN links.
+Off by default; PCM is used on a LAN.
 .El
 .Sh FILES
 .Bl -tag -width Ds

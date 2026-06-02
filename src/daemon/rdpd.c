@@ -136,7 +136,7 @@ static void
 usage(const char *prog)
 {
 	(void)fprintf(stderr,
-"usage: %s [-d] [-f] [-V] [-P] [-p port] [-h host] [-S sock]\n"
+"usage: %s [-d] [-f] [-V] [-P] [-W] [-p port] [-h host] [-S sock]\n"
 "  -d        enable debug log level\n"
 "  -f        run in foreground; log to stderr\n"
 "  -V        offer RDPGFX AVC (H.264) to v10.x clients (mstsc, macOS);\n"
@@ -144,6 +144,8 @@ usage(const char *prog)
 "            decode AVC tears down the graphics channel\n"
 "  -P        offer RFX Progressive GFX to clients that are not given AVC;\n"
 "            a CPU-decodable codec (no client GPU needed), off by default\n"
+"  -W        prefer G.711 A-law audio (half the bandwidth) when the client\n"
+"            supports it; off by default (PCM, best quality on a LAN)\n"
 "  -p port   listen port (default %s)\n"
 "  -h host   bind address (default: all)\n"
 "  -S sock   path to rdp-sessionmgr AF_UNIX socket\n"
@@ -159,15 +161,16 @@ main(int argc, char *argv[])
 	const char *host = NULL;
 	const char *sessmgr_sock = NULL;
 	int debug = 0, foreground = 0, auto_login = 0, allow_v10_avc = 0;
-	int allow_progressive = 0;
+	int allow_progressive = 0, prefer_wan_audio = 0;
 	int opt, listen_fd;
 	struct rdp_log_cfg lc;
 
-	while ((opt = getopt(argc, argv, "AVPdfp:h:S:H?")) != -1) {
+	while ((opt = getopt(argc, argv, "AVPWdfp:h:S:H?")) != -1) {
 		switch (opt) {
 		case 'A': auto_login = 1; break;
 		case 'V': allow_v10_avc = 1; break;
 		case 'P': allow_progressive = 1; break;
+		case 'W': prefer_wan_audio = 1; break;
 		case 'd': debug = 1; break;
 		case 'f': foreground = 1; break;
 		case 'p': port = optarg; break;
@@ -252,7 +255,8 @@ main(int argc, char *argv[])
 		}
 		if (pid == 0) {
 			struct rdp_conn_cfg ccfg = { tls, sessmgr_sock,
-				auto_login, allow_v10_avc, allow_progressive };
+				auto_login, allow_v10_avc, allow_progressive,
+				prefer_wan_audio };
 			(void)close(listen_fd);
 			/* Worker only needs: TLS read/write on the TCP fd,
 			 * the AF_UNIX socket to sessmgr, and writing tmp/

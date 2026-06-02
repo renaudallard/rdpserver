@@ -27,12 +27,12 @@
  * POSSIBILITY OF SUCH DAMAGES.
  */
 /*
- * rdpsnd.h -- MS-RDPEA (Audio Output Virtual Channel) minimal
- * implementation.
+ * rdpsnd.h -- MS-RDPEA (Audio Output Virtual Channel) implementation.
  *
- * v1 scope: negotiate one PCM format (16-bit LE, stereo, 44100 Hz)
- * with the client.  Actual audio streaming (wave PDUs) is the
- * follow-up; the channel sits silent after the handshake.
+ * Negotiates PCM (16-bit LE, stereo, 44100 Hz) and G.711 A-law with
+ * the client and streams captured audio via SNDC_WAVE2.  A-law halves
+ * the wire bandwidth and is selected for WAN when the operator opts in
+ * (rdpd -W) and the client supports it.
  */
 
 #ifndef RDP_RDPSND_H
@@ -49,8 +49,7 @@
 #define SNDC_SETVOLUME          0x03
 #define SNDC_SETPITCH           0x04
 #define SNDC_WAVECONFIRM        0x05
-#define SNDC_TRAINING           0x06
-#define SNDC_TRAININGCONFIRM    0x07
+#define SNDC_TRAINING           0x06   /* also the client Training Confirm */
 #define SNDC_FORMATS            0x07
 #define SNDC_CRYPTKEY           0x08
 #define SNDC_WAVEENCRYPT        0x09
@@ -62,30 +61,41 @@
 #define RDPSND_VERSION          0x06
 
 #define WAVE_FORMAT_PCM         0x0001
+#define WAVE_FORMAT_ALAW        0x0006
 
 struct rdpsnd_state {
 	int negotiated;
 	int client_format_count;
 	uint8_t block_no;
 	uint16_t timestamp;
+	uint16_t format_no;          /* index of the chosen output format */
+	uint16_t chosen_tag;         /* WAVE_FORMAT_* of the chosen format */
+	uint32_t chosen_rate;
+	uint16_t chosen_block_align;
 };
 
-/* Build the Server Audio Formats and Version PDU.  Advertises a
- * single PCM format. */
+/* Build the Server Audio Formats and Version PDU.  Advertises PCM
+ * (index 0) and G.711 A-law (index 1). */
 ssize_t rdp_rdpsnd_build_formats(uint8_t *out, size_t cap);
 
 /* Handle an inbound RDPSND PDU (Client Audio Formats, Training
- * Confirm, Wave Confirm).  Returns 0 on success. */
+ * Confirm, Wave Confirm).  prefer_wan selects the compact A-law
+ * format when the client also supports it.  Returns 0 on success. */
 int rdp_rdpsnd_handle(struct rdpsnd_state *st,
-		const uint8_t *pdu, size_t len);
+		const uint8_t *pdu, size_t len, int prefer_wan);
 
 /* Build a Training PDU (server sends this, client confirms). */
 ssize_t rdp_rdpsnd_build_training(uint8_t *out, size_t cap);
 
-/* Build a SNDC_WAVE2 PDU carrying PCM data.  format_no is the index
- * into the negotiated format list (0 for our single PCM format). */
+/* Build a SNDC_WAVE2 PDU carrying audio in the chosen format
+ * (st->format_no references the negotiated format list index). */
 ssize_t rdp_rdpsnd_build_wave2(struct rdpsnd_state *st,
 		uint8_t *out, size_t cap,
-		const uint8_t *pcm, size_t pcm_len);
+		const uint8_t *data, size_t data_len);
+
+/* Encode S16LE PCM to G.711 A-law (1 byte per sample).  out must hold
+ * at least pcm_len/2 bytes; returns the number of A-law bytes. */
+size_t rdp_rdpsnd_alaw_encode(const uint8_t *pcm, size_t pcm_len,
+		uint8_t *out);
 
 #endif /* RDP_RDPSND_H */

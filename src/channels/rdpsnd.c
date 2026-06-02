@@ -35,6 +35,51 @@
 #include "../include/rdp_log.h"
 #include "../common/buf.h"
 
+/* G.711 A-law encoder (ITU-T / Sun reference).  A 16-bit linear sample
+ * maps to one A-law byte.  The arithmetic right shift on a signed value
+ * is the standard 16-to-13-bit domain reduction. */
+static const int16_t alaw_seg_end[8] = {
+	0x1F, 0x3F, 0x7F, 0xFF, 0x1FF, 0x3FF, 0x7FF, 0xFFF
+};
+
+static uint8_t
+linear16_to_alaw(int16_t lin)
+{
+	int pcm = lin >> 3;
+	int seg, mask, aval;
+
+	if (pcm >= 0) {
+		mask = 0xD5;
+	} else {
+		mask = 0x55;
+		pcm = -pcm - 1;
+	}
+	for (seg = 0; seg < 8; seg++)
+		if (pcm <= alaw_seg_end[seg])
+			break;
+	if (seg >= 8)
+		return (uint8_t)(0x7F ^ mask);
+	aval = seg << 4;
+	if (seg < 2)
+		aval |= (pcm >> 1) & 0x0F;
+	else
+		aval |= (pcm >> seg) & 0x0F;
+	return (uint8_t)(aval ^ mask);
+}
+
+size_t
+rdp_rdpsnd_alaw_encode(const uint8_t *pcm, size_t pcm_len, uint8_t *out)
+{
+	size_t n = pcm_len / 2, i;
+
+	for (i = 0; i < n; i++) {
+		int16_t s = (int16_t)((uint16_t)pcm[i * 2]
+			| ((uint16_t)pcm[i * 2 + 1] << 8));
+		out[i] = linear16_to_alaw(s);
+	}
+	return n;
+}
+
 ssize_t
 rdp_rdpsnd_build_formats(uint8_t *out, size_t cap)
 {
@@ -59,8 +104,8 @@ rdp_rdpsnd_build_formats(uint8_t *out, size_t cap)
 	 *   wBitsPerSample   u16
 	 *   cbSize           u16
 	 */
-	uint16_t body_size = 20 + 18;
-	if (cap < 4 + body_size) return -1;
+	uint16_t body_size = 20 + 2 * 18;
+	if (cap < (size_t)4 + body_size) return -1;
 
 	rdp_buf_init(&b, out, cap);
 	/* PDU header */
@@ -73,18 +118,27 @@ rdp_rdpsnd_build_formats(uint8_t *out, size_t cap)
 	if (rdp_buf_put_u32le(&b, 0xFFFFFFFF) != 0) return -1;  /* dwVolume */
 	if (rdp_buf_put_u32le(&b, 0) != 0) return -1;           /* dwPitch */
 	if (rdp_buf_put_u16le(&b, 0) != 0) return -1;           /* wDGramPort */
-	if (rdp_buf_put_u16le(&b, 1) != 0) return -1;           /* wNumberOfFormats */
+	if (rdp_buf_put_u16le(&b, 2) != 0) return -1;           /* wNumberOfFormats */
 	if (rdp_buf_put_u8(&b, 0) != 0) return -1;              /* cLastBlockConfirmed */
 	if (rdp_buf_put_u16le(&b, RDPSND_VERSION) != 0) return -1;
 	if (rdp_buf_put_u8(&b, 0) != 0) return -1;              /* bPad */
 
-	/* AUDIO_FORMAT: PCM 16-bit stereo 44100 Hz */
+	/* AUDIO_FORMAT[0]: PCM 16-bit stereo 44100 Hz */
 	if (rdp_buf_put_u16le(&b, WAVE_FORMAT_PCM) != 0) return -1;
 	if (rdp_buf_put_u16le(&b, 2) != 0) return -1;           /* nChannels */
 	if (rdp_buf_put_u32le(&b, 44100) != 0) return -1;       /* nSamplesPerSec */
 	if (rdp_buf_put_u32le(&b, 176400) != 0) return -1;      /* nAvgBytesPerSec */
 	if (rdp_buf_put_u16le(&b, 4) != 0) return -1;           /* nBlockAlign */
 	if (rdp_buf_put_u16le(&b, 16) != 0) return -1;          /* wBitsPerSample */
+	if (rdp_buf_put_u16le(&b, 0) != 0) return -1;           /* cbSize */
+
+	/* AUDIO_FORMAT[1]: G.711 A-law 8-bit stereo 44100 Hz (2:1) */
+	if (rdp_buf_put_u16le(&b, WAVE_FORMAT_ALAW) != 0) return -1;
+	if (rdp_buf_put_u16le(&b, 2) != 0) return -1;           /* nChannels */
+	if (rdp_buf_put_u32le(&b, 44100) != 0) return -1;       /* nSamplesPerSec */
+	if (rdp_buf_put_u32le(&b, 88200) != 0) return -1;       /* nAvgBytesPerSec */
+	if (rdp_buf_put_u16le(&b, 2) != 0) return -1;           /* nBlockAlign */
+	if (rdp_buf_put_u16le(&b, 8) != 0) return -1;           /* wBitsPerSample */
 	if (rdp_buf_put_u16le(&b, 0) != 0) return -1;           /* cbSize */
 
 	return (ssize_t)rdp_buf_used(&b);
@@ -108,10 +162,10 @@ rdp_rdpsnd_build_training(uint8_t *out, size_t cap)
 ssize_t
 rdp_rdpsnd_build_wave2(struct rdpsnd_state *st,
 		uint8_t *out, size_t cap,
-		const uint8_t *pcm, size_t pcm_len)
+		const uint8_t *data, size_t data_len)
 {
 	struct rdp_buf b;
-	size_t body_size = 12 + pcm_len;
+	size_t body_size = 12 + data_len;
 
 	if (body_size > 0xFFFF) return -1;
 	if (cap < 4 + body_size) return -1;
@@ -121,46 +175,87 @@ rdp_rdpsnd_build_wave2(struct rdpsnd_state *st,
 	if (rdp_buf_put_u8(&b, 0) != 0) return -1;
 	if (rdp_buf_put_u16le(&b, (uint16_t)body_size) != 0) return -1;
 	if (rdp_buf_put_u16le(&b, st->timestamp) != 0) return -1;
-	if (rdp_buf_put_u16le(&b, 0) != 0) return -1;
+	if (rdp_buf_put_u16le(&b, st->format_no) != 0) return -1;
 	if (rdp_buf_put_u8(&b, st->block_no) != 0) return -1;
 	st->block_no++;
 	if (rdp_buf_put_u8(&b, 0) != 0) return -1;
 	if (rdp_buf_put_u8(&b, 0) != 0) return -1;
 	if (rdp_buf_put_u8(&b, 0) != 0) return -1;
 	if (rdp_buf_put_u32le(&b, (uint32_t)st->timestamp) != 0) return -1;
-	if (rdp_buf_put(&b, pcm, pcm_len) != 0) return -1;
+	if (rdp_buf_put(&b, data, data_len) != 0) return -1;
 
-	st->timestamp += (uint16_t)(pcm_len / 4 * 1000 / 44100);
+	{
+		uint16_t ba = st->chosen_block_align ?
+			st->chosen_block_align : 4;
+		uint32_t rate = st->chosen_rate ? st->chosen_rate : 44100;
+		st->timestamp += (uint16_t)((uint32_t)(data_len / ba)
+			* 1000 / rate);
+	}
 	return (ssize_t)rdp_buf_used(&b);
 }
 
 int
 rdp_rdpsnd_handle(struct rdpsnd_state *st,
-		const uint8_t *pdu, size_t len)
+		const uint8_t *pdu, size_t len, int prefer_wan)
 {
 	uint8_t msg_type;
 
 	if (len < 4) return -1;
-	msg_type = pdu[0];
+	msg_type = pdu[0];   /* SNDPROLOG msgType; PDUs differ by this */
 
 	switch (msg_type) {
 	case SNDC_FORMATS: {
-		/* Client Audio Formats response.  We just count the
-		 * formats and mark the channel as negotiated. */
-		uint16_t body_size, nfmt;
+		/* Client Audio Formats response.  Walk the echoed
+		 * AUDIO_FORMAT list and choose A-law if the operator
+		 * prefers the compact format and the client accepts it;
+		 * otherwise keep PCM (index 0), which is always safe. */
+		uint16_t nfmt;
+		size_t off, i;
+		int has_alaw = 0;
+
 		if (len < 24) return -1;
-		body_size = (uint16_t)pdu[2] | ((uint16_t)pdu[3] << 8);
-		(void)body_size;
-		nfmt = (uint16_t)pdu[22] | ((uint16_t)pdu[23] << 8);
+		/* wNumberOfFormats is at body offset 14 (pdu[18..19]);
+		 * the first AUDIO_FORMAT follows the 20-byte body. */
+		nfmt = (uint16_t)pdu[18] | ((uint16_t)pdu[19] << 8);
+		off = 24;
+		for (i = 0; i < nfmt && off + 18 <= len; i++) {
+			uint16_t tag = (uint16_t)pdu[off]
+				| ((uint16_t)pdu[off + 1] << 8);
+			uint16_t ch = (uint16_t)pdu[off + 2]
+				| ((uint16_t)pdu[off + 3] << 8);
+			uint32_t rate = (uint32_t)pdu[off + 4]
+				| ((uint32_t)pdu[off + 5] << 8)
+				| ((uint32_t)pdu[off + 6] << 16)
+				| ((uint32_t)pdu[off + 7] << 24);
+			uint16_t cbsize = (uint16_t)pdu[off + 16]
+				| ((uint16_t)pdu[off + 17] << 8);
+			if (tag == WAVE_FORMAT_ALAW && ch == 2
+			    && rate == 44100)
+				has_alaw = 1;
+			off += 18 + cbsize;
+		}
+
 		st->client_format_count = nfmt;
+		/* Default to PCM index 0 (byte-for-byte as before). */
+		st->format_no = 0;
+		st->chosen_tag = WAVE_FORMAT_PCM;
+		st->chosen_rate = 44100;
+		st->chosen_block_align = 4;
+		if (prefer_wan && has_alaw) {
+			st->format_no = 1;
+			st->chosen_tag = WAVE_FORMAT_ALAW;
+			st->chosen_block_align = 2;
+		}
 		st->negotiated = 1;
-		rdp_info("rdpsnd: client supports %u formats", (unsigned)nfmt);
+		rdp_info("rdpsnd: %u client formats; streaming %s",
+			(unsigned)nfmt,
+			st->chosen_tag == WAVE_FORMAT_ALAW ? "A-law" : "PCM");
 		break;
 	}
-	/* SNDC_TRAININGCONFIRM = 0x07 (same value as SNDC_FORMATS);
-	 * the client response to Training is handled by the FORMATS
-	 * case above via a length heuristic (training confirm is
-	 * shorter than a formats PDU). */
+	case SNDC_TRAINING:
+		/* Inbound Training Confirm (msgType 0x06). */
+		rdp_debug("rdpsnd: training confirm");
+		break;
 	case SNDC_WAVECONFIRM:
 		rdp_debug("rdpsnd: wave confirm");
 		break;

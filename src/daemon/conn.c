@@ -618,6 +618,10 @@ struct dr_state {
 	struct rdpdr_state dr;
 };
 
+/* Set from cfg in rdp_conn_run; used during channel dispatch, which
+ * runs before the per-connection setup, so declared at file scope. */
+static int g_prefer_wan_audio;
+
 /* Try to recognise a channel-bearing TPKT/MCS SDR and dispatch.
  * Returns 1 if handled, 0 if not, -1 on disconnect, 2 if a resize
  * is requested (new_w/new_h set). */
@@ -725,7 +729,7 @@ maybe_dispatch_clip(struct rdp_tls *t, int be_fd,
 	if (ss->enabled && cid == ss->channel_id) {
 		if (payload_len < 8) return 1;
 		(void)rdp_rdpsnd_handle(&ss->snd, payload + 8,
-			payload_len - 8);
+			payload_len - 8, g_prefer_wan_audio);
 		return 1;
 	}
 
@@ -1612,21 +1616,41 @@ run_proxy(struct rdp_tls *t, int be_fd,
 					if (pcm != NULL
 					    && rdp_read_full(be_fd, pcm, len)
 					    == (ssize_t)len) {
-						uint8_t *wpdu = malloc(len + 20);
-						if (wpdu != NULL) {
-							ssize_t wn;
-							wn = rdp_rdpsnd_build_wave2(
-							    &ss->snd, wpdu,
-							    len + 20,
-							    pcm, len);
-							if (wn > 0)
-								(void)send_clip_pdu(t,
-								    user_id,
-								    ss->channel_id,
-								    wpdu,
-								    (size_t)wn);
-							free(wpdu);
+						const uint8_t *audio = pcm;
+						size_t audio_len = len;
+						uint8_t *enc = NULL;
+						int ok = 1;
+						if (ss->snd.chosen_tag
+						    == WAVE_FORMAT_ALAW) {
+							enc = malloc(len / 2 + 1);
+							if (enc == NULL)
+								ok = 0;
+							else {
+								audio_len =
+								  rdp_rdpsnd_alaw_encode(
+								    pcm, len, enc);
+								audio = enc;
+							}
 						}
+						if (ok) {
+							uint8_t *wpdu =
+							    malloc(audio_len + 20);
+							if (wpdu != NULL) {
+								ssize_t wn;
+								wn = rdp_rdpsnd_build_wave2(
+								    &ss->snd, wpdu,
+								    audio_len + 20,
+								    audio, audio_len);
+								if (wn > 0)
+									(void)send_clip_pdu(
+									    t, user_id,
+									    ss->channel_id,
+									    wpdu,
+									    (size_t)wn);
+								free(wpdu);
+							}
+						}
+						free(enc);
 					}
 					free(pcm);
 				} else if (len > 0) {
@@ -1824,6 +1848,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 
 	g_allow_v10_avc = cfg->allow_v10_avc;
 	g_allow_progressive = cfg->allow_progressive;
+	g_prefer_wan_audio = cfg->prefer_wan_audio;
 	struct dynvc_state dynvc = {0};
 	struct snd_state snd = {0};
 	struct dr_state devr = {0};
