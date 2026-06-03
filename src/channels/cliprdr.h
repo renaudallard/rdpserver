@@ -186,6 +186,20 @@ ssize_t rdp_cliprdr_html_wrap(uint8_t *out, size_t cap,
 int rdp_cliprdr_html_unwrap(const uint8_t *cfhtml, size_t len,
 		size_t *frag_off, size_t *frag_len);
 
+/*
+ * Clipboard bitmap conversion (zero dependency).  A CF_DIB/CF_DIBV5 is a
+ * BITMAPINFOHEADER-family DIB with no file header; rdp_cliprdr_dib_to_bmp
+ * prepends a 14-byte BITMAPFILEHEADER (computing bfOffBits from the DIB's
+ * header size, colour masks and palette) to produce a .bmp byte stream for
+ * the X side.  rdp_cliprdr_bmp_to_dib does the reverse, returning the DIB
+ * as an offset/length into the input.  Both validate header fields against
+ * the buffer; the DIB header is attacker-controlled.
+ */
+ssize_t rdp_cliprdr_dib_to_bmp(const uint8_t *dib, size_t dib_len,
+		uint8_t *out, size_t cap);
+int rdp_cliprdr_bmp_to_dib(const uint8_t *bmp, size_t bmp_len,
+		size_t *dib_off, size_t *dib_len);
+
 /* Parse a CB_FORMAT_DATA_REQUEST body.  Returns the requested
  * format id. */
 int rdp_cliprdr_parse_format_data_request(const uint8_t *p, size_t len,

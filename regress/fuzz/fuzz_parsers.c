@@ -212,6 +212,14 @@ fuzz_cliprdr(size_t iters)
 		(void)rdp_cliprdr_parse_format_list(buf, len, 0, &fmts);
 		(void)rdp_cliprdr_parse_format_data_request(buf, len, &fmt);
 		(void)rdp_cliprdr_html_unwrap(buf, len, &fo, &fl);
+		(void)rdp_cliprdr_bmp_to_dib(buf, len, &fo, &fl);
+		{
+			/* The DIB header is attacker-controlled; the encoder must
+			 * never over-read it.  Give a generous output buffer. */
+			static uint8_t bmpout[BUF_MAX + 16];
+			(void)rdp_cliprdr_dib_to_bmp(buf, len, bmpout,
+				sizeof bmpout);
+		}
 
 		/* Drive the channel reassembler with a fragment stream
 		 * derived from the random buffer: each record is a flags

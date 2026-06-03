@@ -57,6 +57,8 @@ struct rdp_clip {
 	Atom     a_text;
 	Atom     a_compound_text;
 	Atom     a_text_html;       /* text/html target */
+	Atom     a_image_bmp;       /* image/bmp target */
+	Atom     a_image_xbmp;      /* image/x-bmp target (alias) */
 	Atom     a_timestamp;
 	Atom     a_incr;            /* INCR transfer marker type */
 	Atom     a_property;         /* our scratch property name */

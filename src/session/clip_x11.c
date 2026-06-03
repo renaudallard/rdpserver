@@ -86,6 +86,8 @@ rdp_clip_init(struct rdp_clip *c, Display *dpy, int be_fd)
 	c->a_text          = XInternAtom(dpy, "TEXT", False);
 	c->a_compound_text = XInternAtom(dpy, "COMPOUND_TEXT", False);
 	c->a_text_html     = XInternAtom(dpy, "text/html", False);
+	c->a_image_bmp     = XInternAtom(dpy, "image/bmp", False);
+	c->a_image_xbmp    = XInternAtom(dpy, "image/x-bmp", False);
 	c->a_timestamp     = XInternAtom(dpy, "TIMESTAMP", False);
 	c->a_incr          = XInternAtom(dpy, "INCR", False);
 	c->a_property      = XInternAtom(dpy, "_RDP_CLIP_DATA", False);
@@ -125,6 +127,8 @@ target_for_fmt(struct rdp_clip *c, uint32_t fmt)
 	switch (fmt) {
 	case RDP_BE_CLIP_FMT_TEXT:
 		return c->a_utf8_string;
+	case RDP_BE_CLIP_FMT_IMAGE:
+		return c->a_image_bmp;
 	case RDP_BE_CLIP_FMT_HTML:
 		return c->a_text_html;
 	}
@@ -139,6 +143,8 @@ fmt_for_target(struct rdp_clip *c, Atom target)
 		return RDP_BE_CLIP_FMT_TEXT;
 	if (target == c->a_text_html)
 		return RDP_BE_CLIP_FMT_HTML;
+	if (target == c->a_image_bmp || target == c->a_image_xbmp)
+		return RDP_BE_CLIP_FMT_IMAGE;
 	return 0;
 }
 
@@ -484,6 +490,10 @@ on_selection_request(struct rdp_clip *c, XEvent *ev)
 			targets[n++] = c->a_utf8_string;
 			targets[n++] = c->a_string;
 			targets[n++] = c->a_text;
+		}
+		if (c->rdp_offered & RDP_BE_CLIP_FMT_IMAGE) {
+			targets[n++] = c->a_image_bmp;
+			targets[n++] = c->a_image_xbmp;
 		}
 		if (c->rdp_offered & RDP_BE_CLIP_FMT_HTML)
 			targets[n++] = c->a_text_html;

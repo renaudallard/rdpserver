@@ -76,6 +76,11 @@
  *      clip emits CLIP_OFFER with the HTML bit and returns the raw fragment.
  *   G  RDP -> X, HTML; clip claims CLIPBOARD advertising HTML, xclip -t
  *      text/html -o pulls the raw fragment back.
+ *   H  X -> RDP, image; an xclip -t image/bmp owner offers the image/bmp
+ *      target carrying a small BMP, clip emits CLIP_OFFER with the IMAGE bit
+ *      and returns the BMP bytes unchanged.
+ *   I  RDP -> X, image; clip claims CLIPBOARD advertising IMAGE, xclip -t
+ *      image/bmp -o pulls the BMP bytes back unchanged.
  */
 
 #include "../../src/session/clip_x11.h"
@@ -108,6 +113,40 @@
  * threshold, which exercises the INCR reader too. */
 #define BIG_LEN   1000000u
 #define BIG_FILL  'A'
+
+/*
+ * A small but VALID 2x2 24bpp BMP, used by the image (image/bmp) cases H/I.
+ * Only that the 70 bytes round-trip unchanged matters; the pixels are
+ * arbitrary.  Layout:
+ *   14-byte BITMAPFILEHEADER: 'B','M', bfSize=70, reserved=0, bfOffBits=54.
+ *   40-byte BITMAPINFOHEADER: biSize=40, biWidth=2, biHeight=2, biPlanes=1,
+ *     biBitCount=24, remaining fields 0.
+ *   16-byte pixel array: two bottom-up rows, each 6 bytes BGR + 2 pad.
+ * All multi-byte header fields are little-endian (BMP on-disk order).
+ */
+static const uint8_t bmp_2x2[70] = {
+	/* BITMAPFILEHEADER */
+	0x42, 0x4d,             /* 'B','M' */
+	0x46, 0x00, 0x00, 0x00, /* bfSize = 70 */
+	0x00, 0x00,             /* bfReserved1 */
+	0x00, 0x00,             /* bfReserved2 */
+	0x36, 0x00, 0x00, 0x00, /* bfOffBits = 54 */
+	/* BITMAPINFOHEADER */
+	0x28, 0x00, 0x00, 0x00, /* biSize = 40 */
+	0x02, 0x00, 0x00, 0x00, /* biWidth = 2 */
+	0x02, 0x00, 0x00, 0x00, /* biHeight = 2 */
+	0x01, 0x00,             /* biPlanes = 1 */
+	0x18, 0x00,             /* biBitCount = 24 */
+	0x00, 0x00, 0x00, 0x00, /* biCompression = 0 (BI_RGB) */
+	0x00, 0x00, 0x00, 0x00, /* biSizeImage = 0 */
+	0x00, 0x00, 0x00, 0x00, /* biXPelsPerMeter = 0 */
+	0x00, 0x00, 0x00, 0x00, /* biYPelsPerMeter = 0 */
+	0x00, 0x00, 0x00, 0x00, /* biClrUsed = 0 */
+	0x00, 0x00, 0x00, 0x00, /* biClrImportant = 0 */
+	/* pixel array: row 0 (bottom) then row 1 (top), each 6 BGR + 2 pad */
+	0xff, 0x00, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00
+};
 
 /* ---- globals shared by the drive loop ---- */
 
@@ -404,6 +443,61 @@ xclip_set_html(const uint8_t *data, size_t len)
 		}
 		execl("/usr/bin/xclip", "xclip", "-display", g_display,
 			"-selection", "clipboard", "-t", "text/html",
+			"-i", (char *)NULL);
+		_exit(127);
+	}
+	(void)close(in[0]);
+	{
+		size_t off = 0;
+		while (off < len) {
+			ssize_t w = write(in[1], data + off, len - off);
+			if (w <= 0) {
+				if (w < 0 && errno == EINTR)
+					continue;
+				break;
+			}
+			off += (size_t)w;
+		}
+	}
+	(void)close(in[1]);
+	return pid;
+}
+
+/*
+ * Run `xclip -t image/bmp -i` to put `data` (len bytes) on the CLIPBOARD
+ * offering the image/bmp target.  xclip 0.13's TARGETS reply for such an owner
+ * is exactly {TARGETS, image/bmp} (verified live), so clip_x11's
+ * fmt_for_target maps it to the IMAGE bit only.  Same fork/feed/detach shape
+ * as xclip_set; returns the daemon pid to reap, or -1 on error.
+ */
+static pid_t
+xclip_set_image(const uint8_t *data, size_t len)
+{
+	int in[2];
+	pid_t pid;
+
+	if (pipe(in) != 0)
+		return -1;
+	pid = fork();
+	if (pid < 0) {
+		(void)close(in[0]);
+		(void)close(in[1]);
+		return -1;
+	}
+	if (pid == 0) {
+		(void)dup2(in[0], STDIN_FILENO);
+		(void)close(in[0]);
+		(void)close(in[1]);
+		{
+			int devnull = open("/dev/null", O_WRONLY);
+			if (devnull >= 0) {
+				(void)dup2(devnull, STDERR_FILENO);
+				if (devnull > 2)
+					(void)close(devnull);
+			}
+		}
+		execl("/usr/bin/xclip", "xclip", "-display", g_display,
+			"-selection", "clipboard", "-t", "image/bmp",
 			"-i", (char *)NULL);
 		_exit(127);
 	}
@@ -1414,6 +1508,303 @@ test_rdp_to_x_html(const char *name, const uint8_t *html, size_t len)
 	(void)drive_until(NULL, NULL, 100);
 }
 
+/* H.  X -> RDP, image.  An xclip -t image/bmp owner offers the image/bmp
+ * target carrying `bmp` (len bytes).  clip must probe TARGETS, emit a
+ * CLIP_OFFER whose bitmap has the IMAGE bit set (and, since this owner lists
+ * only TARGETS + image/bmp, ONLY the IMAGE bit), then on CLIP_REQUEST{IMAGE}
+ * convert the image/bmp target and return CLIP_DATA{IMAGE} equal byte-for-byte
+ * to the BMP stream.  Mirrors test_x_to_rdp_html on the IMAGE format. */
+static void
+test_x_to_rdp_image(const char *name, const uint8_t *bmp, size_t len)
+{
+	pid_t holder;
+	uint32_t type = 0;
+	uint8_t small[256];
+	ssize_t n;
+	struct rdp_be_clip_offer off;
+	uint8_t *got = NULL;
+	size_t got_len = 0;
+
+	(void)printf("%s: X -> RDP, image, %zu bytes\n", name, len);
+
+	holder = xclip_set_image(bmp, len);
+	if (holder < 0) {
+		FAILF("xclip -t image/bmp -i spawn failed");
+		return;
+	}
+
+	if (!drive_until(pred_sv0_readable, NULL, 5000)) {
+		FAILF("no CLIP_OFFER after xclip -t image/bmp -i");
+		goto reap;
+	}
+	n = rdp_be_recv(g_sv0, &type, small, sizeof small);
+	if (n < 0) {
+		FAILF("recv CLIP_OFFER: %s", strerror(errno));
+		goto reap;
+	}
+	if (type != RDP_BE_CLIP_OFFER) {
+		FAILF("expected CLIP_OFFER, got type %u", type);
+		goto reap;
+	}
+	if ((size_t)n < sizeof off) {
+		FAILF("CLIP_OFFER too short (%zd bytes)", n);
+		goto reap;
+	}
+	memcpy(&off, small, sizeof off);
+	if (!(off.formats & RDP_BE_CLIP_FMT_IMAGE)) {
+		FAILF("CLIP_OFFER bitmap 0x%x missing IMAGE bit 0x%x",
+			off.formats, RDP_BE_CLIP_FMT_IMAGE);
+		goto reap;
+	}
+	(void)printf("  got CLIP_OFFER, formats 0x%x (IMAGE bit set)\n",
+		off.formats);
+
+	/* Ask for the IMAGE format specifically. */
+	if (request_and_read_data_fmt(RDP_BE_CLIP_FMT_IMAGE, &got, &got_len,
+		8000) != 0)
+		goto reap;
+
+	if (got_len != len) {
+		FAILF("image length mismatch: got %zu, expected %zu",
+			got_len, len);
+		free(got);
+		goto reap;
+	}
+	if (memcmp(got, bmp, len) != 0) {
+		FAILF("image data mismatch (BMP bytes differ)");
+		free(got);
+		goto reap;
+	}
+	(void)printf("  CLIP_DATA{IMAGE} len %zu matches (BMP byte-for-byte)\n",
+		got_len);
+	free(got);
+
+reap:
+	if (holder > 0) {
+		(void)kill(holder, SIGTERM);
+		(void)waitpid(holder, NULL, 0);
+		(void)drive_until(NULL, NULL, 200);
+	}
+}
+
+/* I.  RDP -> X, image.  The RDP side offers TEXT|IMAGE; clip claims CLIPBOARD
+ * and must advertise image/bmp in its TARGETS reply.  xclip -t image/bmp -o
+ * requests the image/bmp target, clip defers and emits CLIP_REQUEST{IMAGE},
+ * the harness answers CLIP_DATA{IMAGE, status=0, bmp}, and xclip's stdout must
+ * equal the BMP stream byte-for-byte.  Mirrors test_rdp_to_x_html on the IMAGE
+ * format with a TEXT|IMAGE offer. */
+static void
+test_rdp_to_x_image(const char *name, const uint8_t *bmp, size_t len)
+{
+	struct rdp_be_clip_offer offer;
+	uint32_t type = 0;
+	uint8_t small[256];
+	ssize_t n;
+	uint8_t *got = NULL;
+	size_t got_len = 0;
+	int gr;
+
+	(void)printf("%s: RDP -> X, image, %zu bytes\n", name, len);
+
+	/* 1. RDP client announces TEXT and IMAGE content. */
+	offer.formats = RDP_BE_CLIP_FMT_TEXT | RDP_BE_CLIP_FMT_IMAGE;
+	if (rdp_be_send(g_sv0, RDP_BE_CLIP_OFFER, &offer, sizeof offer) != 0) {
+		FAILF("send CLIP_OFFER: %s", strerror(errno));
+		return;
+	}
+	(void)drive_until(NULL, NULL, 300);
+
+	/*
+	 * 2. Start xclip -t image/bmp -o.  It first converts TARGETS (clip
+	 *    answers directly, listing image/bmp since IMAGE was offered) then
+	 *    converts image/bmp, which clip defers via CLIP_REQUEST{IMAGE}.  We
+	 *    interleave: pump the loop, answer the request with CLIP_DATA{IMAGE},
+	 *    and collect xclip's stdout - the same structure as test_rdp_to_x_html.
+	 */
+	{
+		int op[2];
+		pid_t pid;
+		uint8_t *buf = NULL;
+		size_t cap = 0, used = 0;
+		long deadline = now_ms() + 8000;
+		int eof = 0, answered = 0, status;
+
+		if (pipe(op) != 0) {
+			FAILF("pipe: %s", strerror(errno));
+			return;
+		}
+		pid = fork();
+		if (pid < 0) {
+			FAILF("fork xclip -o: %s", strerror(errno));
+			(void)close(op[0]);
+			(void)close(op[1]);
+			return;
+		}
+		if (pid == 0) {
+			(void)dup2(op[1], STDOUT_FILENO);
+			(void)close(op[0]);
+			(void)close(op[1]);
+			{
+				int dn = open("/dev/null", O_WRONLY);
+				if (dn >= 0) {
+					(void)dup2(dn, STDERR_FILENO);
+					if (dn > 2)
+						(void)close(dn);
+				}
+			}
+			execl("/usr/bin/xclip", "xclip", "-display",
+				g_display, "-selection", "clipboard",
+				"-t", "image/bmp", "-o", (char *)NULL);
+			_exit(127);
+		}
+		(void)close(op[1]);
+		(void)fcntl(op[0], F_SETFL, O_NONBLOCK);
+
+		while (!eof && now_ms() < deadline) {
+			struct pollfd p[3];
+
+			pump_once();
+
+			if (!answered && pred_sv0_readable(NULL)) {
+				n = rdp_be_recv(g_sv0, &type, small,
+					sizeof small);
+				if (n < 0) {
+					FAILF("recv CLIP_REQUEST: %s",
+						strerror(errno));
+					eof = 1;
+					break;
+				}
+				if (type != RDP_BE_CLIP_REQUEST) {
+					FAILF("expected CLIP_REQUEST, got %u",
+						type);
+					eof = 1;
+					break;
+				}
+				if ((size_t)n
+					< sizeof(struct rdp_be_clip_request)) {
+					FAILF("CLIP_REQUEST too short");
+					eof = 1;
+					break;
+				}
+				{
+					struct rdp_be_clip_request rq;
+					memcpy(&rq, small, sizeof rq);
+					if (rq.format != RDP_BE_CLIP_FMT_IMAGE) {
+						FAILF("CLIP_REQUEST format "
+							"0x%x (expected IMAGE "
+							"0x%x)", rq.format,
+							RDP_BE_CLIP_FMT_IMAGE);
+						eof = 1;
+						break;
+					}
+				}
+				(void)printf("  got CLIP_REQUEST{IMAGE}; "
+					"answering with CLIP_DATA{IMAGE}\n");
+				{
+					size_t blen =
+						sizeof(struct rdp_be_clip_data_hdr)
+						+ len;
+					uint8_t *db = malloc(blen);
+					struct rdp_be_clip_data_hdr h;
+					h.format = RDP_BE_CLIP_FMT_IMAGE;
+					h.status = 0;
+					if (db == NULL) {
+						FAILF("oom");
+						eof = 1;
+						break;
+					}
+					memcpy(db, &h, sizeof h);
+					memcpy(db + sizeof h, bmp, len);
+					if (rdp_be_send(g_sv0,
+						RDP_BE_CLIP_DATA, db, blen)
+						!= 0)
+						FAILF("send CLIP_DATA: %s",
+							strerror(errno));
+					free(db);
+				}
+				answered = 1;
+			}
+
+			XFlush(g_dpy);
+			p[0].fd = g_xfd;
+			p[0].events = POLLIN;
+			p[0].revents = 0;
+			p[1].fd = g_sv1;
+			p[1].events = POLLIN;
+			p[1].revents = 0;
+			p[2].fd = op[0];
+			p[2].events = POLLIN;
+			p[2].revents = 0;
+			(void)poll(p, 3, 50);
+
+			if (p[2].revents & (POLLIN | POLLHUP)) {
+				for (;;) {
+					ssize_t r;
+					if (used + 65536 > cap) {
+						size_t nc = cap == 0
+							? 65536 : cap * 2;
+						uint8_t *nb =
+							realloc(buf, nc);
+						if (nb == NULL) {
+							free(buf);
+							buf = NULL;
+							eof = 1;
+							break;
+						}
+						buf = nb;
+						cap = nc;
+					}
+					r = read(op[0], buf + used,
+						cap - used);
+					if (r > 0) {
+						used += (size_t)r;
+						continue;
+					}
+					if (r == 0) {
+						eof = 1;
+						break;
+					}
+					if (errno == EAGAIN
+						|| errno == EWOULDBLOCK)
+						break;
+					if (errno == EINTR)
+						continue;
+					eof = 1;
+					break;
+				}
+			}
+		}
+		(void)close(op[0]);
+		(void)waitpid(pid, &status, 0);
+
+		got = buf;
+		got_len = used;
+		gr = (eof && (buf != NULL || used == 0)) ? 0 : -1;
+		if (!answered)
+			FAILF("clip never emitted CLIP_REQUEST{IMAGE}");
+	}
+
+	if (gr != 0) {
+		FAILF("xclip -t image/bmp -o produced no output (timeout?)");
+		free(got);
+		return;
+	}
+	if (got_len != len) {
+		FAILF("xclip -o image length mismatch: got %zu, expected %zu",
+			got_len, len);
+		free(got);
+		return;
+	}
+	if (memcmp(got, bmp, len) != 0)
+		FAILF("xclip -o image data mismatch (BMP bytes differ)");
+	else
+		(void)printf("  xclip -t image/bmp -o len %zu matches "
+			"(BMP byte-for-byte)\n", got_len);
+	free(got);
+
+	(void)drive_until(NULL, NULL, 100);
+}
+
 int
 main(void)
 {
@@ -1545,6 +1936,12 @@ main(void)
 	/* G: RDP -> X, HTML; xclip -t text/html -o pulls it back. */
 	test_rdp_to_x_html("G", (const uint8_t *)"<p>from rdp</p>",
 		strlen("<p>from rdp</p>"));
+
+	/* H: X -> RDP, image via an xclip -t image/bmp owner. */
+	test_x_to_rdp_image("H", bmp_2x2, sizeof bmp_2x2);
+
+	/* I: RDP -> X, image; xclip -t image/bmp -o pulls it back. */
+	test_rdp_to_x_image("I", bmp_2x2, sizeof bmp_2x2);
 
 	free(big);
 

@@ -298,6 +298,97 @@ test_html_unwrap_fallback(void)
 	printf("  html unwrap fallback: markers + passthrough ok\n");
 }
 
+static void put_le16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
+static void put_le32(uint8_t *p, uint32_t v)
+{
+	p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8);
+	p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
+}
+static uint32_t get_le32(const uint8_t *p)
+{
+	return (uint32_t)p[0] | ((uint32_t)p[1] << 8)
+		| ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/* A 24bpp DIB gains a 14-byte BITMAPFILEHEADER and round-trips back. */
+static void
+test_dib_bmp_roundtrip(void)
+{
+	uint8_t dib[56];
+	uint8_t bmp[128];
+	size_t i, doff = 0, dl = 0;
+	ssize_t bl;
+
+	memset(dib, 0, sizeof dib);
+	put_le32(dib + 0, 40);      /* biSize = BITMAPINFOHEADER */
+	put_le32(dib + 4, 2);       /* biWidth */
+	put_le32(dib + 8, 2);       /* biHeight */
+	put_le16(dib + 12, 1);      /* biPlanes */
+	put_le16(dib + 14, 24);     /* biBitCount (no palette) */
+	for (i = 40; i < sizeof dib; i++)
+		dib[i] = (uint8_t)i;
+
+	bl = rdp_cliprdr_dib_to_bmp(dib, sizeof dib, bmp, sizeof bmp);
+	if (bl != (ssize_t)(14 + sizeof dib)) FAIL("dib_to_bmp len %lld",
+		(long long)bl);
+	if (bmp[0] != 'B' || bmp[1] != 'M') FAIL("bmp magic");
+	if (get_le32(bmp + 2) != 14 + sizeof dib) FAIL("bfSize %u",
+		get_le32(bmp + 2));
+	if (get_le32(bmp + 10) != 14 + 40) FAIL("bfOffBits %u want 54",
+		get_le32(bmp + 10));
+	if (memcmp(bmp + 14, dib, sizeof dib) != 0) FAIL("dib not copied");
+
+	if (rdp_cliprdr_bmp_to_dib(bmp, (size_t)bl, &doff, &dl) != 0)
+		FAIL("bmp_to_dib");
+	if (dl != sizeof dib || memcmp(bmp + doff, dib, sizeof dib) != 0)
+		FAIL("dib round-trip mismatch (dl=%zu)", dl);
+	printf("  dib<->bmp: 24bpp round-trip, bfOffBits=54 ok\n");
+}
+
+/* An 8bpp DIB places bfOffBits past the 256-entry palette. */
+static void
+test_dib_bmp_palette(void)
+{
+	uint8_t dib[40 + 256 * 4 + 4];
+	uint8_t bmp[sizeof dib + 14];
+	ssize_t bl;
+
+	memset(dib, 0, sizeof dib);
+	put_le32(dib + 0, 40);
+	put_le16(dib + 14, 8);      /* 8bpp -> 256-colour palette */
+	bl = rdp_cliprdr_dib_to_bmp(dib, sizeof dib, bmp, sizeof bmp);
+	if (bl < 0) FAIL("palette dib_to_bmp");
+	if (get_le32(bmp + 10) != 14 + 40 + 256 * 4)
+		FAIL("palette bfOffBits %u want %u", get_le32(bmp + 10),
+			14u + 40u + 256u * 4u);
+	printf("  dib->bmp: 8bpp palette bfOffBits past 256 colours ok\n");
+}
+
+/* Malformed DIB/BMP inputs are refused, not over-read. */
+static void
+test_dib_bmp_bounds(void)
+{
+	uint8_t buf[64], out[128];
+	size_t doff = 0, dl = 0;
+
+	memset(buf, 0, sizeof buf);
+	put_le32(buf, 1000);   /* biSize beyond the buffer */
+	if (rdp_cliprdr_dib_to_bmp(buf, sizeof buf, out, sizeof out) != -1)
+		FAIL("oversize biSize not refused");
+	if (rdp_cliprdr_dib_to_bmp(buf, 2, out, sizeof out) != -1)
+		FAIL("short dib not refused");
+	put_le32(buf, 40);
+	if (rdp_cliprdr_dib_to_bmp(buf, sizeof buf, out, 10) != -1)
+		FAIL("small cap not refused");
+	out[0] = 'X'; out[1] = 'Y';
+	if (rdp_cliprdr_bmp_to_dib(out, 64, &doff, &dl) != -1)
+		FAIL("non-BM accepted");
+	out[0] = 'B'; out[1] = 'M';
+	if (rdp_cliprdr_bmp_to_dib(out, 14, &doff, &dl) != -1)
+		FAIL("header-only bmp accepted");
+	printf("  dib/bmp bounds: oversize/short/small-cap/non-BM refused ok\n");
+}
+
 /* A length that would overflow the offset arithmetic, or simply not fit,
  * must be refused before any copy. */
 static void
@@ -330,6 +421,9 @@ main(void)
 	test_html_roundtrip();
 	test_html_unwrap_fallback();
 	test_html_wrap_overflow();
+	test_dib_bmp_roundtrip();
+	test_dib_bmp_palette();
+	test_dib_bmp_bounds();
 	printf("cliprdr_test: all ok\n");
 	return 0;
 }

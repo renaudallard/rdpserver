@@ -412,6 +412,103 @@ rdp_cliprdr_html_unwrap(const uint8_t *cfhtml, size_t len, size_t *frag_off,
 	return 0;
 }
 
+static uint16_t
+le16_at(const uint8_t *p)
+{
+	return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
+}
+
+static uint32_t
+le32_at(const uint8_t *p)
+{
+	return (uint32_t)p[0] | ((uint32_t)p[1] << 8)
+		| ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+#define BMP_FILE_HDR       14u
+#define BI_BITFIELDS        3u
+#define BI_ALPHABITFIELDS   6u
+
+ssize_t
+rdp_cliprdr_dib_to_bmp(const uint8_t *dib, size_t dib_len, uint8_t *out,
+		size_t cap)
+{
+	uint32_t biSize, biCompression = 0, biClrUsed = 0, bfSize;
+	uint16_t biBitCount = 0;
+	size_t pixoff, palette = 0, masks = 0;
+
+	if (dib_len < 4)
+		return -1;
+	biSize = le32_at(dib);
+	/* The DIB header must lie within the buffer. */
+	if (biSize < 12 || biSize > dib_len)
+		return -1;
+
+	if (biSize >= 40) {
+		/* BITMAPINFOHEADER and its V4/V5 supersets (biSize >= 40 with
+		 * biSize <= dib_len guarantees offsets 0..35 are in range). */
+		biBitCount    = le16_at(dib + 14);
+		biCompression = le32_at(dib + 16);
+		biClrUsed     = le32_at(dib + 32);
+		if (biBitCount <= 8) {
+			uint32_t n = biClrUsed ? biClrUsed
+				: ((uint32_t)1u << biBitCount);
+			if (n > 256)
+				n = 256;
+			palette = (size_t)n * 4;   /* RGBQUAD */
+		}
+		/* BI_BITFIELDS masks trail only the plain 40-byte header; the
+		 * V4/V5 headers carry the masks inside themselves. */
+		if (biSize == 40 && (biCompression == BI_BITFIELDS
+		    || biCompression == BI_ALPHABITFIELDS))
+			masks = (biCompression == BI_ALPHABITFIELDS) ? 16 : 12;
+	} else if (biSize == 12) {
+		/* BITMAPCOREHEADER: biBitCount at offset 10, RGBTRIPLE palette. */
+		biBitCount = le16_at(dib + 10);
+		if (biBitCount <= 8)
+			palette = ((size_t)1u << biBitCount) * 3;
+	}
+
+	pixoff = BMP_FILE_HDR + biSize + masks + palette;
+	/* bfOffBits is advisory; clamp it inside the file so a malformed
+	 * header cannot point a reader past the bitmap. */
+	if (pixoff > BMP_FILE_HDR + dib_len)
+		pixoff = BMP_FILE_HDR + biSize;
+
+	if (BMP_FILE_HDR + dib_len > 0xffffffffu)
+		return -1;
+	if (cap < BMP_FILE_HDR + dib_len)
+		return -1;
+	bfSize = (uint32_t)(BMP_FILE_HDR + dib_len);
+
+	out[0] = 'B';
+	out[1] = 'M';
+	out[2] = (uint8_t)(bfSize & 0xff);
+	out[3] = (uint8_t)((bfSize >> 8) & 0xff);
+	out[4] = (uint8_t)((bfSize >> 16) & 0xff);
+	out[5] = (uint8_t)((bfSize >> 24) & 0xff);
+	out[6] = out[7] = out[8] = out[9] = 0;   /* bfReserved1/2 */
+	out[10] = (uint8_t)(pixoff & 0xff);
+	out[11] = (uint8_t)((pixoff >> 8) & 0xff);
+	out[12] = (uint8_t)((pixoff >> 16) & 0xff);
+	out[13] = (uint8_t)((pixoff >> 24) & 0xff);
+	memcpy(out + BMP_FILE_HDR, dib, dib_len);
+	return (ssize_t)(BMP_FILE_HDR + dib_len);
+}
+
+int
+rdp_cliprdr_bmp_to_dib(const uint8_t *bmp, size_t bmp_len, size_t *dib_off,
+		size_t *dib_len)
+{
+	/* Strip the 14-byte BITMAPFILEHEADER; the CF_DIB is everything that
+	 * follows (the info header, colour masks, palette and pixels). */
+	if (bmp_len <= BMP_FILE_HDR || bmp[0] != 'B' || bmp[1] != 'M')
+		return -1;
+	*dib_off = BMP_FILE_HDR;
+	*dib_len = bmp_len - BMP_FILE_HDR;
+	return 0;
+}
+
 void
 rdp_cliprdr_reasm_init(struct rdp_cliprdr_reasm *r, size_t max_pdu)
 {

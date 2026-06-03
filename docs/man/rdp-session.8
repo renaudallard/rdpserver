@@ -23,10 +23,17 @@ captures damaged regions with the XDamage extension, injects input
 via the XTEST extension, and bridges the X11 CLIPBOARD selection
 to the
 .Sy CLIPRDR
-RDP channel for both plain text and HTML (the X
+RDP channel for plain text, HTML (the X
 .Sy text/html
 target is mapped to the registered Windows
-.Sy HTML Format ) .
+.Sy HTML Format ) ,
+and images (the X
+.Sy image/bmp
+target is mapped to the Windows
+.Sy CF_DIB
+and
+.Sy CF_DIBV5
+formats by a zero-dependency BMP conversion).
 Large transfers are reassembled and read or written incrementally,
 bounded at 4 MiB.
 Scancode key events map directly to X keycodes; the Xvfb keyboard
