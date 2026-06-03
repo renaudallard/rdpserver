@@ -76,6 +76,7 @@
 #include "sandbox.h"
 #include "../channels/rdpdr.h"
 #include "../channels/rdpsnd.h"
+#include "../channels/sndin.h"
 #include "../channels/rdpgfx.h"
 #include "../wire/h264enc.h"
 #include "../wire/progressive.h"
@@ -1063,6 +1064,7 @@ struct dynvc_state {
 	int      enabled;
 	uint16_t channel_id;
 	struct drdynvc_state dv;
+	struct sndin_state   sndin;  /* AUDIO_INPUT (microphone) negotiation */
 };
 
 struct snd_state {
@@ -1296,6 +1298,9 @@ print_job_on_completion(struct rdp_tls *t, uint16_t user_id,
 /* Set from cfg in rdp_conn_run; used during channel dispatch, which
  * runs before the per-connection setup, so declared at file scope. */
 static int g_prefer_wan_audio;
+/* Offer the AUDIO_INPUT (microphone) dynamic channel; default on, cleared
+ * by rdpd -m.  When off the channel is simply never created. */
+static int g_allow_microphone = 1;
 
 /* Try to recognise a channel-bearing TPKT/MCS SDR and dispatch.
  * Returns 1 if handled, 0 if not, -1 on disconnect, 2 if a resize
@@ -1392,8 +1397,21 @@ maybe_dispatch_clip(struct rdp_tls *t, int be_fd,
 						dv->channel_id, dcc,
 						(size_t)dn);
 			}
+			if (rc == 5 && g_allow_microphone
+			    && !dv->dv.audioin_create_pending
+			    && dv->dv.audioin_channel_id < 0) {
+				uint8_t ac[64];
+				ssize_t an =
+				    rdp_drdynvc_build_create_audio_input(
+					&dv->dv, ac, sizeof ac);
+				if (an > 0)
+					(void)send_clip_pdu(t, cs->user_id,
+						dv->channel_id, ac,
+						(size_t)an);
+			}
 			if (rc == 7) return 7;
 			if (rc == 8) return 11;   /* DisplayControl up */
+			if (rc == 10) return 14;  /* AUDIO_INPUT up: send Version */
 			if (rc == 1) return 2;
 			if (rc == 3 && gfx_data != NULL && gfx_len > 0) {
 				const uint8_t *gp = gfx_data;
@@ -1412,6 +1430,14 @@ maybe_dispatch_clip(struct rdp_tls *t, int be_fd,
 					if (out_gfx_len) *out_gfx_len = gl;
 					return 6;
 				}
+			}
+			/* AUDIO_INPUT (MS-RDPEAI) SNDIN PDU: surface it for the
+			 * proxy loop, which drives the negotiation and forwards
+			 * captured audio to the session. */
+			if (rc == 9 && gfx_data != NULL && gfx_len > 0) {
+				if (out_gfx) *out_gfx = gfx_data;
+				if (out_gfx_len) *out_gfx_len = gfx_len;
+				return 13;
 			}
 		}
 		return 1;
@@ -2160,6 +2186,57 @@ run_proxy(struct rdp_tls *t, int be_fd,
 						&aq, &af, &at) == 0) {
 						gfx.last_ack_frame = af;
 						gfx.queue_depth = aq;
+					}
+				}
+				if (r == 14 && dv->dv.audioin_channel_id >= 0) {
+					/* AUDIO_INPUT channel is open: kick off
+					 * the MS-RDPEAI negotiation by sending the
+					 * server Version PDU; the client's reply
+					 * drives rdp_sndin_handle from there. */
+					uint8_t vpdu[16];
+					ssize_t vn = rdp_sndin_build_version(
+						vpdu, sizeof vpdu);
+					if (vn > 0) {
+						(void)send_drdynvc_data(t,
+							user_id,
+							dv->channel_id,
+							dv->dv.audioin_channel_id,
+							vpdu, (size_t)vn);
+						dv->sndin.phase =
+						    SNDIN_VERSION_SENT;
+					}
+				}
+				if (r == 13 && gfx_pdu != NULL
+				    && dv->dv.audioin_channel_id >= 0) {
+					/* MS-RDPEAI SNDIN PDU: advance the
+					 * negotiation, send any reply over the
+					 * AUDIO_INPUT subchannel, and forward
+					 * captured PCM to the session in chunks
+					 * bounded at RDP_BE_AUDIO_INPUT_MAX. */
+					uint8_t sout[64];
+					size_t sout_len = 0;
+					const uint8_t *aud = NULL;
+					size_t aud_len = 0;
+					(void)rdp_sndin_handle(&dv->sndin,
+						gfx_pdu, gfx_pdu_len,
+						sout, sizeof sout, &sout_len,
+						&aud, &aud_len);
+					if (sout_len > 0)
+						(void)send_drdynvc_data(t,
+							user_id,
+							dv->channel_id,
+							dv->dv.audioin_channel_id,
+							sout, sout_len);
+					while (aud != NULL && aud_len > 0) {
+						size_t chunk = aud_len;
+						if (chunk > RDP_BE_AUDIO_INPUT_MAX)
+							chunk =
+							    RDP_BE_AUDIO_INPUT_MAX;
+						(void)rdp_be_send(be_fd,
+							RDP_BE_AUDIO_INPUT,
+							aud, chunk);
+						aud += chunk;
+						aud_len -= chunk;
 					}
 				}
 				/* Untouched TPKTs (Shutdown, etc.) silently
@@ -2915,6 +2992,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 	g_allow_v10_avc = cfg->allow_v10_avc;
 	g_allow_progressive = cfg->allow_progressive;
 	g_prefer_wan_audio = cfg->prefer_wan_audio;
+	g_allow_microphone = cfg->allow_microphone;
 	struct dynvc_state dynvc = {0};
 	struct snd_state snd = {0};
 	struct dr_state devr = {0};
@@ -2925,6 +3003,8 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 	rdp_cliprdr_reasm_init(&clip.reasm, CLIP_MAX_PDU);
 	dynvc.dv.disp_channel_id = -1;
 	dynvc.dv.gfx_channel_id = -1;
+	dynvc.dv.audioin_channel_id = -1;
+	rdp_sndin_init(&dynvc.sndin);
 	memset(&client_info, 0, sizeof client_info);
 	peer_to_ip(peer, client_ip, sizeof client_ip);
 

@@ -61,11 +61,22 @@ struct drdynvc_state {
 	int      disp_create_pending; /* waiting for Create Response */
 	int      gfx_channel_id;  /* -1 if not yet created */
 	int      gfx_create_pending; /* waiting for Create Response */
+	int      audioin_channel_id;  /* AUDIO_INPUT; -1 if not created */
+	int      audioin_create_pending; /* waiting for Create Response */
 	uint8_t *reasm_buf;
 	size_t   reasm_cap;
 	size_t   reasm_len;
 	uint32_t reasm_total;
 	int      reasm_chan;       /* channel being reassembled */
+
+	/* AUDIO_INPUT keeps its own reassembly buffer: GFX and AUDIO_INPUT
+	 * fragment sequences can interleave on the multiplexed DVC transport,
+	 * so a shared buffer would let one channel clobber the other's
+	 * in-progress frame. */
+	uint8_t *ai_reasm_buf;
+	size_t   ai_reasm_cap;
+	size_t   ai_reasm_len;
+	uint32_t ai_reasm_total;
 };
 
 /* Build DRDYNVC Capabilities Request (version 1). */
@@ -77,6 +88,10 @@ ssize_t rdp_drdynvc_build_create_gfx(struct drdynvc_state *st,
 
 /* Build DRDYNVC Create Request for the DisplayControl channel. */
 ssize_t rdp_drdynvc_build_create_disp(struct drdynvc_state *st,
+		uint8_t *out, size_t cap);
+
+/* Build DRDYNVC Create Request for the AUDIO_INPUT channel (MS-RDPEAI). */
+ssize_t rdp_drdynvc_build_create_audio_input(struct drdynvc_state *st,
 		uint8_t *out, size_t cap);
 
 /* Build a DISPLAYCONTROL_CAPS_PDU (MS-RDPEDISP) inner payload. */
@@ -93,6 +108,7 @@ ssize_t rdp_drdynvc_build_disp_caps(uint8_t *out, size_t cap);
  *   0 = handled, no action needed
  *   1 = resize requested (new_w/new_h set)
  *   3 = GFX data arrived (gfx_data/gfx_len set)
+ *   9 = AUDIO_INPUT data arrived (gfx_data/gfx_len carry the SNDIN PDU)
  *  <0 = error */
 int rdp_drdynvc_handle(struct drdynvc_state *st,
 		const uint8_t *pdu, size_t len,

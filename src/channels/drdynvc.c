@@ -156,6 +156,28 @@ rdp_drdynvc_handle(struct drdynvc_state *st,
 			}
 			return 0;
 		}
+		/* Create Response for the AUDIO_INPUT channel.  A nonzero
+		 * status (client declined the mic) is not an error: we just
+		 * mark the channel unavailable and no audio ever arrives. */
+		if (st->audioin_create_pending
+		    && (int)chan_id == st->audioin_channel_id) {
+			size_t remain = len - 1 - id_len;
+			int32_t status = 0;
+			if (remain >= 4)
+				status = (int32_t)ld32(pdu + 1 + id_len);
+			st->audioin_create_pending = 0;
+			if (status == 0) {
+				rdp_info("drdynvc: AUDIO_INPUT channel "
+					"created ok");
+				/* The caller now sends the initial SNDIN
+				 * Version PDU to start the negotiation. */
+				return 10;
+			}
+			rdp_info("drdynvc: AUDIO_INPUT not opened by "
+				"client (%d)", (int)status);
+			st->audioin_channel_id = -1;
+			return 0;
+		}
 		/* Client-initiated Create Request. */
 		{
 			const char *name = (const char *)pdu + 1 + id_len;
@@ -274,6 +296,62 @@ rdp_drdynvc_handle(struct drdynvc_state *st,
 			*gfx_len = data_len;
 			return 3;
 		}
+
+		/* AUDIO_INPUT channel (MS-RDPEAI): one SNDIN PDU per Data PDU
+		 * in the common case; reassemble a fragmented one with its own
+		 * buffer so an interleaved GFX fragment sequence cannot clobber
+		 * it (and vice versa). */
+		if ((int)chan_id == st->audioin_channel_id
+		    && st->audioin_channel_id >= 0
+		    && gfx_data != NULL && gfx_len != NULL) {
+			if (cmd == DRDYNVC_CMD_DATA_FIRST) {
+				if (total_len == 0 || total_len > 0x400000)
+					return -1;
+				if (total_len > st->ai_reasm_cap) {
+					free(st->ai_reasm_buf);
+					st->ai_reasm_buf = malloc(total_len);
+					if (st->ai_reasm_buf == NULL) {
+						st->ai_reasm_cap = 0;
+						return -1;
+					}
+					st->ai_reasm_cap = total_len;
+				}
+				st->ai_reasm_total = total_len;
+				st->ai_reasm_len = 0;
+				if (data_len > total_len)
+					data_len = total_len;
+				memcpy(st->ai_reasm_buf, data, data_len);
+				st->ai_reasm_len = data_len;
+				if (st->ai_reasm_len >= st->ai_reasm_total) {
+					*gfx_data = st->ai_reasm_buf;
+					*gfx_len = st->ai_reasm_len;
+					st->ai_reasm_len = 0;
+					st->ai_reasm_total = 0;
+					return 9;
+				}
+				return 0;
+			}
+			if (st->ai_reasm_len > 0) {
+				size_t remain = st->ai_reasm_total
+					- st->ai_reasm_len;
+				if (data_len > remain)
+					data_len = remain;
+				memcpy(st->ai_reasm_buf + st->ai_reasm_len,
+					data, data_len);
+				st->ai_reasm_len += data_len;
+				if (st->ai_reasm_len >= st->ai_reasm_total) {
+					*gfx_data = st->ai_reasm_buf;
+					*gfx_len = st->ai_reasm_len;
+					st->ai_reasm_len = 0;
+					st->ai_reasm_total = 0;
+					return 9;
+				}
+				return 0;
+			}
+			*gfx_data = data;
+			*gfx_len = data_len;
+			return 9;
+		}
 		if ((int)chan_id != st->disp_channel_id)
 			return 0;
 
@@ -346,6 +424,8 @@ rdp_drdynvc_handle(struct drdynvc_state *st,
 #define GFX_SERVER_CHAN_ID 1
 #define DISP_CHANNEL_NAME "Microsoft::Windows::RDS::DisplayControl"
 #define DISP_SERVER_CHAN_ID 2
+#define AUDIOIN_CHANNEL_NAME "AUDIO_INPUT"
+#define AUDIOIN_SERVER_CHAN_ID 3
 
 ssize_t
 rdp_drdynvc_build_create_gfx(struct drdynvc_state *st,
@@ -379,6 +459,22 @@ rdp_drdynvc_build_create_disp(struct drdynvc_state *st,
 	return (ssize_t)total;
 }
 
+ssize_t
+rdp_drdynvc_build_create_audio_input(struct drdynvc_state *st,
+		uint8_t *out, size_t cap)
+{
+	size_t name_len = sizeof(AUDIOIN_CHANNEL_NAME);
+	size_t total = 1 + 1 + name_len;
+
+	if (cap < total) return -1;
+	out[0] = (uint8_t)((DRDYNVC_CMD_CREATE << 4) | (2 << 2) | 0);
+	out[1] = AUDIOIN_SERVER_CHAN_ID;
+	memcpy(out + 2, AUDIOIN_CHANNEL_NAME, name_len);
+	st->audioin_channel_id = AUDIOIN_SERVER_CHAN_ID;
+	st->audioin_create_pending = 1;
+	return (ssize_t)total;
+}
+
 /* MS-RDPEDISP 2.2.2.1 DISPLAYCONTROL_CAPS_PDU: the server's monitor
  * limits, sent once the DisplayControl channel is created so the
  * client knows it may request a dynamic resize. */
@@ -403,4 +499,9 @@ rdp_drdynvc_cleanup(struct drdynvc_state *st)
 	st->reasm_cap = 0;
 	st->reasm_len = 0;
 	st->reasm_total = 0;
+	free(st->ai_reasm_buf);
+	st->ai_reasm_buf = NULL;
+	st->ai_reasm_cap = 0;
+	st->ai_reasm_len = 0;
+	st->ai_reasm_total = 0;
 }

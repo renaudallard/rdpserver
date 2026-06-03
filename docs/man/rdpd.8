@@ -7,7 +7,7 @@
 .Nd Remote Desktop Protocol server
 .Sh SYNOPSIS
 .Nm
-.Op Fl AdfPVW
+.Op Fl AdfmPVW
 .Op Fl h Ar host
 .Op Fl p Ar port
 .Op Fl S Ar socket
@@ -112,6 +112,18 @@ Prefer G.711 A-law audio output when the client supports it.
 A-law is half the wire bandwidth of 16-bit PCM at a small quality cost,
 so it suits WAN links.
 Off by default; PCM is used on a LAN.
+.It Fl m
+Suppress microphone
+.Pq AUDIO_INPUT
+redirection.
+By default the server offers the MS-RDPEAI audio input channel so a client
+that redirects its microphone can stream captured PCM
+.Pq 16-bit stereo 44.1 kHz
+into the session.
+A client that does not redirect a microphone simply produces no audio, with
+no effect on the session;
+.Fl m
+stops the channel from being offered at all.
 .El
 .Sh FILES
 .Bl -tag -width Ds

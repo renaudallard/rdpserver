@@ -112,6 +112,19 @@
 #define RDP_BE_PRINTER_DEVICE 20u  /* worker -> session */
 #define RDP_BE_PRINT_JOB      21u  /* session -> worker */
 
+/* Microphone input redirection (MS-RDPEAI).
+ *   AUDIO_INPUT  worker -> session: a chunk of captured microphone PCM the
+ *                client sent over the AUDIO_INPUT dynamic virtual channel.
+ *                The payload is the raw samples in the negotiated capture
+ *                format, PCM s16le stereo 44100 Hz by default; no header.
+ *                The worker caps one chunk at RDP_BE_AUDIO_INPUT_MAX. */
+#define RDP_BE_AUDIO_INPUT    22u  /* worker -> session */
+
+/* Upper bound on the PCM bytes the worker forwards in one AUDIO_INPUT
+ * message.  A client Data PDU larger than this is split into multiple
+ * AUDIO_INPUT messages so a single chunk stays bounded. */
+#define RDP_BE_AUDIO_INPUT_MAX (64u * 1024u)
+
 #define RDP_FS_OPEN        1u
 #define RDP_FS_READ        2u
 #define RDP_FS_WRITE       3u

@@ -63,7 +63,7 @@ SESSMGR_DAEMON_OBJ = src/sessionmgr/sessionmgr.o $(SESSMGR_AUTH_OBJ)
 
 # Static virtual channels.
 CHANNELS_OBJS = src/channels/cliprdr.o src/channels/drdynvc.o src/channels/rdpsnd.o \
-	src/channels/rdpgfx.o src/channels/rdpdr.o
+	src/channels/sndin.o src/channels/rdpgfx.o src/channels/rdpdr.o
 CHANNELS_LIB  = src/channels/libchannels.a
 
 # Backend RPC: shared between rdpd worker and rdp-session.
@@ -104,6 +104,8 @@ REGRESS_PROGS = \
 	regress/wire/rdp_pdu_test \
 	regress/wire/rdpdr_test \
 	regress/wire/cliprdr_test \
+	regress/wire/sndin_test \
+	regress/wire/drdynvc_test \
 	regress/wire/printer_test \
 	$(FUSE_REGRESS) \
 	$(OBSD_FUSE_REGRESS)
@@ -237,6 +239,24 @@ regress/wire/cliprdr_test: regress/wire/cliprdr_test.c src/channels/cliprdr.c \
 	$(CC) $(CFLAGS) $(TEST_SAN) -Isrc/include \
 		-o $@ regress/wire/cliprdr_test.c src/channels/cliprdr.c \
 		src/common/buf.c src/common/utf16.c
+
+# SNDIN (MS-RDPEAI audio input) channel test.  sndin.c is recompiled with the
+# test so $(TEST_SAN) covers the attacker-controlled PDU bounds and the
+# negotiation state machine.
+regress/wire/sndin_test: regress/wire/sndin_test.c src/channels/sndin.c \
+		src/common/buf.c src/common/log.c
+	$(CC) $(CFLAGS) $(TEST_SAN) -Isrc/include \
+		-o $@ regress/wire/sndin_test.c src/channels/sndin.c \
+		src/common/buf.c src/common/log.c
+
+# DRDYNVC dynamic-channel reassembly test.  drdynvc.c is recompiled with the
+# test so $(TEST_SAN) covers the attacker-controlled fragment bounds and the
+# per-channel reassembly buffers.  It only needs the common log object.
+regress/wire/drdynvc_test: regress/wire/drdynvc_test.c src/channels/drdynvc.c \
+		src/common/log.c
+	$(CC) $(CFLAGS) $(TEST_SAN) -Isrc/include \
+		-o $@ regress/wire/drdynvc_test.c src/channels/drdynvc.c \
+		src/common/log.c
 
 # Printer module unit test.  printer.c is recompiled with the test so the
 # sanitization and the wire header layout are covered directly; $(TEST_SAN)
