@@ -134,6 +134,9 @@ A rename is only honoured when the source and destination are on the
 same redirected drive; a cross-drive rename returns
 .Er EXDEV
 so the kernel falls back to a copy plus delete.
+This Linux backend has been validated against a live mount with stat,
+ls, cat, write/read-back, mkdir, and unlink, in addition to the
+protocol-level unit test.
 .Pp
 On OpenBSD the same file system is presented through the kernel's own
 .Pa fusebuf
@@ -144,8 +147,10 @@ protocol on
 attributes and native directory records) over the same
 protocol-agnostic core, so the identical read and write operations are
 supported.
-This OpenBSD backend is experimental and currently validated only at the
-protocol level, not yet against a live mount.
+This OpenBSD backend is experimental but has been validated against a
+live mount with stat, ls, cat, and write/read-back over a real
+.Pa fusefs ,
+in addition to the protocol-level unit test.
 If
 .Pa /dev/fuse
 is unavailable, the kernel is too old, or the host is neither Linux nor

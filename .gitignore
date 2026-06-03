@@ -13,6 +13,7 @@ src/session/rdp-session
 # regress + fuzz
 regress/common/*_test
 regress/wire/*_test
+regress/integ/*_fuse_live
 regress/fuzz/fuzz_parsers
 
 # anything dropped under tmp/ at runtime (certs, test scratch, logs)

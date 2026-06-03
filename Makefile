@@ -258,6 +258,22 @@ regress/integ/obsd_fuse_live: regress/integ/obsd_fuse_live.c \
 		src/session/fuse_drive.c src/session/fuse_drive_obsd.c \
 		src/common/io.c src/common/log.c
 
+# Live validation of the Linux raw /dev/fuse backend against the REAL kernel.
+# NOT part of `regress` (it needs root and a working /dev/fuse): build it by
+# hand and run it under sudo:
+#   make regress/integ/linux_fuse_live
+#   sudo ./regress/integ/linux_fuse_live
+# It links the drive core and the Linux backend with a mock RDPDR FS, mounts a
+# real fuse fs at a temp dir, and drives stat/ls/cat/write/mkdir/unlink over it.
+# Built with -DRDP_FUSE_TEST (same as the unit test) so HAVE_FUSE is honoured.
+regress/integ/linux_fuse_live: regress/integ/linux_fuse_live.c \
+		src/session/fuse_drive.c src/session/fuse_drive_linux.c \
+		src/common/io.c src/common/log.c
+	$(CC) $(CFLAGS) -DRDP_FUSE_TEST -Isrc/include \
+		-o $@ regress/integ/linux_fuse_live.c \
+		src/session/fuse_drive.c src/session/fuse_drive_linux.c \
+		src/common/io.c src/common/log.c
+
 regress/fuzz/fuzz_parsers: regress/fuzz/fuzz_parsers.o \
 		$(WIRE_LIB) $(CHANNELS_LIB) $(SEC_LIB) $(COMMON_LIB)
 	$(CC) $(LDFLAGS) -o $@ regress/fuzz/fuzz_parsers.o \

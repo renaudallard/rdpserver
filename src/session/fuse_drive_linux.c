@@ -213,14 +213,25 @@ static void
 ln_emit_read(struct fuse_drive *fd, uint64_t unique, const uint8_t *data,
 		uint32_t len)
 {
+	/* One write() per reply: the header and the read data must leave in a
+	 * single message (a header-then-body split is rejected -EINVAL by the
+	 * kernel).  The core caps a read at 128 KiB, which fits in FD_OUT_BUF_SZ
+	 * alongside the header; clamp defensively all the same. */
+	uint8_t out[FD_OUT_BUF_SZ];
 	struct fuse_out_header oh;
+
+	if (len > sizeof out - sizeof oh) {
+		ln_emit_error(fd, unique, -EIO);
+		return;
+	}
 	memset(&oh, 0, sizeof oh);
 	oh.len = (uint32_t)(sizeof oh + len);
 	oh.error = 0;
 	oh.unique = unique;
-	(void)fd->write_reply(fd, &oh, sizeof oh);
+	memcpy(out, &oh, sizeof oh);
 	if (len > 0)
-		(void)fd->write_reply(fd, data, len);
+		memcpy(out + sizeof oh, data, len);
+	(void)fd->write_reply(fd, out, sizeof oh + len);
 }
 
 static void
@@ -243,11 +254,19 @@ ln_emit_dirent_batch(struct fuse_drive *fd, uint64_t unique,
 		const struct fd_dirent *ents, size_t n, uint32_t maxbytes)
 {
 	uint8_t out[FD_OUT_BUF_SZ];
-	size_t off = 0;
-	size_t want = maxbytes < sizeof out ? maxbytes : sizeof out;
+	struct fuse_out_header oh;
+	/* The Linux /dev/fuse kernel reads each reply as a single message: one
+	 * write() must carry the whole fuse_out_header plus its body, and the
+	 * header's len must equal that write's byte count.  Reserve the header
+	 * at the front of out and pack the records right after it so the reply
+	 * leaves in one write (a header-then-body split is rejected -EINVAL). */
+	size_t hdr = sizeof oh;
+	size_t off = hdr;
+	size_t want = maxbytes < sizeof out - hdr ? maxbytes : sizeof out - hdr;
 	uint64_t doff = 0;
 	size_t i;
 
+	want += hdr;   /* off is measured from the buffer start, header included */
 	for (i = 0; i < n; i++) {
 		struct fuse_dirent de;
 		size_t namelen = ents[i].name_len;
@@ -268,21 +287,17 @@ ln_emit_dirent_batch(struct fuse_drive *fd, uint64_t unique,
 				reclen - (FUSE_NAME_OFFSET + namelen));
 		off += reclen;
 	}
-	/* Write the header and the packed records directly.  ln_reply_ok is
-	 * sized for the fixed attr/entry replies and would reject a dirent
-	 * batch larger than 128 bytes, so a real directory must not route
-	 * through it. */
-	{
-		struct fuse_out_header oh;
-		memset(&oh, 0, sizeof oh);
-		oh.len = (uint32_t)(sizeof oh + off);
-		oh.error = 0;
-		oh.unique = unique;
-		(void)fd->write_reply(fd, &oh, sizeof oh);
-		if (off > 0)
-			(void)fd->write_reply(fd, out, off);
-	}
-	return off;
+	/* Lay the header into the reserved prefix and emit header+records in a
+	 * single write.  ln_reply_ok is sized for the fixed attr/entry replies
+	 * and would reject a dirent batch larger than 128 bytes, so a real
+	 * directory must not route through it. */
+	memset(&oh, 0, sizeof oh);
+	oh.len = (uint32_t)off;
+	oh.error = 0;
+	oh.unique = unique;
+	memcpy(out, &oh, hdr);
+	(void)fd->write_reply(fd, out, off);
+	return off - hdr;
 }
 
 /* FUSE_INIT handshake: answer with our supported major/minor. */

@@ -73,6 +73,7 @@ uint32_t fuse_drive_test_req_disposition(void);
 uint32_t fuse_drive_test_req_options(void);
 const uint8_t *fuse_drive_test_req_payload(size_t *);
 const uint8_t *fuse_drive_test_reply(size_t *);
+int fuse_drive_test_reply_writes(void);
 uint64_t fuse_drive_test_find_child(struct fuse_drive *, uint64_t,
 		const char *);
 
@@ -276,6 +277,10 @@ test_readdir_root(struct fuse_drive *fd)
 	if (!saw_c || !saw_d || count != 2)
 		FAIL("root readdir missing drives (c=%d d=%d n=%d)",
 			saw_c, saw_d, count);
+	/* The dirent batch must reach the kernel in one write. */
+	if (fuse_drive_test_reply_writes() != 1)
+		FAIL("root READDIR used %d writes, want 1",
+			fuse_drive_test_reply_writes());
 	printf("  readdir root: 2 aligned drive dirents ok\n");
 }
 
@@ -510,6 +515,11 @@ test_read(struct fuse_drive *fd, uint64_t child_node)
 			FAIL("READ reply size %zu", rlen);
 		if (memcmp(r + sizeof oh, data, 8) != 0)
 			FAIL("READ data mismatch");
+		/* The kernel reads each reply as one message; a data-bearing
+		 * reply must be a single write_reply (header + body together). */
+		if (fuse_drive_test_reply_writes() != 1)
+			FAIL("READ reply used %d writes, want 1",
+				fuse_drive_test_reply_writes());
 	}
 	printf("  read: FS_REQ READ + reply 8 bytes ok\n");
 }
@@ -634,6 +644,9 @@ test_readdir_drive(struct fuse_drive *fd)
 		if (!saw_sub || !saw_file || count != 2)
 			FAIL("drive readdir decode (sub=%d file=%d n=%d)",
 				saw_sub, saw_file, count);
+		if (fuse_drive_test_reply_writes() != 1)
+			FAIL("drive READDIR used %d writes, want 1",
+				fuse_drive_test_reply_writes());
 		printf("  readdir drive: decoded 'sub' (dir) + 'a.txt' "
 			"(file), skipped . / .. ok\n");
 	}
