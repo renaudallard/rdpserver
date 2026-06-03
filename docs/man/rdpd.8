@@ -7,7 +7,7 @@
 .Nd Remote Desktop Protocol server
 .Sh SYNOPSIS
 .Nm
-.Op Fl AdfmPVW
+.Op Fl 4AdfmPVW
 .Op Fl h Ar host
 .Op Fl p Ar port
 .Op Fl S Ar socket
@@ -33,6 +33,11 @@ Graphical output is sent as H.264 / AVC420 frames over the
 .Sy RDPGFX
 (Graphics Pipeline) dynamic virtual channel when the client supports
 it, falling back to fast-path bitmap updates otherwise.
+With
+.Fl 4
+the richer AVC444 mode
+.Pq full 4:4:4 chroma, sharper coloured text
+is offered to AVC-capable v10.x clients in place of AVC420.
 A bitmap update too large for a single fast-path PDU is split into
 FIRST/NEXT/LAST fragments sized to the client's MultifragmentUpdate
 MaxRequestSize (a 16KB safe default is used when the client omits it),
@@ -97,6 +102,20 @@ back, ending the session.
 which advertises the v8.1
 .Sy AVC420_ENABLED
 flag, is always offered AVC regardless of this option.
+.It Fl 4
+Offer AVC444
+.Pq MS-RDPEGFX codec 0x000E, RFX_AVC444_BITMAP_STREAM
+to AVC-capable v10.x clients in place of AVC420.
+AVC444 carries full-resolution
+.Pq 4:4:4
+chroma in a second H.264 stream, so coloured text and thin
+high-contrast edges stay sharp where AVC420's 4:2:0 chroma subsampling
+blurs them, at roughly twice the encode cost.
+It applies to the same clients as
+.Fl V
+and implies it; the option has no effect on a client that is not given
+AVC.
+Off by default.
 .It Fl P
 Offer RFX Progressive
 .Pq MS-RDPEGFX RFX_PROGRESSIVE

@@ -55,6 +55,8 @@
 #define RDPGFX_CODECID_CAPROGRESSIVE      0x0009
 #define RDPGFX_CODECID_AVC420             0x000B
 #define RDPGFX_CODECID_CAPROGRESSIVE_V2   0x000C
+#define RDPGFX_CODECID_AVC444             0x000E
+#define RDPGFX_CODECID_AVC444V2           0x000F
 
 #define RDPGFX_PIXELFORMAT_XRGB_8888     0x20
 #define RDPGFX_PIXELFORMAT_ARGB_8888     0x21
@@ -69,6 +71,7 @@
 enum rdpgfx_codec {
 	RDPGFX_CODEC_NONE = 0,
 	RDPGFX_CODEC_AVC420,
+	RDPGFX_CODEC_AVC444,
 	RDPGFX_CODEC_CAPROGRESSIVE,
 };
 
@@ -106,7 +109,7 @@ int rdp_rdpgfx_parse_caps_advertise(const uint8_t *pdu, size_t len,
 int rdp_rdpgfx_select_caps(const struct rdpgfx_caps_advertise *adv,
 		uint32_t *out_version, uint32_t *out_flags,
 		enum rdpgfx_codec *out_codec, int allow_v10_avc,
-		int allow_progressive);
+		int allow_progressive, int allow_avc444);
 
 /* Build RDPGFX_CMDID_CAPSCONFIRM with specified version and flags. */
 ssize_t rdp_rdpgfx_build_caps_confirm(uint8_t *out, size_t cap,
@@ -133,6 +136,14 @@ ssize_t rdp_rdpgfx_build_avc420_frame(uint8_t *out, size_t cap,
 		uint16_t surface_id, uint32_t frame_id,
 		uint16_t w, uint16_t h,
 		const uint8_t *h264_data, size_t h264_len);
+
+/* Build StartFrame + WireToSurface1 (AVC444, RFX_AVC444_BITMAP_STREAM
+ * with LC=0: main luma stream + aux chroma stream) + EndFrame. */
+ssize_t rdp_rdpgfx_build_avc444_frame(uint8_t *out, size_t cap,
+		uint16_t surface_id, uint32_t frame_id,
+		uint16_t w, uint16_t h,
+		const uint8_t *main_data, size_t main_len,
+		const uint8_t *aux_data, size_t aux_len);
 
 /* Build StartFrame + WireToSurface2 (CAPROGRESSIVE) + EndFrame. */
 ssize_t rdp_rdpgfx_build_progressive_frame(uint8_t *out, size_t cap,

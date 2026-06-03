@@ -79,6 +79,7 @@
 #include "../channels/sndin.h"
 #include "../channels/rdpgfx.h"
 #include "../wire/h264enc.h"
+#include "../wire/avc444.h"
 #include "../wire/progressive.h"
 #include "../common/utf16.h"
 
@@ -1881,6 +1882,7 @@ ensure_gfx_surface(struct rdp_tls *t, uint16_t user_id,
  * clients that advertise v10.x without AVC_DISABLED (mstsc, macOS). */
 static int g_allow_v10_avc;
 static int g_allow_progressive;
+static int g_allow_avc444;
 
 static void
 run_proxy(struct rdp_tls *t, int be_fd,
@@ -1915,6 +1917,7 @@ run_proxy(struct rdp_tls *t, int be_fd,
 	size_t   frame_cap = 0;
 	struct rdpgfx_state gfx = {0};
 	struct rdp_h264 *h264 = NULL;
+	struct rdp_avc444 *avc444 = NULL;
 	struct rdp_progressive *prog = NULL;
 	int output_suppressed = 0;
 	int backend_lost = 0;
@@ -2089,6 +2092,10 @@ run_proxy(struct rdp_tls *t, int be_fd,
 						rdp_h264_close(h264);
 						h264 = NULL;
 					}
+					if (avc444) {
+						rdp_avc444_close(avc444);
+						avc444 = NULL;
+					}
 					if (prog) {
 						rdp_progressive_close(prog);
 						prog = NULL;
@@ -2105,6 +2112,16 @@ run_proxy(struct rdp_tls *t, int be_fd,
 					if (h264)
 						(void)rdp_h264_resize(h264,
 							rw, rh);
+					if (avc444
+					    && rdp_avc444_resize(avc444,
+						rw, rh) != 0) {
+						/* Resize tore the encoder
+						 * down; drop to bitmap
+						 * rather than keep a dead
+						 * handle. */
+						rdp_avc444_close(avc444);
+						avc444 = NULL;
+					}
 					if (prog)
 						(void)rdp_progressive_resize(prog,
 							rw, rh);
@@ -2130,7 +2147,8 @@ run_proxy(struct rdp_tls *t, int be_fd,
 						&sel_flags,
 						&sel_codec,
 						g_allow_v10_avc,
-						g_allow_progressive) == 0) {
+						g_allow_progressive,
+						g_allow_avc444) == 0) {
 						/*
 						 * Probe the encoder before confirming
 						 * the codec. If it will not open, send
@@ -2143,11 +2161,30 @@ run_proxy(struct rdp_tls *t, int be_fd,
 								desktop_w,
 								desktop_h);
 						else if (sel_codec
+						    == RDPGFX_CODEC_AVC444) {
+							avc444 = rdp_avc444_open(
+								desktop_w,
+								desktop_h);
+							/*
+							 * AVC444 opens two encoders
+							 * and is more failure-prone
+							 * than AVC420; the same client
+							 * decodes AVC420, so fall back
+							 * to it rather than to bitmap.
+							 */
+							if (avc444 == NULL
+							    && (h264 = rdp_h264_open(
+								desktop_w,
+								desktop_h)) != NULL)
+								sel_codec =
+									RDPGFX_CODEC_AVC420;
+						} else if (sel_codec
 						    == RDPGFX_CODEC_CAPROGRESSIVE)
 							prog = rdp_progressive_open(
 								desktop_w,
 								desktop_h);
-						if (h264 != NULL || prog != NULL) {
+						if (h264 != NULL || avc444 != NULL
+						    || prog != NULL) {
 							uint8_t gbuf[512];
 							ssize_t gn;
 							rdp_info("conn[%s]: GFX caps "
@@ -2331,6 +2368,66 @@ run_proxy(struct rdp_tls *t, int be_fd,
 							}
 						}
 					}
+				} else if (gfx.active && avc444 != NULL
+				    && dv->dv.gfx_channel_id >= 0) {
+					uint32_t pending = gfx.frame_id
+						- gfx.last_ack_frame;
+					int fresh = !gfx.surface_created;
+					ensure_gfx_surface(t, user_id, dv,
+						&gfx, desktop_w, desktop_h);
+					if (fresh && gfx.surface_created)
+						rdp_avc444_force_idr(avc444);
+					if (pending < 2
+					    || gfx.queue_depth == 0xFFFFFFFF
+					    || gfx.last_ack_frame == 0) {
+						const uint8_t *m_out;
+						const uint8_t *a_out;
+						size_t m_len, a_len;
+						int keyframe;
+						if (rdp_avc444_encode(avc444,
+							frame_buf, fhdr.w,
+							fhdr.h,
+							&m_out, &m_len,
+							&a_out, &a_len,
+							&keyframe) == 0
+						    && m_out != NULL
+						    && m_len > 0
+						    && a_out != NULL
+						    && a_len > 0) {
+							uint8_t *gpdu;
+							size_t gpdu_cap =
+								m_len + a_len
+								+ 256;
+							gpdu = malloc(gpdu_cap);
+							if (gpdu != NULL) {
+								ssize_t gn;
+								int gw, gh;
+								rdp_avc444_dims(avc444,
+									&gw, &gh);
+								gfx.frame_id++;
+								gn = rdp_rdpgfx_build_avc444_frame(
+									gpdu,
+									gpdu_cap,
+									gfx.surface_id,
+									gfx.frame_id,
+									(uint16_t)gw,
+									(uint16_t)gh,
+									m_out,
+									m_len,
+									a_out,
+									a_len);
+								if (gn > 0)
+									(void)send_gfx_pdu(
+										t,
+										user_id,
+										dv->channel_id,
+										dv->dv.gfx_channel_id,
+										gpdu,
+										(size_t)gn);
+								free(gpdu);
+							}
+						}
+					}
 				} else if (gfx.active && prog != NULL
 				    && dv->dv.gfx_channel_id >= 0) {
 					uint32_t pending = gfx.frame_id
@@ -2438,8 +2535,14 @@ run_proxy(struct rdp_tls *t, int be_fd,
 						}
 					}
 				} else {
-					/* GFX not active yet; drop
-					 * pre-encoded frame. */
+					/* GFX is not active, or its
+					 * codec is not AVC420 (e.g.
+					 * AVC444 or Progressive, which
+					 * the worker encodes from raw
+					 * frames).  A pre-encoded AVC420
+					 * 4:2:0 bitstream cannot be
+					 * repackaged for those, so drop
+					 * it. */
 				}
 				free(h264_data);
 			} else if (type == RDP_BE_HELLO_S2W) {
@@ -2918,6 +3021,7 @@ out:
 				ei, (size_t)en);
 	}
 	if (h264 != NULL) rdp_h264_close(h264);
+	if (avc444 != NULL) rdp_avc444_close(avc444);
 	if (prog != NULL) rdp_progressive_close(prog);
 	free(frame_buf);
 	rdp_drdynvc_cleanup(&dv->dv);
@@ -2991,6 +3095,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 
 	g_allow_v10_avc = cfg->allow_v10_avc;
 	g_allow_progressive = cfg->allow_progressive;
+	g_allow_avc444 = cfg->allow_avc444;
 	g_prefer_wan_audio = cfg->prefer_wan_audio;
 	g_allow_microphone = cfg->allow_microphone;
 	struct dynvc_state dynvc = {0};

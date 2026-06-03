@@ -45,6 +45,9 @@ struct rdp_h264 {
 	int            width;
 	int            height;
 	int64_t        pts;
+	/* Owned YUV420 input buffer for the BGR conversion path; NULL when
+	 * the caller feeds planes directly (rdp_h264_encode_planar). */
+	uint8_t       *yuv_buf;
 	/* Concatenated NAL output buffer. */
 	uint8_t       *nal_buf;
 	size_t         nal_cap;
@@ -55,7 +58,8 @@ init_encoder(struct rdp_h264 *e, int w, int h)
 {
 	/* Free any frame buffer from a previous geometry (on resize),
 	 * then round down to even: H.264 4:2:0 requires even dimensions. */
-	free(e->pic_in.img.plane[0]);
+	free(e->yuv_buf);
+	e->yuv_buf = NULL;
 	e->pic_in.img.plane[0] = NULL;
 	w &= ~1;
 	h &= ~1;
@@ -139,11 +143,12 @@ bgr_to_yuv420(struct rdp_h264 *e, const uint8_t *bgr, int src_w)
 	size_t uvsz = (size_t)(ew / 2) * (eh / 2);
 	uint8_t *Y, *U, *V;
 
-	if (e->pic_in.img.plane[0] == NULL) {
-		e->pic_in.img.plane[0] = malloc(ysz + uvsz * 2);
-		if (e->pic_in.img.plane[0] == NULL) return;
+	if (e->yuv_buf == NULL) {
+		e->yuv_buf = malloc(ysz + uvsz * 2);
+		if (e->yuv_buf == NULL) return;
 	}
-	Y = e->pic_in.img.plane[0];
+	e->pic_in.img.plane[0] = e->yuv_buf;
+	Y = e->yuv_buf;
 	U = Y + ysz;
 	V = U + uvsz;
 	e->pic_in.img.plane[1] = U;
@@ -172,11 +177,11 @@ bgr_to_yuv420(struct rdp_h264 *e, const uint8_t *bgr, int src_w)
 	}
 }
 
-int
-rdp_h264_encode(struct rdp_h264 *e,
-		const uint8_t *bgr, int width, int height,
-		const uint8_t **out_buf, size_t *out_len,
-		int *is_keyframe)
+/* Encode the already-populated e->pic_in and concatenate the resulting
+ * NALs into e->nal_buf.  Shared by the BGR and planar entry points. */
+static int
+encode_pic(struct rdp_h264 *e,
+		const uint8_t **out_buf, size_t *out_len, int *is_keyframe)
 {
 	x264_nal_t *nals = NULL;
 	int i_nals = 0;
@@ -184,8 +189,9 @@ rdp_h264_encode(struct rdp_h264 *e,
 	int i;
 	size_t total = 0;
 
-	if (width < e->width || height < e->height) return -1;
-	bgr_to_yuv420(e, bgr, width);
+	/* A failed resize leaves enc NULL (init_encoder bailed); never pass
+	 * that to x264.  This covers both the BGR and the planar entry. */
+	if (e->enc == NULL) return -1;
 	e->pic_in.i_pts = e->pts++;
 	frame_size = x264_encoder_encode(e->enc, &nals, &i_nals,
 		&e->pic_in, &e->pic_out);
@@ -221,12 +227,42 @@ rdp_h264_encode(struct rdp_h264 *e,
 	return 0;
 }
 
+int
+rdp_h264_encode(struct rdp_h264 *e,
+		const uint8_t *bgr, int width, int height,
+		const uint8_t **out_buf, size_t *out_len,
+		int *is_keyframe)
+{
+	if (width < e->width || height < e->height) return -1;
+	bgr_to_yuv420(e, bgr, width);
+	return encode_pic(e, out_buf, out_len, is_keyframe);
+}
+
+int
+rdp_h264_encode_planar(struct rdp_h264 *e,
+		uint8_t *y, uint8_t *u, uint8_t *v,
+		int stride_y, int stride_c,
+		const uint8_t **out_buf, size_t *out_len,
+		int *is_keyframe)
+{
+	/* Caller owns the plane buffers (e->yuv_buf stays NULL, so close
+	 * never frees them).  The planes must already hold a YUV420 image
+	 * at the encoder's geometry. */
+	e->pic_in.img.plane[0] = y;
+	e->pic_in.img.plane[1] = u;
+	e->pic_in.img.plane[2] = v;
+	e->pic_in.img.i_stride[0] = stride_y;
+	e->pic_in.img.i_stride[1] = stride_c;
+	e->pic_in.img.i_stride[2] = stride_c;
+	return encode_pic(e, out_buf, out_len, is_keyframe);
+}
+
 void
 rdp_h264_close(struct rdp_h264 *e)
 {
 	if (e == NULL) return;
 	if (e->enc) x264_encoder_close(e->enc);
-	free(e->pic_in.img.plane[0]);
+	free(e->yuv_buf);
 	free(e->nal_buf);
 	free(e);
 }

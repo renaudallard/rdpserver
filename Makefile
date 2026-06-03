@@ -32,6 +32,7 @@ WIRE_OBJS = \
 	src/wire/fastpath.o \
 	src/wire/input.o \
 	src/wire/h264enc.o \
+	src/wire/avc444.o \
 	src/wire/progressive.o
 
 WIRE_LIB = src/wire/libwire.a
@@ -109,6 +110,7 @@ REGRESS_PROGS = \
 	regress/wire/drdynvc_test \
 	regress/wire/printer_test \
 	regress/wire/mic_test \
+	regress/wire/avc444_test \
 	$(FUSE_REGRESS) \
 	$(OBSD_FUSE_REGRESS)
 
@@ -259,6 +261,17 @@ regress/wire/drdynvc_test: regress/wire/drdynvc_test.c src/channels/drdynvc.c \
 	$(CC) $(CFLAGS) $(TEST_SAN) -Isrc/include \
 		-o $@ regress/wire/drdynvc_test.c src/channels/drdynvc.c \
 		src/common/log.c
+
+# AVC444 split, wire format, and codec selection.  avc444.c (and the
+# h264enc.c it drives) plus rdpgfx.c are recompiled with the test so
+# $(TEST_SAN) covers the plane-packing index math and the wire builder.
+regress/wire/avc444_test: regress/wire/avc444_test.c src/wire/avc444.c \
+		src/wire/h264enc.c src/channels/rdpgfx.c \
+		src/common/buf.c src/common/log.c
+	$(CC) $(CFLAGS) $(X264_CFLAGS) $(TEST_SAN) -Isrc/include \
+		-o $@ regress/wire/avc444_test.c src/wire/avc444.c \
+		src/wire/h264enc.c src/channels/rdpgfx.c \
+		src/common/buf.c src/common/log.c $(X264_LIBS)
 
 # Printer module unit test.  printer.c is recompiled with the test so the
 # sanitization and the wire header layout are covered directly; $(TEST_SAN)

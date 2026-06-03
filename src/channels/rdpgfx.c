@@ -93,7 +93,7 @@ int
 rdp_rdpgfx_select_caps(const struct rdpgfx_caps_advertise *adv,
 		uint32_t *out_version, uint32_t *out_flags,
 		enum rdpgfx_codec *out_codec, int allow_v10_avc,
-		int allow_progressive)
+		int allow_progressive, int allow_avc444)
 {
 	/*
 	 * Prefer versions inside the common client CapsConfirm accept
@@ -157,7 +157,18 @@ rdp_rdpgfx_select_caps(const struct rdpgfx_caps_advertise *adv,
 					continue;
 				*out_version = adv->sets[i].version;
 				*out_flags = 0;
-				*out_codec = RDPGFX_CODEC_AVC420;
+				/*
+				 * AVC444 (full 4:4:4 chroma) is signalled by
+				 * a v10.x capset without AVC_DISABLED, the same
+				 * gate as v10.x AVC420; prefer it when enabled
+				 * (rdpd -4).  v8.1 has no AVC444, so the
+				 * fallback below stays AVC420.
+				 */
+				*out_codec = (allow_avc444
+				    && adv->sets[i].version
+					>= RDPGFX_CAPVERSION_10)
+					? RDPGFX_CODEC_AVC444
+					: RDPGFX_CODEC_AVC420;
 				return 0;
 			}
 		}
@@ -356,6 +367,91 @@ rdp_rdpgfx_build_avc420_frame(uint8_t *out, size_t cap,
 	if (rdp_buf_put_u32le(&b, frame_id) != 0) return -1;
 
 	(void)off;
+	return (ssize_t)rdp_buf_used(&b);
+}
+
+/* One RFX_AVC420_BITMAP_STREAM: a metablock (numRegionRects + one
+ * region rect + one quant/quality entry) followed by the H.264 NALs.
+ * The whole region is a single rect covering the surface. */
+#define RDPGFX_AVC420_META 14   /* 4 (count) + 8 (rect) + 2 (quant) */
+
+static int
+put_avc420_substream(struct rdp_buf *b, uint16_t w, uint16_t h,
+		const uint8_t *data, size_t len)
+{
+	if (rdp_buf_put_u32le(b, 1) != 0) return -1;       /* numRegionRects */
+	if (rdp_buf_put_u16le(b, 0) != 0) return -1;       /* left */
+	if (rdp_buf_put_u16le(b, 0) != 0) return -1;       /* top */
+	if (rdp_buf_put_u16le(b, w) != 0) return -1;       /* right */
+	if (rdp_buf_put_u16le(b, h) != 0) return -1;       /* bottom */
+	if (rdp_buf_put_u8(b, 22) != 0) return -1;         /* qpVal */
+	if (rdp_buf_put_u8(b, 100) != 0) return -1;        /* qualityVal */
+	if (rdp_buf_put(b, data, len) != 0) return -1;     /* H.264 NALs */
+	return 0;
+}
+
+ssize_t
+rdp_rdpgfx_build_avc444_frame(uint8_t *out, size_t cap,
+		uint16_t surface_id, uint32_t frame_id,
+		uint16_t w, uint16_t h,
+		const uint8_t *main_data, size_t main_len,
+		const uint8_t *aux_data, size_t aux_len)
+{
+	struct rdp_buf b;
+	/* RFX_AVC444_BITMAP_STREAM = cbAvc420EncodedBitstream1 (4) +
+	 * stream1 (main, LUMA) + stream2 (aux, CHROMA).  Each stream is a
+	 * full RFX_AVC420_BITMAP_STREAM (metablock + H.264). */
+	size_t s1_len = RDPGFX_AVC420_META + main_len;
+	size_t s2_len = RDPGFX_AVC420_META + aux_len;
+	size_t bitmap_len = 4 + s1_len + s2_len;
+	/* StartFrame(8+8) + WireToSurface1(8+body) + EndFrame(8+4) */
+	size_t start_len = RDPGFX_HEADER_SIZE + 8;
+	size_t wire_body = 17 + bitmap_len;  /* 17 = WireToSurface1 fixed head */
+	size_t wire_len  = RDPGFX_HEADER_SIZE + wire_body;
+	size_t end_len   = RDPGFX_HEADER_SIZE + 4;
+	size_t total     = start_len + wire_len + end_len;
+
+	/* The LC/length field carries a 30-bit length, so stream1 must fit. */
+	if (s1_len > 0x3FFFFFFF) return -1;
+	if (total > cap) return -1;
+	rdp_buf_init(&b, out, cap);
+
+	/* StartFrame */
+	if (put_gfx_header(&b, RDPGFX_CMDID_STARTFRAME,
+		(uint32_t)start_len) != 0) return -1;
+	if (rdp_buf_put_u32le(&b, 0) != 0) return -1;    /* timestamp */
+	if (rdp_buf_put_u32le(&b, frame_id) != 0) return -1;
+
+	/* WireToSurface1 */
+	if (put_gfx_header(&b, RDPGFX_CMDID_WIRETOSURFACE_1,
+		(uint32_t)wire_len) != 0) return -1;
+	if (rdp_buf_put_u16le(&b, surface_id) != 0) return -1;
+	if (rdp_buf_put_u16le(&b, RDPGFX_CODECID_AVC444) != 0) return -1;
+	if (rdp_buf_put_u8(&b, RDPGFX_PIXELFORMAT_XRGB_8888) != 0) return -1;
+	/* destRect: left=0, top=0, right=w, bottom=h */
+	if (rdp_buf_put_u16le(&b, 0) != 0) return -1;
+	if (rdp_buf_put_u16le(&b, 0) != 0) return -1;
+	if (rdp_buf_put_u16le(&b, w) != 0) return -1;
+	if (rdp_buf_put_u16le(&b, h) != 0) return -1;
+	/* bitmapDataLength */
+	if (rdp_buf_put_u32le(&b, (uint32_t)bitmap_len) != 0) return -1;
+
+	/* cbAvc420EncodedBitstream1: low 30 bits = stream1 length (incl. its
+	 * metablock), top 2 bits = LC.  LC=0 means both luma and chroma
+	 * streams are present. */
+	if (rdp_buf_put_u32le(&b, (uint32_t)s1_len) != 0) return -1;
+	/* stream1: main YUV420 (luma) view */
+	if (put_avc420_substream(&b, w, h, main_data, main_len) != 0)
+		return -1;
+	/* stream2: auxiliary YUV420 (chroma) view */
+	if (put_avc420_substream(&b, w, h, aux_data, aux_len) != 0)
+		return -1;
+
+	/* EndFrame */
+	if (put_gfx_header(&b, RDPGFX_CMDID_ENDFRAME,
+		(uint32_t)end_len) != 0) return -1;
+	if (rdp_buf_put_u32le(&b, frame_id) != 0) return -1;
+
 	return (ssize_t)rdp_buf_used(&b);
 }
 

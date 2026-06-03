@@ -70,6 +70,17 @@ int rdp_h264_encode(struct rdp_h264 *e,
 		const uint8_t **out_buf, size_t *out_len,
 		int *is_keyframe);
 
+/* Encode a caller-supplied YUV420 image.  `y` is stride_y*height bytes,
+ * `u`/`v` are stride_c*(height/2) bytes, all at the encoder's geometry
+ * (see rdp_h264_dims).  The caller retains ownership of the planes.
+ * Used by the AVC444 encoder to drive its two sub-streams.  Output is in
+ * `*out_buf`/`*out_len`, valid until the next encode or close on `e`. */
+int rdp_h264_encode_planar(struct rdp_h264 *e,
+		uint8_t *y, uint8_t *u, uint8_t *v,
+		int stride_y, int stride_c,
+		const uint8_t **out_buf, size_t *out_len,
+		int *is_keyframe);
+
 void rdp_h264_close(struct rdp_h264 *e);
 
 #endif /* RDP_H264ENC_H */
