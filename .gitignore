@@ -34,3 +34,6 @@ src/session/protocols/
 *.xz
 *.dsc
 tools/rdp-passwd
+
+# Harness scratch (never commit)
+.claude/
