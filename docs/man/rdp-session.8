@@ -34,6 +34,12 @@ target is mapped to the Windows
 and
 .Sy CF_DIBV5
 formats by a zero-dependency BMP conversion).
+A file copied in the session (the X
+.Sy text/uri-list
+target) is offered to the client as a
+.Sy FileGroupDescriptorW
+and streamed on demand, so it can be pasted in the client; pasting a
+client file into the session is in progress.
 Large transfers are reassembled and read or written incrementally,
 bounded at 4 MiB.
 Scancode key events map directly to X keycodes; the Xvfb keyboard

@@ -1483,7 +1483,8 @@ main(int argc, char *argv[])
 				(void)inject_sync(dpy, &s);
 			} else if (type == RDP_BE_CLIP_OFFER
 			    || type == RDP_BE_CLIP_REQUEST
-			    || type == RDP_BE_CLIP_DATA) {
+			    || type == RDP_BE_CLIP_DATA
+			    || type == RDP_BE_CLIP_FILE_REQUEST) {
 				if (clip_ok)
 					rdp_clip_handle_be_msg(&clip, type,
 						buf, (size_t)n);

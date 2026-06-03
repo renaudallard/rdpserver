@@ -81,11 +81,16 @@
  *      and returns the BMP bytes unchanged.
  *   I  RDP -> X, image; clip claims CLIPBOARD advertising IMAGE, xclip -t
  *      image/bmp -o pulls the BMP bytes back unchanged.
+ *   J  X -> RDP, file copy; an xclip -t text/uri-list owner offers a
+ *      file:// URI for a real temp file, clip emits CLIP_OFFER with the FILES
+ *      bit and returns a FileGroupDescriptorW for it; CLIP_FILE_REQUEST then
+ *      pulls the file's size and its bytes back.
  */
 
 #include "../../src/session/clip_x11.h"
 #include "../../src/backend/proto.h"
 #include "../../src/backend/proto_api.h"
+#include "../../src/channels/cliprdr.h"
 
 #include "../../src/include/rdp_log.h"
 
@@ -95,6 +100,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdint.h>
@@ -498,6 +504,61 @@ xclip_set_image(const uint8_t *data, size_t len)
 		}
 		execl("/usr/bin/xclip", "xclip", "-display", g_display,
 			"-selection", "clipboard", "-t", "image/bmp",
+			"-i", (char *)NULL);
+		_exit(127);
+	}
+	(void)close(in[0]);
+	{
+		size_t off = 0;
+		while (off < len) {
+			ssize_t w = write(in[1], data + off, len - off);
+			if (w <= 0) {
+				if (w < 0 && errno == EINTR)
+					continue;
+				break;
+			}
+			off += (size_t)w;
+		}
+	}
+	(void)close(in[1]);
+	return pid;
+}
+
+/*
+ * Run `xclip -t text/uri-list -i` to put `data` (len bytes) on the CLIPBOARD
+ * offering the text/uri-list target.  xclip's TARGETS reply for such an owner
+ * is exactly {TARGETS, text/uri-list} (verified live), so clip_x11's
+ * fmt_for_target maps it to the FILES bit only.  Same fork/feed/detach shape
+ * as xclip_set; returns the daemon pid to reap, or -1 on error.
+ */
+static pid_t
+xclip_set_uri_list(const uint8_t *data, size_t len)
+{
+	int in[2];
+	pid_t pid;
+
+	if (pipe(in) != 0)
+		return -1;
+	pid = fork();
+	if (pid < 0) {
+		(void)close(in[0]);
+		(void)close(in[1]);
+		return -1;
+	}
+	if (pid == 0) {
+		(void)dup2(in[0], STDIN_FILENO);
+		(void)close(in[0]);
+		(void)close(in[1]);
+		{
+			int devnull = open("/dev/null", O_WRONLY);
+			if (devnull >= 0) {
+				(void)dup2(devnull, STDERR_FILENO);
+				if (devnull > 2)
+					(void)close(devnull);
+			}
+		}
+		execl("/usr/bin/xclip", "xclip", "-display", g_display,
+			"-selection", "clipboard", "-t", "text/uri-list",
 			"-i", (char *)NULL);
 		_exit(127);
 	}
@@ -1805,6 +1866,228 @@ test_rdp_to_x_image(const char *name, const uint8_t *bmp, size_t len)
 	(void)drive_until(NULL, NULL, 100);
 }
 
+/* Send a CLIP_FILE_REQUEST and collect the matching CLIP_FILE_DATA.  On
+ * success copies the returned bytes (after the 8-byte header) into out (up to
+ * cap) and sets *out_len; verifies stream_id echoes and status == 0.  Returns
+ * 0 on success, -1 otherwise. */
+static int
+file_request_and_read(uint32_t stream_id, uint32_t lindex, uint32_t flags,
+		uint64_t pos, uint32_t cb_requested, uint8_t *out, size_t cap,
+		size_t *out_len, int timeout_ms)
+{
+	struct rdp_be_clip_file_req rq;
+	static uint8_t buf[BIG_LEN + 1024];
+	uint32_t type = 0;
+	ssize_t n;
+	struct rdp_be_clip_file_data_hdr h;
+
+	*out_len = 0;
+	memset(&rq, 0, sizeof rq);
+	rq.stream_id = stream_id;
+	rq.lindex = lindex;
+	rq.flags = flags;
+	rq.pos_low = (uint32_t)(pos & 0xffffffffu);
+	rq.pos_high = (uint32_t)(pos >> 32);
+	rq.cb_requested = cb_requested;
+
+	if (rdp_be_send(g_sv0, RDP_BE_CLIP_FILE_REQUEST, &rq, sizeof rq) != 0) {
+		FAILF("send CLIP_FILE_REQUEST: %s", strerror(errno));
+		return -1;
+	}
+	n = expect_be_msg(&type, buf, sizeof buf, timeout_ms);
+	if (n < 0) {
+		FAILF("no CLIP_FILE_DATA within %d ms", timeout_ms);
+		return -1;
+	}
+	if (type != RDP_BE_CLIP_FILE_DATA) {
+		FAILF("expected CLIP_FILE_DATA, got type %u", type);
+		return -1;
+	}
+	if ((size_t)n < sizeof h) {
+		FAILF("CLIP_FILE_DATA too short (%zd bytes)", n);
+		return -1;
+	}
+	memcpy(&h, buf, sizeof h);
+	if (h.status != 0) {
+		FAILF("CLIP_FILE_DATA status %u (expected 0/ok)", h.status);
+		return -1;
+	}
+	if (h.stream_id != stream_id) {
+		FAILF("CLIP_FILE_DATA stream_id %u (expected %u)",
+			h.stream_id, stream_id);
+		return -1;
+	}
+	*out_len = (size_t)n - sizeof h;
+	if (*out_len > cap) {
+		FAILF("CLIP_FILE_DATA payload %zu > cap %zu", *out_len, cap);
+		return -1;
+	}
+	memcpy(out, buf + sizeof h, *out_len);
+	return 0;
+}
+
+/* J.  X -> RDP, file copy.  Create a real temp file under tmp/, make an xclip
+ * -t text/uri-list owner point a file:// URI at it, and drive the whole
+ * file-copy path: CLIP_OFFER with the FILES bit, CLIP_DATA{FILES} parsing to
+ * one descriptor with the right size and basename, then a CB_FILECONTENTS
+ * size request and a range request reading the bytes back. */
+static void
+test_x_to_rdp_files(const char *name, const char *path, const uint8_t *content,
+		size_t clen)
+{
+	pid_t holder;
+	uint32_t type = 0;
+	uint8_t small[256];
+	ssize_t n;
+	struct rdp_be_clip_offer off;
+	uint8_t *blob = NULL;
+	size_t blob_len = 0;
+	char uri[1200];
+	int ulen;
+	const char *base;
+
+	(void)printf("%s: X -> RDP, file copy, %zu-byte file '%s'\n",
+		name, clen, path);
+
+	/* Build the text/uri-list value: "file://HOST/abspath\r\n". */
+	ulen = snprintf(uri, sizeof uri, "file://localhost%s\r\n", path);
+	if (ulen < 0 || (size_t)ulen >= sizeof uri) {
+		FAILF("uri build failed");
+		return;
+	}
+
+	holder = xclip_set_uri_list((const uint8_t *)uri, (size_t)ulen);
+	if (holder < 0) {
+		FAILF("xclip -t text/uri-list -i spawn failed");
+		return;
+	}
+
+	if (!drive_until(pred_sv0_readable, NULL, 5000)) {
+		FAILF("no CLIP_OFFER after xclip -t text/uri-list -i");
+		goto reap;
+	}
+	n = rdp_be_recv(g_sv0, &type, small, sizeof small);
+	if (n < 0) {
+		FAILF("recv CLIP_OFFER: %s", strerror(errno));
+		goto reap;
+	}
+	if (type != RDP_BE_CLIP_OFFER) {
+		FAILF("expected CLIP_OFFER, got type %u", type);
+		goto reap;
+	}
+	if ((size_t)n < sizeof off) {
+		FAILF("CLIP_OFFER too short (%zd bytes)", n);
+		goto reap;
+	}
+	memcpy(&off, small, sizeof off);
+	if (!(off.formats & RDP_BE_CLIP_FMT_FILES)) {
+		FAILF("CLIP_OFFER bitmap 0x%x missing FILES bit 0x%x",
+			off.formats, RDP_BE_CLIP_FMT_FILES);
+		goto reap;
+	}
+	(void)printf("  got CLIP_OFFER, formats 0x%x (FILES bit set)\n",
+		off.formats);
+
+	/* Ask for the FILES format: the session converts the uri-list to a
+	 * FileGroupDescriptorW blob. */
+	if (request_and_read_data_fmt(RDP_BE_CLIP_FMT_FILES, &blob, &blob_len,
+		8000) != 0)
+		goto reap;
+
+	/* Parse the blob: expect exactly one file with the right size/name. */
+	{
+		struct rdp_clip_filedesc fd[4];
+		size_t nf = 4;
+		if (rdp_cliprdr_parse_file_list(blob, blob_len, fd, &nf) != 0) {
+			FAILF("parse_file_list failed");
+			free(blob);
+			goto reap;
+		}
+		if (nf != 1) {
+			FAILF("file list has %zu entries (expected 1)", nf);
+			free(blob);
+			goto reap;
+		}
+		base = strrchr(path, '/');
+		base = (base != NULL) ? base + 1 : path;
+		if (strcmp(fd[0].name, base) != 0) {
+			FAILF("descriptor name '%s' (expected '%s')",
+				fd[0].name, base);
+			free(blob);
+			goto reap;
+		}
+		if (fd[0].size != clen) {
+			FAILF("descriptor size %llu (expected %zu)",
+				(unsigned long long)fd[0].size, clen);
+			free(blob);
+			goto reap;
+		}
+		(void)printf("  CLIP_DATA{FILES}: 1 file '%s' size %llu ok\n",
+			fd[0].name, (unsigned long long)fd[0].size);
+	}
+	free(blob);
+
+	/* CB_FILECONTENTS size request: expect the 8-byte little-endian size. */
+	{
+		uint8_t sz[64];
+		size_t got_len = 0;
+		uint64_t v = 0;
+		size_t i;
+		if (file_request_and_read(1, 0, CB_FILECONTENTS_SIZE, 0, 0,
+			sz, sizeof sz, &got_len, 5000) != 0)
+			goto reap;
+		if (got_len != 8) {
+			FAILF("SIZE reply %zu bytes (expected 8)", got_len);
+			goto reap;
+		}
+		for (i = 0; i < 8; i++)
+			v |= (uint64_t)sz[i] << (i * 8);
+		if (v != clen) {
+			FAILF("SIZE reply %llu (expected %zu)",
+				(unsigned long long)v, clen);
+			goto reap;
+		}
+		(void)printf("  CLIP_FILE_DATA{SIZE} = %llu ok\n",
+			(unsigned long long)v);
+	}
+
+	/* CB_FILECONTENTS range request: expect the file's bytes back. */
+	{
+		uint8_t *rng = malloc(clen + 16);
+		size_t got_len = 0;
+		if (rng == NULL) {
+			FAILF("oom");
+			goto reap;
+		}
+		if (file_request_and_read(2, 0, CB_FILECONTENTS_RANGE, 0,
+			(uint32_t)clen, rng, clen + 16, &got_len, 5000) != 0) {
+			free(rng);
+			goto reap;
+		}
+		if (got_len != clen) {
+			FAILF("RANGE reply %zu bytes (expected %zu)",
+				got_len, clen);
+			free(rng);
+			goto reap;
+		}
+		if (memcmp(rng, content, clen) != 0) {
+			FAILF("RANGE reply bytes differ from file");
+			free(rng);
+			goto reap;
+		}
+		(void)printf("  CLIP_FILE_DATA{RANGE} %zu bytes match ok\n",
+			got_len);
+		free(rng);
+	}
+
+reap:
+	if (holder > 0) {
+		(void)kill(holder, SIGTERM);
+		(void)waitpid(holder, NULL, 0);
+		(void)drive_until(NULL, NULL, 200);
+	}
+}
+
 int
 main(void)
 {
@@ -1942,6 +2225,63 @@ main(void)
 
 	/* I: RDP -> X, image; xclip -t image/bmp -o pulls it back. */
 	test_rdp_to_x_image("I", bmp_2x2, sizeof bmp_2x2);
+
+	/*
+	 * J: X -> RDP, file copy.  Create a real 5000-byte temp file under the
+	 * project tmp/ dir (NOT /tmp, per the repo convention) with a position
+	 * dependent pattern, then drive the whole file-copy path.
+	 */
+	{
+		const size_t flen = 5000;
+		uint8_t *content = malloc(flen);
+		char abspath[PATH_MAX];
+		char cwd[PATH_MAX - 64];
+		int fd;
+
+		if (content == NULL) {
+			(void)fprintf(stderr, "oom (file content)\n");
+		} else if (getcwd(cwd, sizeof cwd) == NULL) {
+			(void)fprintf(stderr, "getcwd: %s\n", strerror(errno));
+			free(content);
+		} else {
+			size_t i;
+			for (i = 0; i < flen; i++)
+				content[i] = (uint8_t)((i * 37 + 11) & 0xff);
+			(void)snprintf(abspath, sizeof abspath,
+				"%s/tmp/clipfile_test.dat", cwd);
+			fd = open(abspath, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+			if (fd < 0) {
+				(void)fprintf(stderr, "open %s: %s\n",
+					abspath, strerror(errno));
+				free(content);
+			} else {
+				size_t off = 0;
+				int wok = 1;
+				while (off < flen) {
+					ssize_t w = write(fd, content + off,
+						flen - off);
+					if (w <= 0) {
+						if (w < 0 && errno == EINTR)
+							continue;
+						wok = 0;
+						break;
+					}
+					off += (size_t)w;
+				}
+				(void)close(fd);
+				if (!wok) {
+					(void)fprintf(stderr,
+						"write temp file failed\n");
+					g_fail = 1;
+				} else {
+					test_x_to_rdp_files("J", abspath,
+						content, flen);
+				}
+				(void)unlink(abspath);
+				free(content);
+			}
+		}
+	}
 
 	free(big);
 

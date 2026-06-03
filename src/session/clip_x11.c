@@ -50,11 +50,15 @@
 #include "../include/rdp_log.h"
 #include "../backend/proto.h"
 #include "../backend/proto_api.h"
+#include "../channels/cliprdr.h"
 
 #include <X11/Xatom.h>
 #include <X11/extensions/Xfixes.h>
 
+#include <sys/stat.h>
+
 #include <errno.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -65,6 +69,13 @@
  * the backend's 4 MiB max payload and bounds memory against a hostile or
  * runaway selection owner. */
 #define CLIP_X11_MAX (4u * 1024u * 1024u)
+
+/* Upper bound on the file bytes returned for a single CB_FILECONTENTS_RANGE
+ * request.  The whole CLIP_FILE_DATA frame (8-byte header + these bytes) must
+ * stay under the backend's 4 MiB payload cap, so leave room for the header.
+ * The client re-requests successive ranges to read a larger file. */
+#define CLIP_FILE_RANGE_MAX \
+	(4u * 1024u * 1024u - (unsigned)sizeof(struct rdp_be_clip_file_data_hdr))
 
 static int xfixes_event_base = 0;
 
@@ -88,6 +99,7 @@ rdp_clip_init(struct rdp_clip *c, Display *dpy, int be_fd)
 	c->a_text_html     = XInternAtom(dpy, "text/html", False);
 	c->a_image_bmp     = XInternAtom(dpy, "image/bmp", False);
 	c->a_image_xbmp    = XInternAtom(dpy, "image/x-bmp", False);
+	c->a_uri_list      = XInternAtom(dpy, "text/uri-list", False);
 	c->a_timestamp     = XInternAtom(dpy, "TIMESTAMP", False);
 	c->a_incr          = XInternAtom(dpy, "INCR", False);
 	c->a_property      = XInternAtom(dpy, "_RDP_CLIP_DATA", False);
@@ -110,12 +122,26 @@ rdp_clip_init(struct rdp_clip *c, Display *dpy, int be_fd)
 	return 0;
 }
 
+/* Drop the absolute local paths backing the last file-copy offer. */
+static void
+clip_files_reset(struct rdp_clip *c)
+{
+	size_t i;
+
+	for (i = 0; i < c->file_count; i++)
+		free(c->file_paths[i]);
+	free(c->file_paths);
+	c->file_paths = NULL;
+	c->file_count = 0;
+}
+
 void
 rdp_clip_close(struct rdp_clip *c)
 {
 	if (c->dpy != NULL && c->owner_win != 0)
 		XDestroyWindow(c->dpy, c->owner_win);
 	free(c->incr_buf);
+	clip_files_reset(c);
 	memset(c, 0, sizeof *c);
 }
 
@@ -131,6 +157,8 @@ target_for_fmt(struct rdp_clip *c, uint32_t fmt)
 		return c->a_image_bmp;
 	case RDP_BE_CLIP_FMT_HTML:
 		return c->a_text_html;
+	case RDP_BE_CLIP_FMT_FILES:
+		return c->a_uri_list;
 	}
 	return None;
 }
@@ -145,6 +173,8 @@ fmt_for_target(struct rdp_clip *c, Atom target)
 		return RDP_BE_CLIP_FMT_HTML;
 	if (target == c->a_image_bmp || target == c->a_image_xbmp)
 		return RDP_BE_CLIP_FMT_IMAGE;
+	if (target == c->a_uri_list)
+		return RDP_BE_CLIP_FMT_FILES;
 	return 0;
 }
 
@@ -185,6 +215,251 @@ send_clip_data(struct rdp_clip *c, uint32_t fmt, const uint8_t *data,
 		memcpy(buf + sizeof h, data, len);
 	(void)rdp_be_send(c->be_fd, RDP_BE_CLIP_DATA, buf, buf_len);
 	free(buf);
+}
+
+/* Send CLIP_FILE_DATA back to the worker: an 8-byte header (stream_id +
+ * status) then `len` file bytes.  status != 0 reports failure and carries no
+ * bytes. */
+static void
+send_clip_file_data(struct rdp_clip *c, uint32_t stream_id, uint32_t status,
+		const uint8_t *data, size_t len)
+{
+	struct rdp_be_clip_file_data_hdr h;
+	uint8_t *buf;
+	size_t buf_len;
+
+	h.stream_id = stream_id;
+	h.status = status;
+	buf_len = sizeof h + ((status == 0 && data != NULL) ? len : 0);
+	buf = malloc(buf_len);
+	if (buf == NULL)
+		return;
+	memcpy(buf, &h, sizeof h);
+	if (status == 0 && data != NULL && len > 0)
+		memcpy(buf + sizeof h, data, len);
+	(void)rdp_be_send(c->be_fd, RDP_BE_CLIP_FILE_DATA, buf, buf_len);
+	free(buf);
+}
+
+/* --- X -> RDP file copy: text/uri-list -> FileGroupDescriptorW --- */
+
+/* Offset between the Unix epoch and the Windows FILETIME epoch
+ * (1601-01-01), in seconds. */
+#define FILETIME_EPOCH_DELTA 11644473600ULL
+
+static int
+hexval(int ch)
+{
+	if (ch >= '0' && ch <= '9')
+		return ch - '0';
+	if (ch >= 'a' && ch <= 'f')
+		return ch - 'a' + 10;
+	if (ch >= 'A' && ch <= 'F')
+		return ch - 'A' + 10;
+	return -1;
+}
+
+/* Percent-decode the URI path src[0..len) into dst (capacity dst_cap incl.
+ * the terminating NUL).  Returns the decoded length, or (size_t)-1 if the
+ * result would not fit. */
+static size_t
+percent_decode(char *dst, size_t dst_cap, const char *src, size_t len)
+{
+	size_t i = 0, o = 0;
+
+	while (i < len) {
+		int c = (unsigned char)src[i];
+		if (c == '%' && i + 2 < len) {
+			int hi = hexval((unsigned char)src[i + 1]);
+			int lo = hexval((unsigned char)src[i + 2]);
+			if (hi >= 0 && lo >= 0) {
+				c = (hi << 4) | lo;
+				i += 3;
+			} else {
+				i++;
+			}
+		} else {
+			i++;
+		}
+		if (o + 1 >= dst_cap)
+			return (size_t)-1;
+		dst[o++] = (char)c;
+	}
+	if (o >= dst_cap)
+		return (size_t)-1;
+	dst[o] = '\0';
+	return o;
+}
+
+/* Extract the local filesystem path from one "file://[host]/path" URI line
+ * src[0..len) (host is ignored, as it names the local machine).  On success
+ * writes the percent-decoded path to out (capacity out_cap) and returns 0.
+ * Returns -1 for a comment line, a non-file:// URI, or a path that does not
+ * fit. */
+static int
+uri_to_path(const char *src, size_t len, char *out, size_t out_cap)
+{
+	static const char scheme[] = "file://";
+	size_t slen = sizeof scheme - 1;
+	const char *p;
+	size_t rest;
+
+	/* Trim leading whitespace; a leading '#' marks a comment line. */
+	while (len > 0 && (*src == ' ' || *src == '\t')) {
+		src++;
+		len--;
+	}
+	if (len == 0 || src[0] == '#')
+		return -1;
+	if (len < slen || memcmp(src, scheme, slen) != 0)
+		return -1;
+	p = src + slen;
+	rest = len - slen;
+	/* Skip an optional authority (host) up to the path-leading '/'. */
+	{
+		size_t i = 0;
+		while (i < rest && p[i] != '/')
+			i++;
+		if (i >= rest)
+			return -1;   /* no path component */
+		p += i;
+		rest -= i;
+	}
+	if (percent_decode(out, out_cap, p, rest) == (size_t)-1)
+		return -1;
+	return 0;
+}
+
+/*
+ * Build a FileGroupDescriptorW blob from a text/uri-list value and remember
+ * the resolved local paths.  uri[0..len) is the newline-separated list as
+ * delivered by the X owner.  On success returns a heap buffer (caller frees)
+ * with *blob_len set, having stored the per-file absolute paths in
+ * c->file_paths; returns NULL if no usable file:// entry was found.
+ */
+static uint8_t *
+build_file_list_from_uris(struct rdp_clip *c, const uint8_t *uri, size_t len,
+		size_t *blob_len)
+{
+	struct rdp_clip_filedesc descs[RDP_CLIP_MAX_FILES];
+	char *paths[RDP_CLIP_MAX_FILES];
+	size_t n = 0, off = 0, i;
+	uint8_t *blob;
+	ssize_t bn;
+	size_t cap;
+
+	*blob_len = 0;
+	clip_files_reset(c);
+
+	while (off < len && n < RDP_CLIP_MAX_FILES) {
+		size_t start = off, line_len;
+		char path[1024];
+		struct stat st;
+		const char *base;
+		struct rdp_clip_filedesc *d;
+
+		/* One line, terminated by LF (a trailing CR is trimmed). */
+		while (off < len && uri[off] != '\n')
+			off++;
+		line_len = off - start;
+		if (off < len)
+			off++;   /* skip the LF */
+		if (line_len > 0 && uri[start + line_len - 1] == '\r')
+			line_len--;
+		if (line_len == 0)
+			continue;
+		if (uri_to_path((const char *)uri + start, line_len,
+			path, sizeof path) != 0)
+			continue;
+		if (stat(path, &st) != 0)
+			continue;
+
+		paths[n] = strdup(path);
+		if (paths[n] == NULL)
+			continue;
+		base = strrchr(path, '/');
+		base = (base != NULL) ? base + 1 : path;
+
+		d = &descs[n];
+		memset(d, 0, sizeof *d);
+		d->flags = FD_ATTRIBUTES | FD_FILESIZE | FD_WRITESTIME;
+		d->attrs = S_ISDIR(st.st_mode) ? FILE_ATTRIBUTE_DIRECTORY : 0;
+		d->size = S_ISDIR(st.st_mode) ? 0 : (uint64_t)st.st_size;
+		d->mtime = ((uint64_t)st.st_mtime + FILETIME_EPOCH_DELTA)
+			* 10000000ULL;
+		{
+			size_t bl = strlen(base);
+			if (bl >= sizeof d->name)
+				bl = sizeof d->name - 1;
+			memcpy(d->name, base, bl);
+			d->name[bl] = '\0';
+		}
+		n++;
+	}
+
+	if (n == 0)
+		return NULL;
+
+	cap = 4 + n * RDP_CLIP_FILEDESC_WIRE;
+	blob = malloc(cap);
+	if (blob == NULL) {
+		for (i = 0; i < n; i++)
+			free(paths[i]);
+		return NULL;
+	}
+	bn = rdp_cliprdr_build_file_list(blob, cap, descs, n);
+	if (bn < 0) {
+		free(blob);
+		for (i = 0; i < n; i++)
+			free(paths[i]);
+		return NULL;
+	}
+
+	/* Commit the path table only once the blob is built. */
+	c->file_paths = malloc(n * sizeof *c->file_paths);
+	if (c->file_paths == NULL) {
+		free(blob);
+		for (i = 0; i < n; i++)
+			free(paths[i]);
+		return NULL;
+	}
+	for (i = 0; i < n; i++)
+		c->file_paths[i] = paths[i];
+	c->file_count = n;
+
+	*blob_len = (size_t)bn;
+	return blob;
+}
+
+/*
+ * Hand a freshly fetched X selection value to the worker as CLIP_DATA.  For
+ * every format except FILES the property bytes are the payload verbatim; for
+ * FILES the bytes are a text/uri-list that we convert into a
+ * FileGroupDescriptorW blob first (and a failure to find any file reports a
+ * fail CLIP_DATA so the worker does not wait).
+ */
+static void
+send_fetched_clip_data(struct rdp_clip *c, uint32_t fmt, const uint8_t *data,
+		size_t len)
+{
+	if (fmt == RDP_BE_CLIP_FMT_FILES) {
+		uint8_t *blob;
+		size_t blob_len = 0;
+
+		if (data == NULL) {
+			send_clip_data(c, fmt, NULL, 0);
+			return;
+		}
+		blob = build_file_list_from_uris(c, data, len, &blob_len);
+		if (blob == NULL) {
+			send_clip_data(c, fmt, NULL, 0);
+			return;
+		}
+		send_clip_data(c, fmt, blob, blob_len);
+		free(blob);
+		return;
+	}
+	send_clip_data(c, fmt, data, len);
 }
 
 /* --- property helpers --- */
@@ -332,6 +607,7 @@ on_xfixes_selection_notify(struct rdp_clip *c, XEvent *ev)
 	rdp_debug("clip: CLIPBOARD owner changed to 0x%lx; probing targets",
 		(unsigned long)xe->owner);
 	clip_incr_reset(c);   /* abandon any in-progress incremental fetch */
+	clip_files_reset(c);  /* the new owner's files are not yet known */
 	c->x_fetch_fmt = 0;   /* 0 = the TARGETS probe */
 	XConvertSelection(c->dpy, c->a_clipboard, c->a_targets,
 		c->a_property, c->owner_win, xe->timestamp);
@@ -389,7 +665,7 @@ on_incr_property(struct rdp_clip *c)
 		c->incr_len = 0;
 		c->incr_active = 0;
 		c->incr_discard = 0;
-		send_clip_data(c, fmt, all, alllen);
+		send_fetched_clip_data(c, fmt, all, alllen);
 		free(all);
 		return;
 	}
@@ -465,7 +741,7 @@ on_selection_notify(struct rdp_clip *c, XEvent *ev)
 		data = read_property_bytes(c, c->owner_win, se->property, &len);
 		XDeleteProperty(c->dpy, c->owner_win, se->property);
 		XFlush(c->dpy);
-		send_clip_data(c, fmt, data, len);
+		send_fetched_clip_data(c, fmt, data, len);
 		free(data);
 	}
 }
@@ -577,6 +853,7 @@ rdp_clip_handle_xevent(struct rdp_clip *c, XEvent *ev)
 		if (sc->selection == c->a_clipboard) {
 			c->rdp_offered = 0;
 			c->rdp_data_pending = 0;
+			clip_files_reset(c);
 		}
 		return 1;
 	}
@@ -642,6 +919,77 @@ rdp_clip_handle_be_msg(struct rdp_clip *c, uint32_t type,
 				c->defer_property, c->a_clipboard,
 				c->defer_target, c->defer_time, data, dlen);
 		}
+		break;
+	}
+	case RDP_BE_CLIP_FILE_REQUEST: {
+		/* The worker (on the client's behalf) wants one file's size or a
+		 * byte range from the FileGroupDescriptorW we last offered.  Read
+		 * it from the stored local path and reply with CLIP_FILE_DATA. */
+		struct rdp_be_clip_file_req rq;
+		uint64_t pos;
+		uint32_t want;
+		int fd;
+		uint8_t *rbuf;
+		ssize_t got;
+
+		if (len < sizeof rq)
+			break;
+		memcpy(&rq, payload, sizeof rq);
+		if (rq.lindex >= c->file_count
+		    || c->file_paths[rq.lindex] == NULL) {
+			send_clip_file_data(c, rq.stream_id, 1, NULL, 0);
+			break;
+		}
+		if (rq.flags & CB_FILECONTENTS_SIZE) {
+			/* Reply with the 8-byte little-endian file size. */
+			struct stat st;
+			uint8_t sz[8];
+			if (stat(c->file_paths[rq.lindex], &st) != 0) {
+				send_clip_file_data(c, rq.stream_id, 1, NULL, 0);
+				break;
+			}
+			{
+				uint64_t s = S_ISDIR(st.st_mode)
+					? 0 : (uint64_t)st.st_size;
+				size_t i;
+				for (i = 0; i < 8; i++)
+					sz[i] = (uint8_t)(s >> (i * 8));
+			}
+			send_clip_file_data(c, rq.stream_id, 0, sz, sizeof sz);
+			break;
+		}
+		if (!(rq.flags & CB_FILECONTENTS_RANGE)) {
+			send_clip_file_data(c, rq.stream_id, 1, NULL, 0);
+			break;
+		}
+		pos = (uint64_t)rq.pos_low | ((uint64_t)rq.pos_high << 32);
+		want = rq.cb_requested;
+		if (want > CLIP_FILE_RANGE_MAX)
+			want = CLIP_FILE_RANGE_MAX;
+		/* The user's own file in the user's own session: a symlink the
+		 * user copied is theirs to read, so no O_NOFOLLOW. */
+		fd = open(c->file_paths[rq.lindex], O_RDONLY);
+		if (fd < 0) {
+			send_clip_file_data(c, rq.stream_id, 1, NULL, 0);
+			break;
+		}
+		rbuf = (want > 0) ? malloc(want) : NULL;
+		if (want > 0 && rbuf == NULL) {
+			(void)close(fd);
+			send_clip_file_data(c, rq.stream_id, 1, NULL, 0);
+			break;
+		}
+		got = (want > 0)
+			? pread(fd, rbuf, want, (off_t)pos)
+			: 0;
+		(void)close(fd);
+		if (got < 0) {
+			free(rbuf);
+			send_clip_file_data(c, rq.stream_id, 1, NULL, 0);
+			break;
+		}
+		send_clip_file_data(c, rq.stream_id, 0, rbuf, (size_t)got);
+		free(rbuf);
 		break;
 	}
 	}

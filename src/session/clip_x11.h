@@ -59,6 +59,7 @@ struct rdp_clip {
 	Atom     a_text_html;       /* text/html target */
 	Atom     a_image_bmp;       /* image/bmp target */
 	Atom     a_image_xbmp;      /* image/x-bmp target (alias) */
+	Atom     a_uri_list;        /* text/uri-list target (file copy) */
 	Atom     a_timestamp;
 	Atom     a_incr;            /* INCR transfer marker type */
 	Atom     a_property;         /* our scratch property name */
@@ -87,7 +88,17 @@ struct rdp_clip {
 	Atom     defer_property;
 	Atom     defer_target;
 	Time     defer_time;
+
+	/* X -> RDP file copy: the absolute local paths backing the
+	 * FileGroupDescriptorW blob we last built for the worker.  A
+	 * subsequent CLIP_FILE_REQUEST selects one by lindex and we read the
+	 * bytes from here.  Reset on every owner change / SelectionClear. */
+	char   **file_paths;
+	size_t   file_count;
 };
+
+/* Largest number of files carried in one clipboard file-copy offer. */
+#define RDP_CLIP_MAX_FILES 64u
 
 int  rdp_clip_init(struct rdp_clip *c, Display *dpy, int be_fd);
 void rdp_clip_close(struct rdp_clip *c);

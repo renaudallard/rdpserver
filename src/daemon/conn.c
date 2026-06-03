@@ -231,6 +231,7 @@ struct clip_state {
 	 * its CB_FORMAT_LIST, so we can request them on the X side's behalf. */
 	uint32_t client_html_id;
 	uint32_t client_dib_id;
+	uint32_t client_files_id;   /* "FileGroupDescriptorW" */
 
 	/* Semantic format of the CB_FORMAT_DATA_REQUEST we last sent to the
 	 * client, so its response (which carries no format id) is decoded
@@ -254,6 +255,8 @@ clip_sem_from_id(uint32_t id)
 		return RDP_BE_CLIP_FMT_IMAGE;
 	if (id == CB_FMT_HTML_ID)
 		return RDP_BE_CLIP_FMT_HTML;
+	if (id == CB_FMT_FILEGROUP_ID)
+		return RDP_BE_CLIP_FMT_FILES;
 	return 0;
 }
 
@@ -268,6 +271,8 @@ clip_id_for_client(const struct clip_state *cs, uint32_t sem)
 		return cs->client_dib_id;
 	case RDP_BE_CLIP_FMT_HTML:
 		return cs->client_html_id;
+	case RDP_BE_CLIP_FMT_FILES:
+		return cs->client_files_id;
 	}
 	return 0;
 }
@@ -386,10 +391,12 @@ clip_handle_pdu(struct rdp_tls *t, int be_fd,
 		uint32_t bitmap = 0;
 		(void)rdp_cliprdr_parse_format_list(pdu + 8,
 			len > 8 ? len - 8 : 0, cs->use_long_names, &f);
-		cs->client_html_id = f.has_html ? f.html_id : 0;
-		cs->client_dib_id  = f.has_dib ? f.dib_id : 0;
-		rdp_debug("cliprdr: client formats text=%d/%d html=%d dib=%d",
-			f.has_unicode_text, f.has_text, f.has_html, f.has_dib);
+		cs->client_html_id  = f.has_html ? f.html_id : 0;
+		cs->client_dib_id   = f.has_dib ? f.dib_id : 0;
+		cs->client_files_id = f.has_files ? f.files_id : 0;
+		rdp_debug("cliprdr: client formats text=%d/%d html=%d dib=%d files=%d",
+			f.has_unicode_text, f.has_text, f.has_html, f.has_dib,
+			f.has_files);
 		{
 			uint8_t r[16];
 			ssize_t rn = rdp_cliprdr_build_format_list_response(
@@ -404,6 +411,10 @@ clip_handle_pdu(struct rdp_tls *t, int be_fd,
 			bitmap |= RDP_BE_CLIP_FMT_IMAGE;
 		if (f.has_html)
 			bitmap |= RDP_BE_CLIP_FMT_HTML;
+		/* File paste from the client into the session is not offered
+		 * yet (it needs the temp-file download path); only the reverse
+		 * direction is wired.  client_files_id is still recorded above
+		 * for when that lands. */
 		if (bitmap != 0) {
 			struct rdp_be_clip_offer offer = { bitmap };
 			(void)rdp_be_send(be_fd, RDP_BE_CLIP_OFFER,
@@ -515,6 +526,27 @@ clip_handle_pdu(struct rdp_tls *t, int be_fd,
 		}
 		break;
 	}
+	case CB_FILECONTENTS_REQUEST: {
+		/* The client wants a file's size or a byte range from the
+		 * FileGroupDescriptorW the session offered.  Forward it to the
+		 * session as a FILE_REQUEST; the session reads the local file and
+		 * answers with FILE_DATA, which we relay as CB_FILECONTENTS_RESPONSE. */
+		struct rdp_cliprdr_filereq fr;
+		struct rdp_be_clip_file_req be;
+
+		if (rdp_cliprdr_parse_filecontents_request(pdu + 8,
+			len > 8 ? len - 8 : 0, &fr) != 0)
+			break;
+		be.stream_id = fr.stream_id;
+		be.lindex = fr.lindex;
+		be.flags = fr.flags;
+		be.pos_low = (uint32_t)(fr.position & 0xffffffffu);
+		be.pos_high = (uint32_t)(fr.position >> 32);
+		be.cb_requested = fr.cb_requested;
+		(void)rdp_be_send(be_fd, RDP_BE_CLIP_FILE_REQUEST,
+			&be, sizeof be);
+		break;
+	}
 	default:
 		rdp_debug("cliprdr: ignoring msg_type %u",
 			(unsigned)h.msg_type);
@@ -533,9 +565,9 @@ clip_handle_be(struct rdp_tls *t, struct clip_state *cs,
 	switch (type) {
 	case RDP_BE_CLIP_OFFER: {
 		/* The X side announced clipboard content; advertise the
-		 * matching formats to the client.  HTML carries a registered
-		 * name so the client can map it. */
-		struct rdp_clip_fmt fmts[3];
+		 * matching formats to the client.  HTML and the file group
+		 * carry a registered name so the client can map them. */
+		struct rdp_clip_fmt fmts[4];
 		size_t nf = 0;
 		uint32_t bitmap = RDP_BE_CLIP_FMT_TEXT;
 
@@ -558,6 +590,11 @@ clip_handle_be(struct rdp_tls *t, struct clip_state *cs,
 		if (bitmap & RDP_BE_CLIP_FMT_HTML) {
 			fmts[nf].id = CB_FMT_HTML_ID;
 			fmts[nf].name = CB_FMT_NAME_HTML;
+			nf++;
+		}
+		if (bitmap & RDP_BE_CLIP_FMT_FILES) {
+			fmts[nf].id = CB_FMT_FILEGROUP_ID;
+			fmts[nf].name = CB_FMT_NAME_FILEGROUP;
 			nf++;
 		}
 		if (nf == 0) return 0;
@@ -603,7 +640,15 @@ clip_handle_be(struct rdp_tls *t, struct clip_state *cs,
 		}
 		data = payload + sizeof h;
 		dlen = len - sizeof h;
-		if (h.format == RDP_BE_CLIP_FMT_IMAGE) {
+		if (h.format == RDP_BE_CLIP_FMT_FILES) {
+			/* The session already built the FileGroupDescriptorW blob;
+			 * relay it as the CB_FORMAT_DATA_RESPONSE unchanged. */
+			resp_cap = RDP_CLIPRDR_HDR_LEN + dlen;
+			resp = malloc(resp_cap);
+			if (resp == NULL) return -1;
+			n = rdp_cliprdr_build_format_data_response(
+				resp, resp_cap, data, dlen, 1);
+		} else if (h.format == RDP_BE_CLIP_FMT_IMAGE) {
 			/* BMP byte stream -> CF_DIB (strip the file header). */
 			size_t doff = 0, dl = 0;
 
@@ -665,6 +710,39 @@ clip_handle_be(struct rdp_tls *t, struct clip_state *cs,
 				resp, resp_cap, utf16, got + 2, 1);
 			free(utf16);
 		}
+		if (n < 0) {
+			free(resp);
+			return -1;
+		}
+		rc = send_clip_pdu(t, cs->user_id, cs->channel_id,
+			resp, (size_t)n);
+		free(resp);
+		return rc;
+	}
+	case RDP_BE_CLIP_FILE_DATA: {
+		/* The session answered a CB_FILECONTENTS_REQUEST: wrap the bytes
+		 * (or the failure status) in a CB_FILECONTENTS_RESPONSE for the
+		 * client.  File data can be several MiB, so size the buffer to it;
+		 * send_clip_pdu fragments. */
+		struct rdp_be_clip_file_data_hdr h;
+		const uint8_t *data;
+		size_t dlen, resp_cap;
+		uint8_t *resp;
+		int rc;
+
+		if (len < sizeof h) return -1;
+		memcpy(&h, payload, sizeof h);
+		data = payload + sizeof h;
+		dlen = len - sizeof h;
+		if (h.status != 0) {
+			data = NULL;
+			dlen = 0;
+		}
+		resp_cap = RDP_CLIPRDR_HDR_LEN + 4 + dlen;
+		resp = malloc(resp_cap);
+		if (resp == NULL) return -1;
+		n = rdp_cliprdr_build_filecontents_response(resp, resp_cap,
+			h.stream_id, data, dlen, h.status == 0);
 		if (n < 0) {
 			free(resp);
 			return -1;
@@ -1968,8 +2046,14 @@ run_proxy(struct rdp_tls *t, int be_fd,
 				}
 			} else if (type == RDP_BE_CLIP_OFFER
 			    || type == RDP_BE_CLIP_REQUEST
-			    || type == RDP_BE_CLIP_DATA) {
+			    || type == RDP_BE_CLIP_DATA
+			    || type == RDP_BE_CLIP_FILE_DATA) {
 				uint8_t *pl = NULL;
+				/* The session is the user's own helper, but bound
+				 * the allocation anyway: every clip payload it
+				 * sends fits well under 8 MiB (data is capped at
+				 * 4 MiB on its side). */
+				if (len > 8u * 1024u * 1024u) goto out;
 				if (len > 0) {
 					pl = malloc(len);
 					if (pl == NULL) goto out;

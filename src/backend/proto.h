@@ -91,6 +91,16 @@
 #define RDP_BE_FS_REQ      11u
 #define RDP_BE_FS_RSP      12u
 
+/* Clipboard file copy (session <-> worker).  The FileGroupDescriptorW
+ * blob itself travels in a CLIP_DATA whose format is
+ * RDP_BE_CLIP_FMT_FILES; these two carry the per-file content transfer.
+ *   FILE_REQUEST  worker -> session: ask for one file's size or a byte
+ *                 range, mirroring CB_FILECONTENTS_REQUEST.
+ *   FILE_DATA     session -> worker: the requested bytes (or an 8-byte
+ *                 size on a size request) with a status word. */
+#define RDP_BE_CLIP_FILE_REQUEST 18u  /* worker -> session */
+#define RDP_BE_CLIP_FILE_DATA    19u  /* session -> worker */
+
 #define RDP_FS_OPEN        1u
 #define RDP_FS_READ        2u
 #define RDP_FS_WRITE       3u
@@ -170,6 +180,10 @@ struct rdp_be_fs_device {
 #define RDP_BE_CLIP_FMT_TEXT  0x00000001u
 #define RDP_BE_CLIP_FMT_IMAGE 0x00000002u
 #define RDP_BE_CLIP_FMT_HTML  0x00000004u
+/* FILES: the CLIP_DATA bytes are a FileGroupDescriptorW blob (built by the
+ * session with rdp_cliprdr_build_file_list); the file contents move over
+ * the FILE_REQUEST/FILE_DATA pair below. */
+#define RDP_BE_CLIP_FMT_FILES 0x00000008u
 
 /* Hello payload (8 bytes). */
 struct rdp_be_hello {
@@ -260,6 +274,31 @@ struct rdp_be_cursor_hdr {
 	uint16_t height;
 	uint16_t hotspot_x;
 	uint16_t hotspot_y;
+};
+
+/* CLIP_FILE_REQUEST payload (worker -> session): ask the session for one
+ * file in its current FileGroupDescriptorW offer.  lindex selects the file
+ * (its index in the descriptor list).  flags is CB_FILECONTENTS_SIZE (reply
+ * with the 8-byte size) or CB_FILECONTENTS_RANGE (reply with cb_requested
+ * bytes starting at the 64-bit offset pos_high<<32 | pos_low).  stream_id is
+ * echoed back in the matching FILE_DATA so the worker can correlate. */
+struct rdp_be_clip_file_req {
+	uint32_t stream_id;
+	uint32_t lindex;
+	uint32_t flags;        /* CB_FILECONTENTS_SIZE / _RANGE */
+	uint32_t pos_low;      /* RANGE: low 32 bits of the byte offset */
+	uint32_t pos_high;     /* RANGE: high 32 bits of the byte offset */
+	uint32_t cb_requested; /* RANGE: bytes wanted (session caps it) */
+};
+
+/* CLIP_FILE_DATA payload header (session -> worker), followed by the file
+ * bytes (the requested range, or the 8-byte little-endian size for a SIZE
+ * request).  stream_id echoes the request; status is 0 on success, nonzero
+ * on any error (bad lindex, open/read failure), in which case no bytes
+ * follow. */
+struct rdp_be_clip_file_data_hdr {
+	uint32_t stream_id;
+	uint32_t status;       /* 0 = ok */
 };
 
 #endif /* RDP_BACKEND_PROTO_H */

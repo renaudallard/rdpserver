@@ -74,6 +74,7 @@ BACKEND_LIB  = src/backend/libbackend.a
 # is always linked; the wire backend object (FUSE_BACKEND_OBJ) is the Linux
 # raw /dev/fuse one, the OpenBSD fusebuf one, or empty, as configure chose.
 SESSION_OBJS = src/session/rdp_session.o src/session/clip_x11.o \
+	src/channels/cliprdr.o \
 	src/session/fuse_drive.o $(FUSE_BACKEND_OBJ) \
 	$(WAYLAND_OBJ) $(AUDIO_OBJ)
 SESSION_PROG = src/session/rdp-session
@@ -297,11 +298,13 @@ regress/integ/linux_fuse_live: regress/integ/linux_fuse_live.c \
 # supports it so leaks/UAF/UB in the clipboard code are caught.
 regress/integ/clip_x11_live: regress/integ/clip_x11_live.c \
 		src/session/clip_x11.c src/backend/proto.c \
+		src/channels/cliprdr.c src/common/buf.c src/common/utf16.c \
 		src/common/io.c src/common/log.c
 	$(CC) $(CFLAGS) $(TEST_SAN) $(X11_CFLAGS) -Isrc/include \
 		-DXVFB_PATH=\"$(XVFB_PATH)\" \
 		-o $@ regress/integ/clip_x11_live.c \
 		src/session/clip_x11.c src/backend/proto.c \
+		src/channels/cliprdr.c src/common/buf.c src/common/utf16.c \
 		src/common/io.c src/common/log.c \
 		$(X11_LIBS)
 
