@@ -220,6 +220,20 @@ fuzz_cliprdr(size_t iters)
 			(void)rdp_cliprdr_dib_to_bmp(buf, len, bmpout,
 				sizeof bmpout);
 		}
+		{
+			/* File-copy parsers: the descriptor count and the
+			 * FILECONTENTS fields are attacker-controlled. */
+			static struct rdp_clip_filedesc fds[8];
+			struct rdp_cliprdr_filereq fr;
+			const uint8_t *fd;
+			uint32_t sid;
+			size_t nf = 8, fdl;
+			(void)rdp_cliprdr_parse_file_list(buf, len, fds, &nf);
+			(void)rdp_cliprdr_parse_filecontents_request(buf, len,
+				&fr);
+			(void)rdp_cliprdr_parse_filecontents_response(buf, len,
+				&sid, &fd, &fdl);
+		}
 
 		/* Drive the channel reassembler with a fragment stream
 		 * derived from the random buffer: each record is a flags

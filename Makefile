@@ -219,10 +219,10 @@ regress/wire/rdpdr_test: regress/wire/rdpdr_test.c src/channels/rdpdr.c \
 # CLIPRDR channel reassembly test.  cliprdr.c is recompiled with the test;
 # $(TEST_SAN) covers the attacker-controlled fragment-length bounds.
 regress/wire/cliprdr_test: regress/wire/cliprdr_test.c src/channels/cliprdr.c \
-		src/common/buf.c
+		src/common/buf.c src/common/utf16.c
 	$(CC) $(CFLAGS) $(TEST_SAN) -Isrc/include \
 		-o $@ regress/wire/cliprdr_test.c src/channels/cliprdr.c \
-		src/common/buf.c
+		src/common/buf.c src/common/utf16.c
 
 # Drive read-path FUSE protocol test.  The protocol agnostic core
 # (fuse_drive.c) and the Linux raw /dev/fuse backend (fuse_drive_linux.c)

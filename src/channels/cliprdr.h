@@ -108,6 +108,26 @@
  * an incoming format list to learn the peer's dynamic id for it. */
 #define CB_FMT_NAME_HTML "HTML Format"
 
+/* Registered file-copy format ("FileGroupDescriptorW"), advertised under a
+ * stable server id; the file contents themselves move over the separate
+ * CB_FILECONTENTS_REQUEST/RESPONSE PDUs. */
+#define CB_FMT_FILEGROUP_ID   0xC101
+#define CB_FMT_NAME_FILEGROUP "FileGroupDescriptorW"
+
+/* CLIPRDR_FILECONTENTS_REQUEST dwFlags (MS-RDPECLIP 2.2.5.3). */
+#define CB_FILECONTENTS_SIZE   0x00000001u
+#define CB_FILECONTENTS_RANGE  0x00000002u
+
+/* CLIPRDR_FILEDESCRIPTOR flags: which fields are valid (MS-RDPECLIP
+ * 2.2.5.2.3.1). */
+#define FD_ATTRIBUTES   0x00000004u
+#define FD_FILESIZE     0x00000040u
+#define FD_WRITESTIME   0x00000020u
+#define FD_PROGRESSUI   0x00004000u
+
+/* The one Windows file attribute we act on. */
+#define FILE_ATTRIBUTE_DIRECTORY  0x00000010u
+
 /* Channel PDU header flags (MS-RDPBCGR 2.2.6.1.1). */
 #define CHANNEL_FLAG_FIRST           0x00000001
 #define CHANNEL_FLAG_LAST            0x00000002
@@ -163,8 +183,10 @@ struct rdp_cliprdr_formats {
 	int      has_text;
 	int      has_dib;
 	int      has_html;
+	int      has_files;
 	uint32_t html_id;   /* peer's id for "HTML Format" if has_html */
 	uint32_t dib_id;    /* peer's id for CF_DIB/CF_DIBV5 if has_dib */
+	uint32_t files_id;  /* peer's id for "FileGroupDescriptorW" */
 };
 
 /* Parse a CB_FORMAT_LIST body (the bytes after the CLIPRDR header) into
@@ -199,6 +221,49 @@ ssize_t rdp_cliprdr_dib_to_bmp(const uint8_t *dib, size_t dib_len,
 		uint8_t *out, size_t cap);
 int rdp_cliprdr_bmp_to_dib(const uint8_t *bmp, size_t bmp_len,
 		size_t *dib_off, size_t *dib_len);
+
+/*
+ * File copy (MS-RDPECLIP 2.2.5).  A FileGroupDescriptorW is a u32 count
+ * followed by that many 592-byte CLIPRDR_FILEDESCRIPTOR records; this code
+ * carries each in a neutral form with a UTF-8 name.  File bytes move
+ * separately over CB_FILECONTENTS_REQUEST/RESPONSE PDUs.
+ */
+struct rdp_clip_filedesc {
+	uint32_t flags;     /* FD_* bitmap of valid fields */
+	uint32_t attrs;     /* Windows file attributes (FILE_ATTRIBUTE_*) */
+	uint64_t size;      /* file size in bytes */
+	uint64_t mtime;     /* last write time as a Windows FILETIME */
+	char     name[780]; /* UTF-8 (<= 3 bytes per UTF-16 unit) + NUL */
+};
+
+/* The wire size of one CLIPRDR_FILEDESCRIPTOR. */
+#define RDP_CLIP_FILEDESC_WIRE 592u
+
+ssize_t rdp_cliprdr_build_file_list(uint8_t *out, size_t cap,
+		const struct rdp_clip_filedesc *files, size_t n);
+/* Parse the descriptor list into files[0..*n_io); on return *n_io holds
+ * the number stored (clamped to the caller's capacity). */
+int rdp_cliprdr_parse_file_list(const uint8_t *p, size_t len,
+		struct rdp_clip_filedesc *files, size_t *n_io);
+
+struct rdp_cliprdr_filereq {
+	uint32_t stream_id;
+	uint32_t lindex;
+	uint32_t flags;        /* CB_FILECONTENTS_SIZE / _RANGE */
+	uint64_t position;
+	uint32_t cb_requested;
+	uint32_t clip_data_id; /* valid only if have_clip_data_id */
+	int      have_clip_data_id;
+};
+
+ssize_t rdp_cliprdr_build_filecontents_request(uint8_t *out, size_t cap,
+		const struct rdp_cliprdr_filereq *req);
+int rdp_cliprdr_parse_filecontents_request(const uint8_t *p, size_t len,
+		struct rdp_cliprdr_filereq *req);
+ssize_t rdp_cliprdr_build_filecontents_response(uint8_t *out, size_t cap,
+		uint32_t stream_id, const void *data, size_t data_len, int ok);
+int rdp_cliprdr_parse_filecontents_response(const uint8_t *p, size_t len,
+		uint32_t *stream_id, const uint8_t **data, size_t *data_len);
 
 /* Parse a CB_FORMAT_DATA_REQUEST body.  Returns the requested
  * format id. */

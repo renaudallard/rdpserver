@@ -33,6 +33,7 @@
 #include "cliprdr.h"
 
 #include "../common/buf.h"
+#include "../common/utf16.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -67,7 +68,8 @@ rdp_cliprdr_build_clip_caps(uint8_t *out, size_t cap)
 	 *     u16 capabilitySetType = 1
 	 *     u16 lengthCapability = 12
 	 *     u32 version = CB_CAPS_VERSION_2
-	 *     u32 generalFlags = CB_USE_LONG_FORMAT_NAMES). */
+	 *     u32 generalFlags = CB_USE_LONG_FORMAT_NAMES
+	 *                      | CB_STREAM_FILECLIP_ENABLED). */
 	rdp_buf_init(&b, out, cap);
 	if (write_hdr(&b, CB_CLIP_CAPS, 0, 16) != 0) return -1;
 	if (rdp_buf_put_u16le(&b, 1) != 0) return -1;     /* cCapabilitiesSets */
@@ -75,7 +77,8 @@ rdp_cliprdr_build_clip_caps(uint8_t *out, size_t cap)
 	if (rdp_buf_put_u16le(&b, CB_CAPSTYPE_GENERAL) != 0) return -1;
 	if (rdp_buf_put_u16le(&b, 12) != 0) return -1;
 	if (rdp_buf_put_u32le(&b, CB_CAPS_VERSION_2) != 0) return -1;
-	if (rdp_buf_put_u32le(&b, CB_USE_LONG_FORMAT_NAMES) != 0) return -1;
+	if (rdp_buf_put_u32le(&b, CB_USE_LONG_FORMAT_NAMES
+		| CB_STREAM_FILECLIP_ENABLED) != 0) return -1;
 	return (ssize_t)rdp_buf_used(&b);
 }
 
@@ -228,6 +231,11 @@ classify_format(struct rdp_cliprdr_formats *out, uint32_t fmt,
 	if (is_html) {
 		out->has_html = 1;
 		out->html_id = fmt;
+	}
+	if (utf16 ? utf16le_name_eq(name, name_len, CB_FMT_NAME_FILEGROUP)
+		  : ascii_name_eq(name, CB_FMT_NAME_FILEGROUP)) {
+		out->has_files = 1;
+		out->files_id = fmt;
 	}
 }
 
@@ -506,6 +514,173 @@ rdp_cliprdr_bmp_to_dib(const uint8_t *bmp, size_t bmp_len, size_t *dib_off,
 		return -1;
 	*dib_off = BMP_FILE_HDR;
 	*dib_len = bmp_len - BMP_FILE_HDR;
+	return 0;
+}
+
+static void
+put32le(uint8_t *p, uint32_t v)
+{
+	p[0] = (uint8_t)(v & 0xff);
+	p[1] = (uint8_t)((v >> 8) & 0xff);
+	p[2] = (uint8_t)((v >> 16) & 0xff);
+	p[3] = (uint8_t)((v >> 24) & 0xff);
+}
+
+/* Byte length (a multiple of 2) of the UTF-16LE string in p[0..max) up to
+ * but not including its 0x0000 terminator. */
+static size_t
+utf16le_byte_len(const uint8_t *p, size_t max)
+{
+	size_t i;
+
+	for (i = 0; i + 1 < max; i += 2)
+		if (p[i] == 0 && p[i + 1] == 0)
+			return i;
+	return max & ~(size_t)1;
+}
+
+/* FILEDESCRIPTORW field offsets (MS-RDPECLIP 2.2.5.2.3.1). */
+#define FDW_FLAGS     0
+#define FDW_ATTRS     36
+#define FDW_MTIME     56
+#define FDW_SIZE_HIGH 64
+#define FDW_SIZE_LOW  68
+#define FDW_NAME      72
+#define FDW_NAME_LEN  520
+
+ssize_t
+rdp_cliprdr_build_file_list(uint8_t *out, size_t cap,
+		const struct rdp_clip_filedesc *files, size_t n)
+{
+	size_t need = 4 + n * RDP_CLIP_FILEDESC_WIRE;
+	size_t i;
+
+	if (n > 0xffffffu || need > cap)
+		return -1;
+	memset(out, 0, need);
+	put32le(out, (uint32_t)n);
+	for (i = 0; i < n; i++) {
+		uint8_t *d = out + 4 + i * RDP_CLIP_FILEDESC_WIRE;
+		const struct rdp_clip_filedesc *f = &files[i];
+		put32le(d + FDW_FLAGS, f->flags);
+		put32le(d + FDW_ATTRS, f->attrs);
+		put32le(d + FDW_MTIME, (uint32_t)(f->mtime & 0xffffffffu));
+		put32le(d + FDW_MTIME + 4, (uint32_t)(f->mtime >> 32));
+		put32le(d + FDW_SIZE_HIGH, (uint32_t)(f->size >> 32));
+		put32le(d + FDW_SIZE_LOW, (uint32_t)(f->size & 0xffffffffu));
+		/* fileName: UTF-8 -> UTF-16LE into the fixed 520-byte field
+		 * (leave room for the terminator the memset already wrote). */
+		(void)rdp_utf8_to_utf16le(d + FDW_NAME, FDW_NAME_LEN - 2,
+			f->name, strlen(f->name));
+	}
+	return (ssize_t)need;
+}
+
+int
+rdp_cliprdr_parse_file_list(const uint8_t *p, size_t len,
+		struct rdp_clip_filedesc *files, size_t *n_io)
+{
+	size_t cap = *n_io, stored = 0, i;
+	uint32_t count;
+
+	*n_io = 0;
+	if (len < 4)
+		return -1;
+	count = le32_at(p);
+	/* Clamp the declared count to what the buffer actually holds. */
+	if ((size_t)count > (len - 4) / RDP_CLIP_FILEDESC_WIRE)
+		count = (uint32_t)((len - 4) / RDP_CLIP_FILEDESC_WIRE);
+	for (i = 0; i < count && stored < cap; i++) {
+		const uint8_t *d = p + 4 + i * RDP_CLIP_FILEDESC_WIRE;
+		struct rdp_clip_filedesc *f = &files[stored];
+		size_t nlen, got;
+
+		memset(f, 0, sizeof *f);
+		f->flags = le32_at(d + FDW_FLAGS);
+		f->attrs = le32_at(d + FDW_ATTRS);
+		f->mtime = (uint64_t)le32_at(d + FDW_MTIME)
+			| ((uint64_t)le32_at(d + FDW_MTIME + 4) << 32);
+		f->size = ((uint64_t)le32_at(d + FDW_SIZE_HIGH) << 32)
+			| (uint64_t)le32_at(d + FDW_SIZE_LOW);
+		nlen = utf16le_byte_len(d + FDW_NAME, FDW_NAME_LEN);
+		got = rdp_utf16le_to_utf8(f->name, sizeof f->name - 1,
+			d + FDW_NAME, nlen);
+		if (got == (size_t)-1)
+			got = 0;
+		f->name[got] = '\0';
+		stored++;
+	}
+	*n_io = stored;
+	return 0;
+}
+
+ssize_t
+rdp_cliprdr_build_filecontents_request(uint8_t *out, size_t cap,
+		const struct rdp_cliprdr_filereq *req)
+{
+	struct rdp_buf b;
+	uint32_t body = req->have_clip_data_id ? 28 : 24;
+
+	rdp_buf_init(&b, out, cap);
+	if (write_hdr(&b, CB_FILECONTENTS_REQUEST, 0, body) != 0) return -1;
+	if (rdp_buf_put_u32le(&b, req->stream_id) != 0) return -1;
+	if (rdp_buf_put_u32le(&b, req->lindex) != 0) return -1;
+	if (rdp_buf_put_u32le(&b, req->flags) != 0) return -1;
+	if (rdp_buf_put_u32le(&b,
+		(uint32_t)(req->position & 0xffffffffu)) != 0) return -1;
+	if (rdp_buf_put_u32le(&b, (uint32_t)(req->position >> 32)) != 0)
+		return -1;
+	if (rdp_buf_put_u32le(&b, req->cb_requested) != 0) return -1;
+	if (req->have_clip_data_id
+	    && rdp_buf_put_u32le(&b, req->clip_data_id) != 0)
+		return -1;
+	return (ssize_t)rdp_buf_used(&b);
+}
+
+int
+rdp_cliprdr_parse_filecontents_request(const uint8_t *p, size_t len,
+		struct rdp_cliprdr_filereq *req)
+{
+	if (len < 24)
+		return -1;
+	memset(req, 0, sizeof *req);
+	req->stream_id = le32_at(p + 0);
+	req->lindex = le32_at(p + 4);
+	req->flags = le32_at(p + 8);
+	req->position = (uint64_t)le32_at(p + 12)
+		| ((uint64_t)le32_at(p + 16) << 32);
+	req->cb_requested = le32_at(p + 20);
+	if (len >= 28) {
+		req->clip_data_id = le32_at(p + 24);
+		req->have_clip_data_id = 1;
+	}
+	return 0;
+}
+
+ssize_t
+rdp_cliprdr_build_filecontents_response(uint8_t *out, size_t cap,
+		uint32_t stream_id, const void *data, size_t data_len, int ok)
+{
+	struct rdp_buf b;
+
+	rdp_buf_init(&b, out, cap);
+	if (write_hdr(&b, CB_FILECONTENTS_RESPONSE,
+		ok ? CB_RESPONSE_OK : CB_RESPONSE_FAIL,
+		(uint32_t)(4 + data_len)) != 0) return -1;
+	if (rdp_buf_put_u32le(&b, stream_id) != 0) return -1;
+	if (data_len > 0 && rdp_buf_put(&b, data, data_len) != 0) return -1;
+	return (ssize_t)rdp_buf_used(&b);
+}
+
+int
+rdp_cliprdr_parse_filecontents_response(const uint8_t *p, size_t len,
+		uint32_t *stream_id, const uint8_t **data, size_t *data_len)
+{
+	if (len < 4)
+		return -1;
+	*stream_id = le32_at(p);
+	*data = p + 4;
+	*data_len = len - 4;
 	return 0;
 }
 

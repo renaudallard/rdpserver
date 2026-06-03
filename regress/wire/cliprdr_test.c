@@ -234,30 +234,34 @@ static void
 test_format_list_roundtrip(void)
 {
 	uint8_t buf[256];
-	struct rdp_clip_fmt fmts[3] = {
+	struct rdp_clip_fmt fmts[4] = {
 		{ CF_UNICODETEXT, NULL },
 		{ CB_FMT_HTML_ID, CB_FMT_NAME_HTML },
 		{ CF_DIB, NULL },
+		{ CB_FMT_FILEGROUP_ID, CB_FMT_NAME_FILEGROUP },
 	};
 	struct rdp_cliprdr_formats p;
 	ssize_t n;
 
-	n = rdp_cliprdr_build_format_list(buf, sizeof buf, 1, fmts, 3);
+	n = rdp_cliprdr_build_format_list(buf, sizeof buf, 1, fmts, 4);
 	if (n < 8) FAIL("build long n=%lld", (long long)n);
 	rdp_cliprdr_parse_format_list(buf + 8, (size_t)n - 8, 1, &p);
 	if (!p.has_unicode_text) FAIL("long: missing unicode text");
 	if (!p.has_html || p.html_id != CB_FMT_HTML_ID)
 		FAIL("long: html id %u", p.html_id);
 	if (!p.has_dib || p.dib_id != CF_DIB) FAIL("long: missing dib");
-	printf("  format list long-names: text+html+dib round-trip ok\n");
+	if (!p.has_files || p.files_id != CB_FMT_FILEGROUP_ID)
+		FAIL("long: files id %u", p.files_id);
+	printf("  format list long-names: text+html+dib+files round-trip ok\n");
 
-	n = rdp_cliprdr_build_format_list(buf, sizeof buf, 0, fmts, 3);
+	n = rdp_cliprdr_build_format_list(buf, sizeof buf, 0, fmts, 4);
 	if (n < 8) FAIL("build short n=%lld", (long long)n);
 	rdp_cliprdr_parse_format_list(buf + 8, (size_t)n - 8, 0, &p);
 	if (!p.has_unicode_text || !p.has_html
-	    || p.html_id != CB_FMT_HTML_ID || !p.has_dib)
+	    || p.html_id != CB_FMT_HTML_ID || !p.has_dib
+	    || !p.has_files || p.files_id != CB_FMT_FILEGROUP_ID)
 		FAIL("short: round-trip incomplete");
-	printf("  format list short-names: text+html+dib round-trip ok\n");
+	printf("  format list short-names: text+html+dib+files round-trip ok\n");
 }
 
 /* The CF_HTML envelope preserves the fragment bytes exactly. */
@@ -406,6 +410,100 @@ test_html_wrap_overflow(void)
 	printf("  html wrap overflow/oversize: refused ok\n");
 }
 
+/* A FileGroupDescriptorW round-trips with size, mtime, attrs and name. */
+static void
+test_file_list_roundtrip(void)
+{
+	uint8_t buf[4 + 2 * RDP_CLIP_FILEDESC_WIRE];
+	struct rdp_clip_filedesc in[2], out[4];
+	size_t n = 4;
+	ssize_t bl;
+
+	memset(in, 0, sizeof in);
+	in[0].flags = FD_ATTRIBUTES | FD_FILESIZE | FD_WRITESTIME;
+	in[0].size = 0x1234567890ull;
+	in[0].mtime = 0x01d8000012345678ull;
+	snprintf(in[0].name, sizeof in[0].name, "hello world.txt");
+	in[1].flags = FD_ATTRIBUTES;
+	in[1].attrs = FILE_ATTRIBUTE_DIRECTORY;
+	snprintf(in[1].name, sizeof in[1].name, "subdir");
+
+	bl = rdp_cliprdr_build_file_list(buf, sizeof buf, in, 2);
+	if (bl != (ssize_t)sizeof buf) FAIL("build_file_list len %lld",
+		(long long)bl);
+	if (rdp_cliprdr_parse_file_list(buf, (size_t)bl, out, &n) != 0)
+		FAIL("parse_file_list");
+	if (n != 2) FAIL("parse count %zu", n);
+	if (out[0].size != in[0].size || out[0].mtime != in[0].mtime
+	    || strcmp(out[0].name, "hello world.txt") != 0)
+		FAIL("file 0 mismatch (size=%llu name=%s)",
+			(unsigned long long)out[0].size, out[0].name);
+	if (!(out[1].attrs & FILE_ATTRIBUTE_DIRECTORY)
+	    || strcmp(out[1].name, "subdir") != 0)
+		FAIL("file 1 mismatch (name=%s)", out[1].name);
+	printf("  file list: 2-entry round-trip (size/mtime/attrs/name) ok\n");
+}
+
+/* An over-declared count is clamped to the buffer; truncation yields none. */
+static void
+test_file_list_bounds(void)
+{
+	uint8_t buf[4 + RDP_CLIP_FILEDESC_WIRE];
+	struct rdp_clip_filedesc out[4];
+	size_t n;
+
+	memset(buf, 0, sizeof buf);
+	put_le32(buf, 1000);
+	n = 4;
+	if (rdp_cliprdr_parse_file_list(buf, sizeof buf, out, &n) != 0)
+		FAIL("bounds parse");
+	if (n != 1) FAIL("over-declared count not clamped (n=%zu)", n);
+	n = 4;
+	if (rdp_cliprdr_parse_file_list(buf, 100, out, &n) != 0 || n != 0)
+		FAIL("truncated not clamped to 0 (n=%zu)", n);
+	printf("  file list bounds: over-count clamped, truncation safe ok\n");
+}
+
+/* The FILECONTENTS request and response round-trip. */
+static void
+test_filecontents_roundtrip(void)
+{
+	uint8_t buf[64];
+	struct rdp_cliprdr_filereq req, got;
+	const uint8_t payload[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+	const uint8_t *data;
+	uint32_t sid;
+	size_t dl;
+	ssize_t n;
+
+	memset(&req, 0, sizeof req);
+	req.stream_id = 7;
+	req.lindex = 2;
+	req.flags = CB_FILECONTENTS_RANGE;
+	req.position = 0x100000040ull;
+	req.cb_requested = 4096;
+	req.have_clip_data_id = 1;
+	req.clip_data_id = 99;
+	n = rdp_cliprdr_build_filecontents_request(buf, sizeof buf, &req);
+	if (n < 8) FAIL("build req");
+	if (rdp_cliprdr_parse_filecontents_request(buf + 8, (size_t)n - 8,
+		&got) != 0) FAIL("parse req");
+	if (got.stream_id != 7 || got.lindex != 2
+	    || got.flags != CB_FILECONTENTS_RANGE
+	    || got.position != 0x100000040ull || got.cb_requested != 4096
+	    || !got.have_clip_data_id || got.clip_data_id != 99)
+		FAIL("req mismatch");
+
+	n = rdp_cliprdr_build_filecontents_response(buf, sizeof buf, 7,
+		payload, 8, 1);
+	if (n < 12) FAIL("build resp");
+	if (rdp_cliprdr_parse_filecontents_response(buf + 8, (size_t)n - 8,
+		&sid, &data, &dl) != 0) FAIL("parse resp");
+	if (sid != 7 || dl != 8 || memcmp(data, payload, 8) != 0)
+		FAIL("resp mismatch (sid=%u dl=%zu)", sid, dl);
+	printf("  filecontents: request + response round-trip ok\n");
+}
+
 int
 main(void)
 {
@@ -424,6 +522,9 @@ main(void)
 	test_dib_bmp_roundtrip();
 	test_dib_bmp_palette();
 	test_dib_bmp_bounds();
+	test_file_list_roundtrip();
+	test_file_list_bounds();
+	test_filecontents_roundtrip();
 	printf("cliprdr_test: all ok\n");
 	return 0;
 }
