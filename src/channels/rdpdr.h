@@ -75,12 +75,21 @@
 
 #define RDPDR_MAX_DEVICES 32
 
+/* Printer announce flags (MS-RDPEPC 2.2.2.1 RDPDR_PRINTER_ANNOUNCE_DATA). */
+#define RDPDR_PRINTER_ANNOUNCE_FLAG_DEFAULTPRINTER 0x00000004
+
 struct rdpdr_device {
 	int      in_use;
-	int      announced;   /* an FS_DEVICE was already sent to the session */
+	int      announced;   /* an FS_DEVICE/PRINTER_DEVICE was sent to session */
 	uint32_t device_type;
 	uint32_t device_id;
 	char     name[9];
+	/* Printer devices (RDPDR_DTYP_PRINT) only: parsed from the announce
+	 * printer data.  driver_name/printer_name are UTF-8, NUL terminated;
+	 * is_default is set when the client marked this its default printer. */
+	int      is_default;
+	char     printer_name[128];
+	char     driver_name[128];
 };
 
 /* IRP header size: component(2)+packetId(2)+deviceId(4)+fileId(4)+
@@ -231,6 +240,15 @@ ssize_t rdp_rdpdr_build_irp_set_info(struct rdpdr_state *st,
 		uint32_t device_id, uint32_t file_id,
 		uint32_t info_class, const uint8_t *buf, size_t buf_len,
 		uint32_t *completion_id_out);
+
+/* Parse the device specific data of a printer DEVICE_ANNOUNCE (MS-RDPEPC
+ * 2.2.2.1 / RDPDR_PRINTER_ANNOUNCE_DATA) into d.  data points at the
+ * announce printer data, data_len is its byte count (every embedded length
+ * is bounded against it so a hostile client cannot over-read).  Fills
+ * d->driver_name, d->printer_name (UTF-8) and d->is_default.  Returns 0 on
+ * success, -1 if the fixed header does not fit in data_len. */
+int rdp_rdpdr_parse_printer(struct rdpdr_device *d,
+		const uint8_t *data, size_t data_len);
 
 /* IO completion callback info. */
 struct rdpdr_completion {

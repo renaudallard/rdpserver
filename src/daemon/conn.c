@@ -1071,11 +1071,227 @@ struct snd_state {
 	struct rdpsnd_state snd;
 };
 
+/* Per-job print state machine.  A PRINT_JOB from the session opens the
+ * printer (CREATE), writes the spool in chunks (WRITE) at advancing
+ * offsets, then closes it (CLOSE).  Each step is async: its completion
+ * advances the state and emits the next IRP.  cid is the completion id of
+ * the IRP currently in flight so a completion can be matched back. */
+#define RDPDR_MAX_PRINT_JOBS 8
+#define RDPDR_PRINT_CHUNK    8000u   /* per WRITE spool slice, safe size */
+
+enum print_job_state {
+	PJ_FREE = 0,
+	PJ_CREATE,   /* CREATE in flight; completion yields the file_id */
+	PJ_WRITE,    /* WRITE in flight; on completion advance offset */
+	PJ_CLOSE     /* CLOSE in flight; on completion free the job */
+};
+
+struct print_job {
+	enum print_job_state state;
+	uint32_t device_id;
+	uint32_t file_id;     /* from CREATE completion */
+	uint32_t cid;         /* completion id of the in-flight IRP */
+	uint8_t *spool;       /* owned copy of the job's spool bytes */
+	size_t   spool_len;
+	size_t   off;         /* bytes already written */
+};
+
 struct dr_state {
 	int      enabled;
 	uint16_t channel_id;
 	struct rdpdr_state dr;
+	struct print_job jobs[RDPDR_MAX_PRINT_JOBS];
 };
+
+/* Free a print job's spool copy and return the slot to the pool.  Safe to
+ * call on an already free job. */
+static void
+print_job_free(struct print_job *j)
+{
+	free(j->spool);
+	j->spool = NULL;
+	j->spool_len = 0;
+	j->off = 0;
+	j->state = PJ_FREE;
+	j->device_id = 0;
+	j->file_id = 0;
+	j->cid = 0;
+}
+
+/* True if device_id names a printer device in the parsed device list. */
+static int
+dr_is_printer_device(const struct dr_state *dr, uint32_t device_id)
+{
+	uint32_t i;
+
+	for (i = 0; i < dr->dr.device_count && i < RDPDR_MAX_DEVICES; i++) {
+		const struct rdpdr_device *d = &dr->dr.devices[i];
+		if (d->in_use && d->device_id == device_id)
+			return d->device_type == RDPDR_DTYP_PRINT;
+	}
+	return 0;
+}
+
+/* Find the in-flight print job whose current IRP has completion id cid. */
+static struct print_job *
+print_job_by_cid(struct dr_state *dr, uint32_t cid)
+{
+	int i;
+
+	for (i = 0; i < RDPDR_MAX_PRINT_JOBS; i++)
+		if (dr->jobs[i].state != PJ_FREE && dr->jobs[i].cid == cid)
+			return &dr->jobs[i];
+	return NULL;
+}
+
+/* Emit the next WRITE IRP for job j (one RDPDR_PRINT_CHUNK slice at j->off)
+ * and record its completion id.  Returns 0 on success, -1 on failure (the
+ * caller frees the job). */
+static int
+print_job_send_write(struct rdp_tls *t, uint16_t user_id,
+		struct dr_state *dr, struct print_job *j)
+{
+	uint8_t irp[IRP_HDR_SIZE + 32 + RDPDR_PRINT_CHUNK];
+	size_t chunk = j->spool_len - j->off;
+	uint32_t cid = 0;
+	ssize_t in;
+
+	if (chunk > RDPDR_PRINT_CHUNK)
+		chunk = RDPDR_PRINT_CHUNK;
+	in = rdp_rdpdr_build_irp_write(&dr->dr, irp, sizeof irp,
+		j->device_id, j->file_id, (uint64_t)j->off,
+		j->spool + j->off, chunk, &cid);
+	if (in <= 0)
+		return -1;
+	j->cid = cid;
+	j->state = PJ_WRITE;
+	(void)send_clip_pdu(t, user_id, dr->channel_id, irp, (size_t)in);
+	return 0;
+}
+
+/* Emit the CLOSE IRP for job j and record its completion id.  Returns 0 on
+ * success, -1 on failure (the caller frees the job). */
+static int
+print_job_send_close(struct rdp_tls *t, uint16_t user_id,
+		struct dr_state *dr, struct print_job *j)
+{
+	uint8_t irp[IRP_HDR_SIZE + 32];
+	uint32_t cid = 0;
+	ssize_t in;
+
+	in = rdp_rdpdr_build_irp_close(&dr->dr, irp, sizeof irp,
+		j->device_id, j->file_id, &cid);
+	if (in <= 0)
+		return -1;
+	j->cid = cid;
+	j->state = PJ_CLOSE;
+	(void)send_clip_pdu(t, user_id, dr->channel_id, irp, (size_t)in);
+	return 0;
+}
+
+/* Start a print job: take ownership of a spool copy and emit the CREATE IRP
+ * to open the printer (DesiredAccess = GENERIC_WRITE).  spool is consumed
+ * (freed) on every path so the caller never frees it.  Returns 0 if the job
+ * is in flight, -1 if it could not be started. */
+static int
+print_job_start(struct rdp_tls *t, uint16_t user_id, struct dr_state *dr,
+		uint32_t device_id, uint8_t *spool, size_t spool_len)
+{
+	uint8_t irp[IRP_HDR_SIZE + 64 + 2];
+	struct print_job *j = NULL;
+	uint32_t cid = 0;
+	ssize_t in;
+	int i;
+
+	for (i = 0; i < RDPDR_MAX_PRINT_JOBS; i++)
+		if (dr->jobs[i].state == PJ_FREE) {
+			j = &dr->jobs[i];
+			break;
+		}
+	if (j == NULL) {
+		rdp_warn("rdpdr: no free print job slot, dropping job");
+		free(spool);
+		return -1;
+	}
+
+	/* Open the printer.  Empty path, GENERIC_WRITE access, disposition
+	 * and options 0 per MS-RDPEPC printing. */
+	in = rdp_rdpdr_build_irp_create(&dr->dr, irp, sizeof irp,
+		device_id, "", 0x40000000u /* GENERIC_WRITE */, 0, 0, &cid);
+	if (in <= 0) {
+		free(spool);
+		return -1;
+	}
+	j->state = PJ_CREATE;
+	j->device_id = device_id;
+	j->file_id = 0;
+	j->cid = cid;
+	j->spool = spool;
+	j->spool_len = spool_len;
+	j->off = 0;
+	(void)send_clip_pdu(t, user_id, dr->channel_id, irp, (size_t)in);
+	return 0;
+}
+
+/* Advance the print job that the completion comp belongs to.  Called only
+ * for completions on printer devices.  Frees the job on CLOSE completion or
+ * on any error. */
+static void
+print_job_on_completion(struct rdp_tls *t, uint16_t user_id,
+		struct dr_state *dr, const struct rdpdr_completion *comp)
+{
+	struct print_job *j = print_job_by_cid(dr, comp->completion_id);
+
+	if (j == NULL) {
+		rdp_warn("rdpdr: print completion cid=%u has no job",
+			(unsigned)comp->completion_id);
+		return;
+	}
+	if (comp->io_status != STATUS_SUCCESS) {
+		rdp_warn("rdpdr: print job dev=%u failed status=0x%08x "
+			"state=%d", (unsigned)j->device_id,
+			(unsigned)comp->io_status, (int)j->state);
+		print_job_free(j);
+		return;
+	}
+
+	switch (j->state) {
+	case PJ_CREATE:
+		/* CREATE completion body starts with the FileId (u32). */
+		if (comp->data_len >= 4)
+			j->file_id = ld32_safe(comp->data);
+		if (j->spool_len == 0) {
+			/* Nothing to write; close straight away. */
+			if (print_job_send_close(t, user_id, dr, j) != 0)
+				print_job_free(j);
+			break;
+		}
+		if (print_job_send_write(t, user_id, dr, j) != 0)
+			print_job_free(j);
+		break;
+	case PJ_WRITE:
+		/* The completion reports how many bytes were written; trust
+		 * the chunk size we sent and advance by it. */
+		j->off += (j->spool_len - j->off) > RDPDR_PRINT_CHUNK
+			? RDPDR_PRINT_CHUNK : (j->spool_len - j->off);
+		if (j->off < j->spool_len) {
+			if (print_job_send_write(t, user_id, dr, j) != 0)
+				print_job_free(j);
+		} else {
+			if (print_job_send_close(t, user_id, dr, j) != 0)
+				print_job_free(j);
+		}
+		break;
+	case PJ_CLOSE:
+		rdp_debug("rdpdr: print job dev=%u done (%zu bytes)",
+			(unsigned)j->device_id, j->spool_len);
+		print_job_free(j);
+		break;
+	default:
+		print_job_free(j);
+		break;
+	}
+}
 
 /* Set from cfg in rdp_conn_run; used during channel dispatch, which
  * runs before the per-connection setup, so declared at file scope. */
@@ -1240,7 +1456,16 @@ maybe_dispatch_clip(struct rdp_tls *t, int be_fd,
 					roff += plen;
 				}
 			}
-			if (rc == 1 && be_fd >= 0) {
+			/* Route the completion.  A completion for a printer
+			 * device drives the per-job print state machine; a
+			 * completion for any other device becomes an FS_RSP to
+			 * the session.  The two never share a completion id, so
+			 * the device type of the completing device decides. */
+			if (rc == 1 && dr_is_printer_device(dr,
+			    compl_info.device_id)) {
+				print_job_on_completion(t, uid, dr,
+				    &compl_info);
+			} else if (rc == 1 && be_fd >= 0) {
 				struct rdp_be_fs_rsp rsp;
 				rsp.req_id = compl_info.be_req_id;
 				rsp.status = compl_info.io_status;
@@ -1259,32 +1484,54 @@ maybe_dispatch_clip(struct rdp_tls *t, int be_fd,
 					    compl_info.data,
 					    compl_info.data_len);
 			}
-			/* Announce any newly enumerated file system drives to
-			 * the session so its FUSE mount can present them.  The
-			 * device list is parsed inside rdp_rdpdr_handle, so we
-			 * scan for unannounced filesystem devices here. */
+			/* Announce any newly enumerated drives and printers to
+			 * the session.  The device list is parsed inside
+			 * rdp_rdpdr_handle, so we scan for unannounced devices
+			 * here.  Drives become an FS_DEVICE (the FUSE mount
+			 * presents them); printers become a PRINTER_DEVICE. */
 			if (be_fd >= 0) {
 				uint32_t di;
 				for (di = 0; di < dr->dr.device_count
 				    && di < RDPDR_MAX_DEVICES; di++) {
 					struct rdpdr_device *d =
 					    &dr->dr.devices[di];
-					struct rdp_be_fs_device fsd;
 					if (!d->in_use || d->announced)
 						continue;
 					if (d->device_type
-					    != RDPDR_DTYP_FILESYSTEM)
-						continue;
-					memset(&fsd, 0, sizeof fsd);
-					fsd.device_id = d->device_id;
-					fsd.device_type = d->device_type;
-					fsd.added = 1;
-					memcpy(fsd.name, d->name,
-					    sizeof d->name);
-					if (rdp_be_send(be_fd,
-					    RDP_BE_FS_DEVICE,
-					    &fsd, sizeof fsd) == 0)
-						d->announced = 1;
+					    == RDPDR_DTYP_FILESYSTEM) {
+						struct rdp_be_fs_device fsd;
+						memset(&fsd, 0, sizeof fsd);
+						fsd.device_id = d->device_id;
+						fsd.device_type = d->device_type;
+						fsd.added = 1;
+						memcpy(fsd.name, d->name,
+						    sizeof d->name);
+						if (rdp_be_send(be_fd,
+						    RDP_BE_FS_DEVICE,
+						    &fsd, sizeof fsd) == 0)
+							d->announced = 1;
+					} else if (d->device_type
+					    == RDPDR_DTYP_PRINT) {
+						struct rdp_be_printer_device pd;
+						memset(&pd, 0, sizeof pd);
+						pd.device_id = d->device_id;
+						pd.flags = d->is_default
+						    ? RDP_BE_PRINTER_FLAG_DEFAULT
+						    : 0u;
+						memcpy(pd.name, d->printer_name,
+						    sizeof pd.name);
+						pd.name[sizeof pd.name - 1] =
+						    '\0';
+						memcpy(pd.driver,
+						    d->driver_name,
+						    sizeof pd.driver);
+						pd.driver[sizeof pd.driver - 1] =
+						    '\0';
+						if (rdp_be_send(be_fd,
+						    RDP_BE_PRINTER_DEVICE,
+						    &pd, sizeof pd) == 0)
+							d->announced = 1;
+					}
 				}
 			}
 		}
@@ -2526,6 +2773,47 @@ run_proxy(struct rdp_tls *t, int be_fd,
 				}
 				free(irp);
 				free(payload);
+			} else if (type == RDP_BE_PRINT_JOB
+			    && dr->enabled
+			    && len >= sizeof(struct rdp_be_print_job_hdr)) {
+				struct rdp_be_print_job_hdr pjh;
+				uint32_t spool_len = len
+				    - (uint32_t)sizeof pjh;
+				uint8_t *spool = NULL;
+				if (rdp_read_full(be_fd, &pjh, sizeof pjh)
+				    != sizeof pjh) goto out;
+				if (spool_len > RDP_BE_PRINT_JOB_MAX_SPOOL) {
+					/* Drain the oversize spool so the stream
+					 * stays framed, then drop the job. */
+					uint8_t junk[1024];
+					uint32_t skip = spool_len;
+					while (skip > 0) {
+						uint32_t c = skip > sizeof junk
+						    ? (uint32_t)sizeof junk
+						    : skip;
+						if (rdp_read_full(be_fd, junk,
+						    c) <= 0) goto out;
+						skip -= c;
+					}
+					rdp_warn("rdpdr: print job too large "
+					    "(%u bytes), dropped",
+					    (unsigned)spool_len);
+					continue;
+				}
+				if (spool_len > 0) {
+					spool = malloc(spool_len);
+					if (spool == NULL) goto out;
+					if (rdp_read_full(be_fd, spool,
+					    spool_len)
+					    != (ssize_t)spool_len) {
+						free(spool);
+						goto out;
+					}
+				}
+				/* print_job_start takes ownership of spool and
+				 * frees it on every path. */
+				(void)print_job_start(t, user_id, dr,
+				    pjh.device_id, spool, spool_len);
 			} else if (type == RDP_BE_BYE) {
 				break;
 			} else {
@@ -2556,6 +2844,12 @@ out:
 	if (prog != NULL) rdp_progressive_close(prog);
 	free(frame_buf);
 	rdp_drdynvc_cleanup(&dv->dv);
+	/* Free any in-flight print job spool copies. */
+	{
+		int pj;
+		for (pj = 0; pj < RDPDR_MAX_PRINT_JOBS; pj++)
+			print_job_free(&dr->jobs[pj]);
+	}
 }
 
 /* Extract the bare IP (no port) from a peer string formatted as

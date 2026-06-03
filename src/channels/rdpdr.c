@@ -34,6 +34,7 @@
 
 #include "../include/rdp_log.h"
 #include "../common/buf.h"
+#include "../common/utf16.h"
 
 #include <string.h>
 
@@ -219,12 +220,85 @@ handle_client_name(struct rdpdr_state *st,
 	return 0;
 }
 
+/* Decode a UTF-16LE wire field of ulen bytes into the dst UTF-8 buffer of
+ * dcap bytes, always NUL terminating.  The wire field usually carries its
+ * own trailing UTF-16 NUL; drop it so the UTF-8 length is the real string.
+ * On malformed UTF-16 (rdp_utf16le_to_utf8 returns (size_t)-1) or overflow
+ * the buffer is left empty rather than partially decoded. */
+static void
+decode_utf16_field(char *dst, size_t dcap, const uint8_t *src, size_t ulen)
+{
+	size_t got;
+
+	if (dcap == 0)
+		return;
+	dst[0] = '\0';
+	if (ulen >= 2 && src[ulen - 2] == 0 && src[ulen - 1] == 0)
+		ulen -= 2;
+	if (ulen == 0)
+		return;
+	got = rdp_utf16le_to_utf8(dst, dcap - 1, src, ulen);
+	if (got == (size_t)-1 || got >= dcap) {
+		dst[0] = '\0';
+		return;
+	}
+	dst[got] = '\0';
+}
+
+int
+rdp_rdpdr_parse_printer(struct rdpdr_device *d,
+		const uint8_t *data, size_t data_len)
+{
+	uint32_t flags, pnp_len, drv_len, prn_len;
+	size_t off;
+
+	d->is_default = 0;
+	d->printer_name[0] = '\0';
+	d->driver_name[0] = '\0';
+
+	/* Fixed header: flags, codePage, pnpNameLen, driverNameLen,
+	 * printNameLen, cachedFieldsLen = 24 bytes. */
+	if (data_len < 24)
+		return -1;
+	flags = ld32(data);
+	/* data + 4 is codePage, unused. */
+	pnp_len = ld32(data + 8);
+	drv_len = ld32(data + 12);
+	prn_len = ld32(data + 16);
+	/* data + 20 is cachedFieldsLen; the cached blob is not parsed. */
+	off = 24;
+
+	d->is_default =
+		(flags & RDPDR_PRINTER_ANNOUNCE_FLAG_DEFAULTPRINTER) ? 1 : 0;
+
+	/* Bound every variable field against the bytes that remain.  A field
+	 * whose declared length runs past the announce is treated as empty
+	 * rather than read past the buffer. */
+	if (pnp_len > data_len - off)
+		return 0;
+	off += pnp_len;
+
+	if (drv_len > data_len - off)
+		return 0;
+	decode_utf16_field(d->driver_name, sizeof d->driver_name,
+		data + off, drv_len);
+	off += drv_len;
+
+	if (prn_len > data_len - off)
+		return 0;
+	decode_utf16_field(d->printer_name, sizeof d->printer_name,
+		data + off, prn_len);
+
+	return 0;
+}
+
 static int
 handle_device_list(struct rdpdr_state *st,
 		const uint8_t *body, size_t blen,
 		uint8_t *resp, size_t resp_cap, size_t *resp_len)
 {
-	uint32_t count, i;
+	uint32_t count, i, k;
+	int dup;
 	size_t off = 0, roff = *resp_len;
 
 	if (blen < 4) return -1;
@@ -242,19 +316,39 @@ handle_device_list(struct rdpdr_state *st,
 		name[8] = '\0';
 		data_len = ld32(body + off + 16);
 		if (data_len > blen - off - 20) break;
-		off += 20 + data_len;
 
 		rdp_info("rdpdr: device %u: type=%s id=%u name='%s'",
 			i, device_type_name(dt), (unsigned)did, name);
 
-		if (st->device_count < RDPDR_MAX_DEVICES) {
+		dup = 0;
+		/* Ignore a duplicate device id so each id maps to one device
+		 * type for the connection lifetime (a lookup by id would
+		 * otherwise be ambiguous). */
+		for (k = 0; k < st->device_count; k++)
+			if (st->devices[k].in_use
+			    && st->devices[k].device_id == did) {
+				dup = 1;
+				break;
+			}
+		if (!dup && st->device_count < RDPDR_MAX_DEVICES) {
 			struct rdpdr_device *d = &st->devices[st->device_count];
 			d->in_use = 1;
 			d->device_type = dt;
 			d->device_id = did;
 			memcpy(d->name, name, sizeof d->name);
+			if (dt == RDPDR_DTYP_PRINT) {
+				rdp_rdpdr_parse_printer(d,
+					body + off + 20, data_len);
+				rdp_info("rdpdr: printer id=%u name='%s' "
+					"driver='%s'%s",
+					(unsigned)did, d->printer_name,
+					d->driver_name,
+					d->is_default ? " (default)" : "");
+			}
 			st->device_count++;
 		}
+
+		off += 20 + data_len;
 
 		if (roff + 12 <= resp_cap) {
 			ssize_t rn = rdp_rdpdr_build_device_reply(
@@ -604,7 +698,14 @@ rdp_rdpdr_handle(struct rdpdr_state *st,
 				    && st->pending[i].completion_id == cid) {
 					if (comp != NULL) {
 						comp->completion_id = cid;
-						comp->device_id = did;
+						/* Route on the device the IRP actually
+						 * targeted, recorded when we built it,
+						 * not the client-echoed DeviceId: a
+						 * spoofed id must not misroute a drive
+						 * completion to the printer path (or the
+						 * reverse) and drop the FS response. */
+						comp->device_id =
+						    st->pending[i].device_id;
 						comp->major_function =
 						    st->pending[i].major_function;
 						comp->io_status = ios;

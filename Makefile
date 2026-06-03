@@ -212,10 +212,10 @@ regress/wire/rdp_pdu_test: regress/wire/rdp_pdu_test.o $(WIRE_LIB) $(COMMON_LIB)
 # rdpdr.o and the common log object are recompiled so the instrumentation
 # covers the code under test.
 regress/wire/rdpdr_test: regress/wire/rdpdr_test.c src/channels/rdpdr.c \
-		src/common/log.c
+		src/common/log.c src/common/utf16.c
 	$(CC) $(CFLAGS) $(TEST_SAN) -Isrc/include \
 		-o $@ regress/wire/rdpdr_test.c src/channels/rdpdr.c \
-		src/common/log.c
+		src/common/log.c src/common/utf16.c
 
 # CLIPRDR channel reassembly test.  cliprdr.c is recompiled with the test;
 # $(TEST_SAN) covers the attacker-controlled fragment-length bounds.

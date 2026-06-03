@@ -101,6 +101,17 @@
 #define RDP_BE_CLIP_FILE_REQUEST 18u  /* worker -> session */
 #define RDP_BE_CLIP_FILE_DATA    19u  /* session -> worker */
 
+/* Printer redirection (MS-RDPEPC).
+ *   PRINTER_DEVICE  worker -> session: a redirected printer was announced in
+ *                   the RDPDR device list.  Carries the parsed printer/driver
+ *                   names and a default flag so the session can create the
+ *                   matching CUPS queue.
+ *   PRINT_JOB       session -> worker: raw spool bytes to print on a
+ *                   redirected printer.  The worker drives the MS-RDPEPC
+ *                   CREATE/WRITE.../CLOSE IRP sequence to the device. */
+#define RDP_BE_PRINTER_DEVICE 20u  /* worker -> session */
+#define RDP_BE_PRINT_JOB      21u  /* session -> worker */
+
 #define RDP_FS_OPEN        1u
 #define RDP_FS_READ        2u
 #define RDP_FS_WRITE       3u
@@ -171,6 +182,32 @@ struct rdp_be_fs_device {
 	char     name[9];
 	uint8_t  pad[2];
 };
+
+/* PRINTER_DEVICE payload (worker -> session): announce one redirected
+ * printer parsed from the RDPDR device list.  name and driver are the
+ * UTF-8 printer name and Windows driver name from the client's announce,
+ * NUL terminated.  flags bit 0 (RDP_BE_PRINTER_FLAG_DEFAULT) marks the
+ * client's default printer. */
+#define RDP_BE_PRINTER_FLAG_DEFAULT 0x00000001u
+struct rdp_be_printer_device {
+	uint32_t device_id;
+	uint32_t flags;
+	char     name[128];
+	char     driver[128];
+};
+
+/* PRINT_JOB payload (session -> worker): a small fixed header followed by
+ * the raw spool bytes to print on device_id.  The spool bytes are the
+ * trailing payload (frame length minus sizeof the header), bounded by the
+ * worker at RDP_BE_PRINT_JOB_MAX_SPOOL.  One PRINT_JOB carries one complete
+ * job; the session must keep a single job within that cap. */
+struct rdp_be_print_job_hdr {
+	uint32_t device_id;
+};
+
+/* Upper bound on the spool bytes the worker accepts in one PRINT_JOB, the
+ * same 4 MiB ceiling the clip and FS write paths use. */
+#define RDP_BE_PRINT_JOB_MAX_SPOOL (4u * 1024u * 1024u)
 
 /* Semantic clipboard formats carried over the backend.  CLIP_OFFER is a
  * bitmap of these; CLIP_REQUEST and the CLIP_DATA header select one.  For

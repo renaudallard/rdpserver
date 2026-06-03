@@ -313,6 +313,211 @@ test_irp_cap_sizing(void)
 	}
 }
 
+static void
+wr32(uint8_t *p, uint32_t v)
+{
+	p[0] = (uint8_t)(v & 0xff);
+	p[1] = (uint8_t)((v >> 8) & 0xff);
+	p[2] = (uint8_t)((v >> 16) & 0xff);
+	p[3] = (uint8_t)((v >> 24) & 0xff);
+}
+
+/* Encode an ASCII string s as UTF-16LE plus a trailing UTF-16 NUL into dst.
+ * Returns the byte length written (including the terminator). */
+static size_t
+ascii_to_utf16le(uint8_t *dst, const char *s)
+{
+	size_t i = 0;
+	for (; *s; s++) {
+		dst[i++] = (uint8_t)*s;
+		dst[i++] = 0;
+	}
+	dst[i++] = 0;
+	dst[i++] = 0;
+	return i;
+}
+
+/*
+ * Printer DEVICE_ANNOUNCE parse (MS-RDPEPC 2.2.2.1).  Craft the announce
+ * printer data carrying a known driver and printer name and the default
+ * flag; assert the parsed rdpdr_device fields.
+ */
+static void
+test_printer_announce(void)
+{
+	struct rdpdr_device d;
+	uint8_t buf[256];
+	size_t off;
+	uint32_t pnp_len, drv_len, prn_len;
+
+	memset(buf, 0, sizeof buf);
+	off = 24;
+	/* pnpName (ignored by us): "USB001". */
+	pnp_len = (uint32_t)ascii_to_utf16le(buf + off, "USB001");
+	off += pnp_len;
+	/* driverName. */
+	drv_len = (uint32_t)ascii_to_utf16le(buf + off, "HP LaserJet");
+	off += drv_len;
+	/* printerName. */
+	prn_len = (uint32_t)ascii_to_utf16le(buf + off, "Office Printer");
+	off += prn_len;
+	/* Fixed header. */
+	wr32(buf + 0, RDPDR_PRINTER_ANNOUNCE_FLAG_DEFAULTPRINTER); /* flags */
+	wr32(buf + 4, 0);            /* codePage */
+	wr32(buf + 8, pnp_len);      /* pnpNameLen */
+	wr32(buf + 12, drv_len);     /* driverNameLen */
+	wr32(buf + 16, prn_len);     /* printNameLen */
+	wr32(buf + 20, 0);           /* cachedFieldsLen */
+
+	memset(&d, 0, sizeof d);
+	if (rdp_rdpdr_parse_printer(&d, buf, off) != 0)
+		FAIL("printer parse rejected a valid announce");
+	if (strcmp(d.driver_name, "HP LaserJet") != 0)
+		FAIL("printer driver '%s'", d.driver_name);
+	if (strcmp(d.printer_name, "Office Printer") != 0)
+		FAIL("printer name '%s'", d.printer_name);
+	if (!d.is_default)
+		FAIL("printer default flag not parsed");
+
+	/* Without the default flag is_default must be 0. */
+	wr32(buf + 0, 0);
+	memset(&d, 0, sizeof d);
+	if (rdp_rdpdr_parse_printer(&d, buf, off) != 0)
+		FAIL("printer parse rejected a valid announce (no default)");
+	if (d.is_default)
+		FAIL("printer default flag set when it should not be");
+	if (strcmp(d.driver_name, "HP LaserJet") != 0)
+		FAIL("printer driver (no default) '%s'", d.driver_name);
+}
+
+/*
+ * Hostile lengths must never over-read past data_len.  Built under
+ * $(TEST_SAN), so an over-read trips ASan.  A too-short fixed header is
+ * rejected; oversize field lengths leave the string empty without reading
+ * past the buffer.
+ */
+static void
+test_printer_announce_bounds(void)
+{
+	struct rdpdr_device d;
+	uint8_t buf[64];
+
+	/* Fixed header shorter than 24 bytes is rejected. */
+	memset(buf, 0, sizeof buf);
+	memset(&d, 0, sizeof d);
+	if (rdp_rdpdr_parse_printer(&d, buf, 23) != -1)
+		FAIL("printer parse accepted a too-short header");
+
+	/* driverNameLen claims more than the announce holds.  With a 24-byte
+	 * header and no trailing bytes, any nonzero field length overruns and
+	 * must be treated as empty, not read. */
+	memset(buf, 0, sizeof buf);
+	wr32(buf + 8, 0);         /* pnpNameLen */
+	wr32(buf + 12, 0x10000);  /* driverNameLen way past the buffer */
+	wr32(buf + 16, 0);        /* printNameLen */
+	memset(&d, 0, sizeof d);
+	if (rdp_rdpdr_parse_printer(&d, buf, 24) != 0)
+		FAIL("printer parse should accept header with empty fields");
+	if (d.driver_name[0] != '\0')
+		FAIL("oversize driver field should leave name empty");
+	if (d.printer_name[0] != '\0')
+		FAIL("printer name should be empty");
+
+	/* pnpNameLen consumes everything; driverNameLen then overruns. */
+	memset(buf, 0, sizeof buf);
+	wr32(buf + 8, 8);         /* pnpNameLen = exactly the 8 trailing bytes */
+	wr32(buf + 12, 4);        /* driverNameLen overruns (nothing left) */
+	wr32(buf + 16, 0);
+	memset(&d, 0, sizeof d);
+	/* data_len = 24 header + 8 pnp bytes = 32. */
+	if (rdp_rdpdr_parse_printer(&d, buf, 32) != 0)
+		FAIL("printer parse with consuming pnp field failed");
+	if (d.driver_name[0] != '\0')
+		FAIL("overrunning driver after pnp must stay empty");
+}
+
+/*
+ * Print job IRP sequence at the builder layer.  The conn.c state machine
+ * drives CREATE -> WRITE... -> CLOSE; here we mirror its builder calls and
+ * assert the WRITE carries the spool bytes at the right offsets and the
+ * CLOSE targets the file id from the CREATE completion.  The completion
+ * routing itself lives in conn.c (struct print_job) and is out of scope for
+ * this unit test, which exercises only the rdpdr.c builders it relies on.
+ */
+static void
+test_print_job_sequence(void)
+{
+	struct rdpdr_state st;
+	uint8_t irp[64 + 16];
+	uint8_t big[64 + 8000];
+	const uint8_t spool[12] = {
+		'S', 'P', 'O', 'O', 'L', 0, 1, 2, 3, 4, 5, 6
+	};
+	uint32_t file_id = 0x77;
+	uint32_t cid = 0;
+	ssize_t n;
+
+	memset(&st, 0, sizeof st);
+
+	/* CREATE: open the printer with GENERIC_WRITE, empty path. */
+	n = rdp_rdpdr_build_irp_create(&st, irp, sizeof irp,
+		0x09, "", 0x40000000u, 0, 0, &cid);
+	if (n <= 0)
+		FAIL("print CREATE build failed");
+	check_irp_header(irp, 0x09, 0, IRP_MJ_CREATE);
+	if (rd32(irp + 24) != 0x40000000u)
+		FAIL("print CREATE access 0x%08x", rd32(irp + 24));
+
+	/* WRITE the whole spool (fits in one chunk) at offset 0. */
+	n = rdp_rdpdr_build_irp_write(&st, irp, sizeof irp,
+		0x09, file_id, 0, spool, sizeof spool, &cid);
+	if (n != (ssize_t)(56 + sizeof spool))
+		FAIL("print WRITE return %lld", (long long)n);
+	check_irp_header(irp, 0x09, file_id, IRP_MJ_WRITE);
+	if (rd32(irp + 24) != sizeof spool)
+		FAIL("print WRITE length %u", rd32(irp + 24));
+	if (rd32(irp + 28) != 0)
+		FAIL("print WRITE offset lo nonzero");
+	if (memcmp(irp + 56, spool, sizeof spool) != 0)
+		FAIL("print WRITE spool mismatch");
+
+	/* A spool larger than the 8000 byte chunk is written in slices at
+	 * advancing offsets; verify the second slice carries offset 8000. */
+	{
+		uint8_t blob[10000];
+		size_t i;
+		for (i = 0; i < sizeof blob; i++)
+			blob[i] = (uint8_t)(i & 0xff);
+		/* First slice: 8000 bytes at offset 0. */
+		n = rdp_rdpdr_build_irp_write(&st, big, sizeof big,
+			0x09, file_id, 0, blob, 8000, &cid);
+		if (n != (ssize_t)(56 + 8000))
+			FAIL("print WRITE slice1 return %lld", (long long)n);
+		if (rd32(big + 24) != 8000)
+			FAIL("print WRITE slice1 length");
+		if (memcmp(big + 56, blob, 8000) != 0)
+			FAIL("print WRITE slice1 data");
+		/* Second slice: remaining 2000 bytes at offset 8000. */
+		n = rdp_rdpdr_build_irp_write(&st, big, sizeof big,
+			0x09, file_id, 8000, blob + 8000, 2000, &cid);
+		if (n != (ssize_t)(56 + 2000))
+			FAIL("print WRITE slice2 return %lld", (long long)n);
+		if (rd32(big + 24) != 2000)
+			FAIL("print WRITE slice2 length");
+		if (rd32(big + 28) != 8000)
+			FAIL("print WRITE slice2 offset %u", rd32(big + 28));
+		if (memcmp(big + 56, blob + 8000, 2000) != 0)
+			FAIL("print WRITE slice2 data");
+	}
+
+	/* CLOSE targets the file id learned from the CREATE completion. */
+	n = rdp_rdpdr_build_irp_close(&st, irp, sizeof irp,
+		0x09, file_id, &cid);
+	if (n <= 0)
+		FAIL("print CLOSE build failed");
+	check_irp_header(irp, 0x09, file_id, IRP_MJ_CLOSE);
+}
+
 int
 main(void)
 {
@@ -321,5 +526,8 @@ main(void)
 	test_set_info();
 	test_completion_bounds();
 	test_irp_cap_sizing();
+	test_printer_announce();
+	test_printer_announce_bounds();
+	test_print_job_sequence();
 	return 0;
 }
