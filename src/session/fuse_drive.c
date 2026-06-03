@@ -2377,16 +2377,26 @@ fuse_drive_init(int fuse_fd, int be_fd)
 	if (fstat(fuse_fd, &sb) != 0 || !S_ISCHR(sb.st_mode))
 		return NULL;
 
-	/* The fd we inherit is blocking.  fuse_drive_process drains several
-	 * requests per call and relies on read() returning EAGAIN to stop;
-	 * on a blocking fd the second read would stall the single-threaded
-	 * session loop, so switch to non-blocking. */
+	/* The fd we inherit is blocking.  The Linux raw /dev/fuse backend
+	 * drains several requests per call and relies on read() returning
+	 * EAGAIN to stop, so it needs the fd non-blocking.  The OpenBSD fusebuf
+	 * device does not support FIONBIO (its cdevsw has no d_ioctl, so
+	 * F_SETFL O_NONBLOCK returns ENODEV); it instead reads exactly one
+	 * fusebuf per call and re-polls, so a blocking fd is correct there.
+	 * Attempt non-blocking but treat a failure as fatal only on Linux. */
 	{
 		int fl = fcntl(fuse_fd, F_GETFL, 0);
 		if (fl < 0 || fcntl(fuse_fd, F_SETFL, fl | O_NONBLOCK) < 0) {
+#if HAVE_OBSD_FUSE
+			/* Expected on the OpenBSD fusefs device; one-shot reads
+			 * after poll keep the loop from blocking. */
+			rdp_debug("fuse drive: fd %d stays blocking (%s)",
+				fuse_fd, strerror(errno));
+#else
 			rdp_warn("fuse drive: cannot set O_NONBLOCK on fd %d: %s",
 				fuse_fd, strerror(errno));
 			return NULL;
+#endif
 		}
 	}
 

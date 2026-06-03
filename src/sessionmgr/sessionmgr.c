@@ -66,6 +66,12 @@
 #if HAVE_FUSE
 #include <sys/mount.h>   /* mount(2), umount2(2), MS_* */
 #endif
+#if HAVE_OBSD_FUSE
+#include <sys/queue.h>   /* SIMPLEQ_ENTRY, needed by <sys/fusebuf.h> */
+#include <sys/statvfs.h> /* struct statvfs, used in the fusebuf FD union */
+#include <sys/mount.h>   /* mount(2), unmount(2), MOUNT_FUSEFS, MNT_*, fusefs_args */
+#include <sys/fusebuf.h> /* FUSEBUFMAXSIZE */
+#endif
 
 #include <errno.h>
 #include <fcntl.h>
@@ -96,7 +102,7 @@ on_signal(int sig)
 	want_shutdown = 1;
 }
 
-#if HAVE_FUSE
+#if HAVE_FUSE || HAVE_OBSD_FUSE
 static void fuse_mount_reap(pid_t pid);
 #endif
 
@@ -107,8 +113,9 @@ on_sigchld(int sig)
 	pid_t p;
 	(void)sig;
 	while ((p = waitpid(-1, NULL, WNOHANG)) > 0) {
-#if HAVE_FUSE
-		/* Unmount the dead session's RemoteDrive, if any. */
+#if HAVE_FUSE || HAVE_OBSD_FUSE
+		/* Tear down (Linux) or queue the teardown of (OpenBSD) the
+		 * dead session's RemoteDrive, if any. */
 		fuse_mount_reap(p);
 #else
 		(void)p;
@@ -351,13 +358,557 @@ fuse_mount_setup(const struct passwd *pw, char *mp_out, size_t mp_cap)
 }
 #endif /* HAVE_FUSE */
 
+#if HAVE_OBSD_FUSE
+/*
+ * OpenBSD privileged mount-helper.
+ *
+ * mount(2)/unmount(2) are root-only and forbidden by pledge, so the pledged
+ * rdp-sessionmgr cannot mount per session.  Before pledging and before any
+ * privilege drop, main() forks an unpledged root child -- the mount-helper --
+ * connected to the parent by a SOCK_STREAM socketpair.  The parent (which
+ * pledges with sendfd/recvfd) sends one fixed-size request per mount/unmount;
+ * the helper performs the privileged syscall and, for a mount, hands the open
+ * /dev/fuse fd back over SCM_RIGHTS.  The parent then dup2()s that fd to fd 4
+ * in the session child, exactly as the Linux path passes its own fuse fd.
+ *
+ * The protocol is a single fixed-size struct in each direction with no
+ * variable-length field and no allocation from any untrusted length, so a
+ * malformed request can never drive an over-read or an allocation.  The
+ * helper validates every mountpoint path (absolute, NUL-bounded, length
+ * capped) and opens the directory with O_NOFOLLOW|O_DIRECTORY so a symlink the
+ * user planted under $HOME cannot redirect a root mount.  The helper never
+ * execs, never builds a shell command, and never copies a request field into
+ * a heap buffer.
+ */
+
+#define FUSE_MREQ_MOUNT     1u
+#define FUSE_MREQ_UNMOUNT   2u
+#define FUSE_MP_MAX         1024   /* mountpoint[] capacity, incl. the NUL */
+
+/* Request: parent -> helper.  Fixed size, no variable-length tail. */
+struct fuse_mreq {
+	uint32_t op;            /* FUSE_MREQ_MOUNT / FUSE_MREQ_UNMOUNT */
+	uint32_t uid;           /* mountpoint owner (MOUNT) */
+	uint32_t gid;
+	int32_t  max_read;      /* requested max_read (MOUNT); clamped by helper */
+	uint32_t flags;         /* reserved, sent zeroed */
+	uint16_t mp_len;        /* strlen(mountpoint), < FUSE_MP_MAX */
+	char     mountpoint[FUSE_MP_MAX];
+};
+
+/* Reply: helper -> parent.  For MOUNT success the /dev/fuse fd rides
+ * SCM_RIGHTS alongside this header. */
+struct fuse_mrep {
+	int32_t  result;        /* 0 ok, -1 failure */
+	int32_t  err;           /* errno when result == -1 */
+};
+
+/* The parent's end of the helper socketpair, or -1 when no helper runs. */
+static int fuse_helper_fd = -1;
+
+/*
+ * Validate a request mountpoint: it must be NUL-terminated within mp_len,
+ * mp_len must match strnlen, the path must be absolute, and it must fit the
+ * buffer.  Returns 0 on success.  Runs in the root helper, so it is strict.
+ */
+static int
+fuse_mp_valid(const struct fuse_mreq *r)
+{
+	size_t n;
+	if (r->mp_len == 0 || r->mp_len >= FUSE_MP_MAX)
+		return -1;
+	/* strnlen never reads past the fixed buffer. */
+	n = strnlen(r->mountpoint, FUSE_MP_MAX);
+	if (n != r->mp_len)
+		return -1;        /* missing NUL or embedded NUL */
+	if (r->mountpoint[0] != '/')
+		return -1;        /* must be absolute */
+	return 0;
+}
+
+/*
+ * Helper MOUNT: open the dir safely, open /dev/fuse, mount fusefs, and return
+ * the fuse fd to the parent via SCM_RIGHTS on success.  *fd_out receives the
+ * fd to pass (>= 0) or -1.  Returns 0 on a mounted filesystem, -1 otherwise
+ * with errno set; the caller turns that into the reply.  Stays root, never
+ * pledged.
+ */
+static int
+fuse_helper_do_mount(const struct fuse_mreq *r, int *fd_out)
+{
+	struct fusefs_args args;
+	struct stat sb;
+	int fusefd, dfd, e;
+	int mr;
+
+	*fd_out = -1;
+	if (fuse_mp_valid(r) != 0) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	/* $HOME is user-controlled, so the mountpoint may already exist as a
+	 * symlink the user planted.  Create it (ignoring EEXIST) then open it
+	 * O_NOFOLLOW|O_DIRECTORY: a planted symlink yields ELOOP, never an
+	 * arbitrary-target root operation. */
+	(void)mkdir(r->mountpoint, 0700);
+	dfd = open(r->mountpoint,
+		O_RDONLY | O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC);
+	if (dfd < 0)
+		return -1;
+	if (fstat(dfd, &sb) != 0 || !S_ISDIR(sb.st_mode)) {
+		(void)close(dfd);
+		errno = ENOTDIR;
+		return -1;
+	}
+	(void)fchown(dfd, (uid_t)r->uid, (gid_t)r->gid);
+	(void)fchmod(dfd, 0700);
+
+	/* OpenBSD's fusefs device is /dev/fuse0; libfuse opens the same node. */
+	fusefd = open("/dev/fuse0", O_RDWR | O_CLOEXEC);
+	if (fusefd < 0) {
+		e = errno;
+		(void)close(dfd);
+		errno = e;
+		return -1;
+	}
+
+	memset(&args, 0, sizeof args);
+	/* name is ignored by the kernel (libfuse also leaves it NULL). */
+	args.fd = fusefd;
+	/* max_read: 0 (or negative) means the kernel default (FUSEBUFMAXSIZE);
+	 * clamp any positive request to that cap. */
+	args.max_read = r->max_read > 0
+		? (r->max_read > FUSEBUFMAXSIZE ? FUSEBUFMAXSIZE : r->max_read)
+		: 0;
+	args.allow_other = 0;
+
+	/*
+	 * mount(2) resolves its target path with FOLLOW (and re-walks it from
+	 * scratch), so mounting on r->mountpoint by name would reopen a window
+	 * for the user to swap RemoteDrive for a symlink after our O_NOFOLLOW
+	 * check -- a TOCTOU that, as root, could land a fusefs over an
+	 * arbitrary system directory.  Pin the verified directory instead:
+	 * fchdir() to the fd we already validated and mount(".").  The kernel
+	 * then resolves "." to exactly that vnode, with no path component left
+	 * for a symlink to redirect.  The helper is single-threaded and
+	 * serializes requests, so the transient cwd change is safe; restore it
+	 * afterwards.  fchdir on the O_DIRECTORY fd cannot follow a symlink. */
+	if (fchdir(dfd) != 0) {
+		e = errno;
+		(void)close(fusefd);
+		(void)close(dfd);
+		errno = e;
+		return -1;
+	}
+	mr = mount(MOUNT_FUSEFS, ".", MNT_NOSUID | MNT_NODEV, &args);
+	e = errno;
+	if (chdir("/") != 0) {
+		/* Unreachable in practice; if it ever happens, leave the cwd
+		 * where it is rather than masking the mount result. */
+	}
+	(void)close(dfd);
+	if (mr != 0) {
+		(void)close(fusefd);
+		errno = e;
+		return -1;
+	}
+	*fd_out = fusefd;
+	return 0;
+}
+
+/* Helper UNMOUNT: force-unmount the mountpoint.  Returns 0 / -1+errno. */
+static int
+fuse_helper_do_unmount(const struct fuse_mreq *r)
+{
+	if (fuse_mp_valid(r) != 0) {
+		errno = EINVAL;
+		return -1;
+	}
+	if (unmount(r->mountpoint, MNT_FORCE) != 0)
+		return -1;
+	return 0;
+}
+
+/*
+ * Send a reply, optionally with one fd attached via SCM_RIGHTS.  Returns 0
+ * on success.  Runs in the helper.
+ */
+static int
+fuse_helper_reply(int sock, const struct fuse_mrep *rep, int attach_fd)
+{
+	struct fuse_mrep out = *rep;   /* local copy: iov_base is void *, not const */
+	struct msghdr msg;
+	struct iovec iov;
+	char cbuf[CMSG_SPACE(sizeof(int))];
+	ssize_t w;
+
+	memset(&msg, 0, sizeof msg);
+	iov.iov_base = &out;
+	iov.iov_len = sizeof out;
+	msg.msg_iov = &iov;
+	msg.msg_iovlen = 1;
+	if (attach_fd >= 0) {
+		struct cmsghdr *cmsg;
+		memset(cbuf, 0, sizeof cbuf);
+		msg.msg_control = cbuf;
+		msg.msg_controllen = sizeof cbuf;
+		cmsg = CMSG_FIRSTHDR(&msg);
+		cmsg->cmsg_level = SOL_SOCKET;
+		cmsg->cmsg_type = SCM_RIGHTS;
+		cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+		memcpy(CMSG_DATA(cmsg), &attach_fd, sizeof(int));
+	}
+	do { w = sendmsg(sock, &msg, 0); }
+	while (w < 0 && errno == EINTR);
+	return w == (ssize_t)sizeof out ? 0 : -1;
+}
+
+/*
+ * The mount-helper request loop.  Runs in the unpledged root child on the
+ * `sock` end of the socketpair; the parent holds the other end.  Reads one
+ * fixed-size request at a time, performs the privileged operation, and
+ * replies.  Exits cleanly when the parent closes the socket (read returns 0)
+ * and never returns to the caller.
+ */
+static __dead void
+fuse_helper_loop(int sock)
+{
+	for (;;) {
+		struct fuse_mreq req;
+		struct fuse_mrep rep;
+		ssize_t n;
+		int fd_out = -1;
+
+		/* A single read of the whole fixed struct.  A SOCK_STREAM
+		 * could in theory deliver a short read, so loop until the
+		 * struct is complete (or the peer hangs up). */
+		size_t got = 0;
+		while (got < sizeof req) {
+			do {
+				n = read(sock, (char *)&req + got,
+					sizeof req - got);
+			} while (n < 0 && errno == EINTR);
+			if (n <= 0)
+				_exit(0);   /* parent gone or error: done */
+			got += (size_t)n;
+		}
+
+		memset(&rep, 0, sizeof rep);
+		switch (req.op) {
+		case FUSE_MREQ_MOUNT:
+			if (fuse_helper_do_mount(&req, &fd_out) == 0) {
+				rep.result = 0;
+				rep.err = 0;
+			} else {
+				rep.result = -1;
+				rep.err = errno;
+			}
+			break;
+		case FUSE_MREQ_UNMOUNT:
+			if (fuse_helper_do_unmount(&req) == 0) {
+				rep.result = 0;
+				rep.err = 0;
+			} else {
+				rep.result = -1;
+				rep.err = errno;
+			}
+			break;
+		default:
+			rep.result = -1;
+			rep.err = EINVAL;
+			break;
+		}
+
+		(void)fuse_helper_reply(sock, &rep, fd_out);
+		if (fd_out >= 0)
+			(void)close(fd_out);   /* the parent owns the copy now */
+	}
+}
+
+/*
+ * Fork the mount-helper.  Called from main() BEFORE pledge() and before any
+ * privilege drop, while still root.  On success the parent's socket end is
+ * stored in fuse_helper_fd and 0 is returned; on failure -1 is returned and
+ * the session simply runs without drive support.  listen_fd is closed in the
+ * child so the helper never holds the daemon's listening socket.
+ */
+static int
+fuse_helper_start(int listen_fd)
+{
+	int sv[2];
+	pid_t pid;
+
+	if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
+		rdp_warn("fuse: socketpair: %s; no drive support",
+			strerror(errno));
+		return -1;
+	}
+	pid = fork();
+	if (pid < 0) {
+		rdp_warn("fuse: fork mount-helper: %s; no drive support",
+			strerror(errno));
+		(void)close(sv[0]);
+		(void)close(sv[1]);
+		return -1;
+	}
+	if (pid == 0) {
+		/* Child: the mount-helper.  Drop everything it must not keep:
+		 * the listening socket and the parent's socket end, and any
+		 * stray fd.  Keep stdio and sv[1].  Do NOT pledge (it needs
+		 * mount/unmount) and stay root. */
+		int i, keep = sv[1];
+		(void)close(sv[0]);
+		if (listen_fd >= 0)
+			(void)close(listen_fd);
+		for (i = 3; i < 64; i++)
+			if (i != keep)
+				(void)close(i);
+		/* Default signal handling: the helper does not reap or shut
+		 * down on the parent's signals; it exits when the socket
+		 * closes. */
+		(void)signal(SIGCHLD, SIG_DFL);
+		(void)signal(SIGTERM, SIG_DFL);
+		(void)signal(SIGINT, SIG_DFL);
+		fuse_helper_loop(keep);   /* never returns */
+	}
+	/* Parent: keep sv[0], close the child's end. */
+	(void)close(sv[1]);
+	fuse_helper_fd = sv[0];
+
+	/*
+	 * The session child reserves fds 0-4 (3 = backend RPC, 4 = fuse) and
+	 * closes 5..63 before exec.  If sv[0] landed in 0-4 it would collide
+	 * with those (and a no-mount spawn would leak the helper socket into
+	 * the user session past the close loop), so relocate it above that
+	 * range.  Set FD_CLOEXEC too, as defense in depth: the helper socket
+	 * must never survive into an exec'd session.
+	 */
+	if (fuse_helper_fd <= 4) {
+		int hi = fcntl(fuse_helper_fd, F_DUPFD_CLOEXEC, 16);
+		if (hi >= 0) {
+			(void)close(fuse_helper_fd);
+			fuse_helper_fd = hi;
+		}
+	}
+	(void)fcntl(fuse_helper_fd, F_SETFD, FD_CLOEXEC);
+
+	rdp_info("fuse: mount-helper started (pid %d)", (int)pid);
+	return 0;
+}
+
+/*
+ * Ask the helper to mount RemoteDrive for pw, returning the /dev/fuse fd on
+ * success or -1 on any failure (a failure is never fatal to the spawn).
+ * *mp_out receives the mountpoint path.  Synchronous: send the request, read
+ * the fixed reply, and pick up the SCM_RIGHTS fd.
+ */
+static int
+fuse_helper_request_mount(const struct passwd *pw, char *mp_out, size_t mp_cap)
+{
+	struct fuse_mreq req;
+	struct fuse_mrep rep;
+	struct msghdr msg;
+	struct iovec iov;
+	char cbuf[CMSG_SPACE(sizeof(int))];
+	struct cmsghdr *cmsg;
+	ssize_t r;
+	int fusefd = -1;
+	size_t mplen;
+
+	if (fuse_helper_fd < 0)
+		return -1;
+
+	(void)snprintf(mp_out, mp_cap, "%s/RemoteDrive", pw->pw_dir);
+	mplen = strlen(mp_out);
+	if (mplen == 0 || mplen >= FUSE_MP_MAX) {
+		rdp_warn("fuse: mountpoint path unusable for %s", pw->pw_name);
+		return -1;
+	}
+
+	memset(&req, 0, sizeof req);
+	req.op = FUSE_MREQ_MOUNT;
+	req.uid = (uint32_t)pw->pw_uid;
+	req.gid = (uint32_t)pw->pw_gid;
+	req.max_read = 0;       /* kernel default (FUSEBUFMAXSIZE) */
+	req.flags = 0;
+	req.mp_len = (uint16_t)mplen;
+	memcpy(req.mountpoint, mp_out, mplen);
+	req.mountpoint[mplen] = '\0';
+
+	do { r = send(fuse_helper_fd, &req, sizeof req, 0); }
+	while (r < 0 && errno == EINTR);
+	if (r != (ssize_t)sizeof req) {
+		rdp_warn("fuse: send mount request: %s", strerror(errno));
+		return -1;
+	}
+
+	memset(&msg, 0, sizeof msg);
+	iov.iov_base = &rep;
+	iov.iov_len = sizeof rep;
+	msg.msg_iov = &iov;
+	msg.msg_iovlen = 1;
+	memset(cbuf, 0, sizeof cbuf);
+	msg.msg_control = cbuf;
+	msg.msg_controllen = sizeof cbuf;
+	do { r = recvmsg(fuse_helper_fd, &msg, 0); }
+	while (r < 0 && errno == EINTR);
+	if (r != (ssize_t)sizeof rep) {
+		rdp_warn("fuse: recv mount reply: %s",
+			r < 0 ? strerror(errno) : "short read");
+		return -1;
+	}
+	for (cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL;
+	     cmsg = CMSG_NXTHDR(&msg, cmsg))
+		if (cmsg->cmsg_level == SOL_SOCKET
+		    && cmsg->cmsg_type == SCM_RIGHTS
+		    && cmsg->cmsg_len >= CMSG_LEN(sizeof(int)))
+			memcpy(&fusefd, CMSG_DATA(cmsg), sizeof(int));
+
+	if (rep.result != 0) {
+		if (fusefd >= 0)
+			(void)close(fusefd);   /* defensive: no fd on failure */
+		rdp_warn("fuse: mount %s: %s", mp_out, strerror(rep.err));
+		return -1;
+	}
+	if (fusefd < 0) {
+		rdp_warn("fuse: mount %s reported success but passed no fd",
+			mp_out);
+		return -1;
+	}
+	rdp_info("fuse: mounted RemoteDrive at %s", mp_out);
+	return fusefd;
+}
+
+/* Ask the helper to unmount a mountpoint.  Best-effort; the reply is read so
+ * the socket does not back up.  Runs only from the main flow (never a signal
+ * handler) with SIGCHLD blocked by the caller. */
+static void
+fuse_helper_request_unmount(const char *mountpoint)
+{
+	struct fuse_mreq req;
+	struct fuse_mrep rep;
+	ssize_t r;
+	size_t mplen;
+
+	if (fuse_helper_fd < 0 || mountpoint == NULL)
+		return;
+	mplen = strlen(mountpoint);
+	if (mplen == 0 || mplen >= FUSE_MP_MAX)
+		return;
+
+	memset(&req, 0, sizeof req);
+	req.op = FUSE_MREQ_UNMOUNT;
+	req.mp_len = (uint16_t)mplen;
+	memcpy(req.mountpoint, mountpoint, mplen);
+	req.mountpoint[mplen] = '\0';
+
+	do { r = send(fuse_helper_fd, &req, sizeof req, 0); }
+	while (r < 0 && errno == EINTR);
+	if (r != (ssize_t)sizeof req)
+		return;
+	do { r = recv(fuse_helper_fd, &rep, sizeof rep, 0); }
+	while (r < 0 && errno == EINTR);
+	(void)rep;
+}
+
+/*
+ * FUSE mount bookkeeping, OpenBSD edition.  Mirrors the Linux fuse_mounts[]
+ * table: a pid -> mountpoint map so the session's RemoteDrive is torn down
+ * when the session process dies (clean exit or crash) and never lingers.
+ * The mount survives suspend/resume; only the death of the session pid
+ * removes it.
+ *
+ * Unlike Linux, the pledged parent cannot unmount: that goes through the
+ * mount-helper.  The SIGCHLD handler must stay async-signal-safe, so the
+ * reaper does NOT touch the socket -- it only flags the slot (a fixed-buffer
+ * write).  fuse_mount_drain(), called from the main flow with SIGCHLD
+ * blocked, sends the actual UNMOUNT requests for the flagged slots.
+ */
+#define FUSE_MOUNT_MAX  64
+#define FUSE_MOUNT_PATH 512   /* matches the spawn_session mountpoint buffer */
+
+struct fuse_mount {
+	int   in_use;
+	int   pending_unmount;   /* set by the reaper, cleared by the drain */
+	pid_t pid;
+	char  mountpoint[FUSE_MOUNT_PATH];
+};
+
+static struct fuse_mount fuse_mounts[FUSE_MOUNT_MAX];
+
+/* Record a fresh mount.  The caller holds SIGCHLD blocked so the reaper
+ * cannot interrupt the table walk. */
+static void
+fuse_mount_record(pid_t pid, const char *mountpoint)
+{
+	int i;
+	if (strlen(mountpoint) >= sizeof fuse_mounts[0].mountpoint) {
+		rdp_warn("fuse: mountpoint too long, %s will not be "
+			"auto-unmounted", mountpoint);
+		return;
+	}
+	for (i = 0; i < FUSE_MOUNT_MAX; i++) {
+		if (!fuse_mounts[i].in_use) {
+			fuse_mounts[i].pid = pid;
+			(void)strlcpy(fuse_mounts[i].mountpoint, mountpoint,
+				sizeof fuse_mounts[i].mountpoint);
+			fuse_mounts[i].pending_unmount = 0;
+			fuse_mounts[i].in_use = 1;
+			return;
+		}
+	}
+	rdp_warn("fuse: mount table full, %s will not be auto-unmounted",
+		mountpoint);
+}
+
+/*
+ * Mark the mount of a dead session pid for unmounting.  Called from the
+ * SIGCHLD handler (and, with SIGCHLD blocked, from sweep_expired), so it must
+ * stay async-signal-safe: it only writes the fixed-size table.  The actual
+ * unmount is deferred to fuse_mount_drain() in the main flow.
+ */
+static void
+fuse_mount_reap(pid_t pid)
+{
+	int i;
+	for (i = 0; i < FUSE_MOUNT_MAX; i++) {
+		if (fuse_mounts[i].in_use && fuse_mounts[i].pid == pid)
+			fuse_mounts[i].pending_unmount = 1;
+	}
+}
+
+/*
+ * Drain pending unmounts: for every slot flagged by the reaper, ask the
+ * helper to unmount and release the slot.  Runs only from the main flow.
+ * The caller blocks SIGCHLD across the walk so the reaper cannot flag a new
+ * slot mid-iteration in a way that corrupts the scan.  The mountpoint is
+ * copied to a local before the unmount request so the slot can be freed
+ * first, keeping the table consistent if the send blocks.
+ */
+static void
+fuse_mount_drain(void)
+{
+	int i;
+	for (i = 0; i < FUSE_MOUNT_MAX; i++) {
+		if (fuse_mounts[i].in_use && fuse_mounts[i].pending_unmount) {
+			char mp[FUSE_MOUNT_PATH];
+			(void)strlcpy(mp, fuse_mounts[i].mountpoint, sizeof mp);
+			fuse_mounts[i].in_use = 0;
+			fuse_mounts[i].pending_unmount = 0;
+			fuse_helper_request_unmount(mp);
+		}
+	}
+}
+#endif /* HAVE_OBSD_FUSE */
+
 static int
 spawn_session(const struct passwd *pw, uint16_t w, uint16_t h,
 		uint32_t lcid, int *out_fd)
 {
 	int sv[2];
 	pid_t pid;
-#if HAVE_FUSE
+#if HAVE_FUSE || HAVE_OBSD_FUSE
 	int fusefd = -1;
 	char mountpoint[512];
 	sigset_t chld_mask, old_mask;
@@ -371,6 +922,14 @@ spawn_session(const struct passwd *pw, uint16_t w, uint16_t h,
 	/* Set up the mount before fork so the privileged daemon owns it; the
 	 * fuse fd is passed to the child on fd 4. */
 	fusefd = fuse_mount_setup(pw, mountpoint, sizeof mountpoint);
+#elif HAVE_OBSD_FUSE
+	/* The pledged daemon cannot mount: ask the root mount-helper to mount
+	 * RemoteDrive and hand back the /dev/fuse fd, which is passed to the
+	 * child on fd 4.  A failure is never fatal -- the session just runs
+	 * without a drive. */
+	fusefd = fuse_helper_request_mount(pw, mountpoint, sizeof mountpoint);
+#endif
+#if HAVE_FUSE || HAVE_OBSD_FUSE
 	/* Block SIGCHLD across fork + fuse_mount_record so the reaper can
 	 * never run for this pid before its mount is recorded (the child
 	 * could otherwise exit and be reaped before we record it). */
@@ -390,6 +949,15 @@ spawn_session(const struct passwd *pw, uint16_t w, uint16_t h,
 			(void)umount2(mountpoint, MNT_DETACH);
 			(void)close(fusefd);
 		}
+#elif HAVE_OBSD_FUSE
+		if (masked)
+			(void)sigprocmask(SIG_SETMASK, &old_mask, NULL);
+		if (fusefd >= 0) {
+			/* The helper holds the mount; ask it to unmount and drop
+			 * our copy of the fuse fd. */
+			(void)close(fusefd);
+			fuse_helper_request_unmount(mountpoint);
+		}
 #endif
 		(void)close(sv[0]); (void)close(sv[1]);
 		return -1;
@@ -399,7 +967,7 @@ spawn_session(const struct passwd *pw, uint16_t w, uint16_t h,
 		int i;
 
 		(void)close(sv[0]);
-#if HAVE_FUSE
+#if HAVE_FUSE || HAVE_OBSD_FUSE
 		/* Restore the inherited SIGCHLD mask so the session starts
 		 * with default signal handling. */
 		if (masked)
@@ -409,12 +977,12 @@ spawn_session(const struct passwd *pw, uint16_t w, uint16_t h,
 			if (dup2(sv[1], 3) < 0) _exit(127);
 			(void)close(sv[1]);
 		}
-#if HAVE_FUSE
+#if HAVE_FUSE || HAVE_OBSD_FUSE
 		/* The session probes fd 4 for a FUSE device; nothing new on
 		 * argv.  If there is no mount, fd 4 stays closed and the
 		 * session simply runs without drive support.  dup2 clears
-		 * FD_CLOEXEC on the target, but when /dev/fuse opened as fd 4
-		 * already there is no dup2, so clear it explicitly or the fd
+		 * FD_CLOEXEC on the target, but when the fuse fd is already
+		 * fd 4 there is no dup2, so clear it explicitly or the fd
 		 * would close at exec and drop the mount. */
 		if (fusefd >= 0 && fusefd != 4) {
 			if (dup2(fusefd, 4) < 0) _exit(127);
@@ -468,7 +1036,7 @@ spawn_session(const struct passwd *pw, uint16_t w, uint16_t h,
 		_exit(127);
 	}
 	(void)close(sv[1]);
-#if HAVE_FUSE
+#if HAVE_FUSE || HAVE_OBSD_FUSE
 	/* Parent keeps no copy of the fuse fd; the kernel holds the mount via
 	 * the child's fd 4.  Remember the mountpoint so we can unmount when
 	 * the session pid dies, then re-enable SIGCHLD now that the record
@@ -807,6 +1375,29 @@ sweep_expired(void)
 			    && errno == ESRCH)
 				fuse_mount_reap(fuse_mounts[i].pid);
 		}
+		if (masked)
+			(void)sigprocmask(SIG_SETMASK, &old_mask, NULL);
+	}
+#elif HAVE_OBSD_FUSE
+	/* Safety net for any SIGCHLD that was coalesced and lost: flag the
+	 * mounts of session pids that are no longer alive, then drain the
+	 * pending unmounts to the helper.  Block SIGCHLD across the walk so
+	 * the reaper cannot interrupt it; the drain runs in this main flow
+	 * (it talks to the helper socket, which the signal handler must not). */
+	{
+		sigset_t chld_mask, old_mask;
+		int masked = 0;
+		sigemptyset(&chld_mask);
+		sigaddset(&chld_mask, SIGCHLD);
+		if (sigprocmask(SIG_BLOCK, &chld_mask, &old_mask) == 0)
+			masked = 1;
+		for (i = 0; i < FUSE_MOUNT_MAX; i++) {
+			if (fuse_mounts[i].in_use
+			    && kill(fuse_mounts[i].pid, 0) != 0
+			    && errno == ESRCH)
+				fuse_mount_reap(fuse_mounts[i].pid);
+		}
+		fuse_mount_drain();
 		if (masked)
 			(void)sigprocmask(SIG_SETMASK, &old_mask, NULL);
 	}
@@ -1213,6 +1804,18 @@ main(int argc, char *argv[])
 	rdp_info("rdp-sessionmgr listening on %s (service=%s)",
 		sock_path, service);
 
+#if HAVE_OBSD_FUSE
+	/* Fork the privileged mount-helper BEFORE pledge and BEFORE any
+	 * privilege drop, while still root: mount(2)/unmount(2) are root-only
+	 * and pledge-forbidden, so the pledged daemon delegates them to this
+	 * unpledged root child.  A failure here is not fatal -- sessions just
+	 * run without a drive mount. */
+	if (geteuid() == 0)
+		(void)fuse_helper_start(listen_fd);
+	else
+		rdp_info("fuse: not root, no mount-helper; no drive support");
+#endif
+
 	if (drop_user != NULL && try_drop_privs(drop_user) != 0) {
 		(void)close(listen_fd);
 		(void)unlink(sock_path);
@@ -1232,12 +1835,40 @@ main(int argc, char *argv[])
 	while (!want_shutdown) {
 		int cfd = accept(listen_fd, NULL, NULL);
 		if (cfd < 0) {
-			if (errno == EINTR) continue;
+			if (errno == EINTR) {
+#if HAVE_OBSD_FUSE
+				/* A SIGCHLD that interrupted accept may have
+				 * flagged a dead session's mount; drain it. */
+				{
+					sigset_t m, o;
+					sigemptyset(&m);
+					sigaddset(&m, SIGCHLD);
+					if (sigprocmask(SIG_BLOCK, &m, &o) == 0) {
+						fuse_mount_drain();
+						(void)sigprocmask(SIG_SETMASK,
+							&o, NULL);
+					}
+				}
+#endif
+				continue;
+			}
 			rdp_err("accept: %s", strerror(errno));
 			break;
 		}
 		handle_client(cfd, service);
 		(void)close(cfd);
+#if HAVE_OBSD_FUSE
+		/* Drain any unmounts flagged while servicing this client. */
+		{
+			sigset_t m, o;
+			sigemptyset(&m);
+			sigaddset(&m, SIGCHLD);
+			if (sigprocmask(SIG_BLOCK, &m, &o) == 0) {
+				fuse_mount_drain();
+				(void)sigprocmask(SIG_SETMASK, &o, NULL);
+			}
+		}
+#endif
 	}
 
 	rdp_info("rdp-sessionmgr shutting down");

@@ -78,6 +78,8 @@
 #include <sys/dirent.h>
 #include <sys/fusebuf.h>
 #include <sys/uio.h>
+#include <sys/event.h>
+#include <sys/time.h>
 
 #include <errno.h>
 #include <stdint.h>
@@ -128,9 +130,56 @@ struct fd_obsd_slot {
 struct fd_obsd_ctx {
 	uint8_t buf[FD_OBSD_BUFSZ];
 	struct fd_obsd_slot slots[FD_INFLIGHT_MAX];
+	int kq;        /* kqueue for the read-readiness probe; -1 until built */
+	int kq_fuse;   /* the fuse fd registered on kq, to detect a change */
 };
 
-static struct fd_obsd_ctx fd_obsd_ctx;
+/* kq/kq_fuse start at -1 (no kqueue yet); the buffers and slots zero-init. */
+static struct fd_obsd_ctx fd_obsd_ctx = { .kq = -1, .kq_fuse = -1 };
+
+/*
+ * Is a fusebuf ready to read on the fuse fd?
+ *
+ * The OpenBSD fusefs device has no d_poll, so poll()/select() fall back to
+ * seltrue and ALWAYS report the fd readable -- a blocking readv on an empty
+ * device would then hang the whole single-threaded session loop.  The device
+ * does implement an EVFILT_READ kqfilter that fires only when its input queue
+ * is non-empty, so gate every read through a non-blocking kevent probe: the
+ * readv runs only when exactly one fusebuf is actually queued and thus never
+ * blocks.  The kqueue is built once and reused.  Returns 1 if readable, 0 if
+ * not, and -1 on a kqueue error (the caller then treats it as not-ready).
+ */
+static int
+fd_obsd_readable(struct fuse_drive *fd)
+{
+	struct kevent ev;
+	struct timespec zero = { 0, 0 };
+	int n;
+
+	/* (Re)build the kqueue if it is missing or the fuse fd changed. */
+	if (fd_obsd_ctx.kq < 0 || fd_obsd_ctx.kq_fuse != fd->fuse_fd) {
+		struct kevent ch;
+		if (fd_obsd_ctx.kq >= 0)
+			(void)close(fd_obsd_ctx.kq);
+		fd_obsd_ctx.kq = kqueue();
+		if (fd_obsd_ctx.kq < 0)
+			return -1;
+		EV_SET(&ch, fd->fuse_fd, EVFILT_READ, EV_ADD, 0, 0, NULL);
+		if (kevent(fd_obsd_ctx.kq, &ch, 1, NULL, 0, NULL) != 0) {
+			(void)close(fd_obsd_ctx.kq);
+			fd_obsd_ctx.kq = -1;
+			return -1;
+		}
+		fd_obsd_ctx.kq_fuse = fd->fuse_fd;
+	}
+
+	do {
+		n = kevent(fd_obsd_ctx.kq, NULL, 0, &ev, 1, &zero);
+	} while (n < 0 && errno == EINTR);
+	if (n < 0)
+		return -1;
+	return n > 0 ? 1 : 0;
+}
 
 /* slot table */
 
@@ -793,41 +842,51 @@ obsd_recv(struct fuse_drive *fd, const uint8_t *raw, size_t len,
 int
 fuse_drive_backend_process(struct fuse_drive *fd)
 {
-	int handled = 0;
+	struct iovec iov[2];
+	ssize_t r;
+	size_t len;
+	struct fd_request req;
 
-	/* Drain a bounded number of requests per call so one busy directory
-	 * cannot starve the rest of the session loop. */
-	while (handled < 64) {
-		struct iovec iov[2];
-		ssize_t r;
-		size_t len;
-		struct fd_request req;
+	/*
+	 * The OpenBSD fusefs device cannot be made non-blocking (its cdevsw has
+	 * no d_ioctl, so FIONBIO fails) and has no d_poll (so poll() reports it
+	 * always-readable via seltrue).  A blocking readv on an empty device
+	 * would therefore hang the single-threaded session loop.  Gate the read
+	 * on a non-blocking EVFILT_READ kqueue probe, which fires only when a
+	 * fusebuf is actually queued; if nothing is ready, return at once.
+	 */
+	if (fd_obsd_readable(fd) != 1)
+		return 0;
 
-		/* The device does not support partial reads: one readv into the
-		 * fixed header region plus the data buffer. */
-		iov[0].iov_base = fd_obsd_ctx.buf;
-		iov[0].iov_len = FD_FB_HDRLEN;
-		iov[1].iov_base = fd_obsd_ctx.buf + FD_FB_HDRLEN;
-		iov[1].iov_len = FD_OBSD_MAXDATA;
-		do {
-			r = readv(fd->fuse_fd, iov, 2);
-		} while (r < 0 && errno == EINTR);
-		if (r < 0) {
-			if (errno == EAGAIN || errno == EWOULDBLOCK)
-				return 0;
-			/* ENODEV means the mount was torn down. */
-			return -1;
-		}
-		if (r == 0)
-			return -1;
-		len = (size_t)r;
-		if (len < FD_FB_HDRLEN)
-			return 0;   /* runt: ignore */
-		memset(&req, 0, sizeof req);
-		if (obsd_recv(fd, fd_obsd_ctx.buf, len, &req) == 1)
-			fd_dispatch(fd, &req);
-		handled++;
+	/*
+	 * The device delivers exactly ONE fusebuf per read, so read just one
+	 * request and return -- a second read with nothing queued would block.
+	 * Any further queued requests are picked up on the next loop iteration
+	 * (the probe will report them ready), mirroring libfuse's
+	 * one-read-per-loop model.  The device does not support partial reads:
+	 * one readv into the fixed header region plus the data buffer.
+	 */
+	iov[0].iov_base = fd_obsd_ctx.buf;
+	iov[0].iov_len = FD_FB_HDRLEN;
+	iov[1].iov_base = fd_obsd_ctx.buf + FD_FB_HDRLEN;
+	iov[1].iov_len = FD_OBSD_MAXDATA;
+	do {
+		r = readv(fd->fuse_fd, iov, 2);
+	} while (r < 0 && errno == EINTR);
+	if (r < 0) {
+		if (errno == EAGAIN || errno == EWOULDBLOCK)
+			return 0;
+		/* ENODEV means the mount was torn down. */
+		return -1;
 	}
+	if (r == 0)
+		return -1;
+	len = (size_t)r;
+	if (len < FD_FB_HDRLEN)
+		return 0;   /* runt: ignore */
+	memset(&req, 0, sizeof req);
+	if (obsd_recv(fd, fd_obsd_ctx.buf, len, &req) == 1)
+		fd_dispatch(fd, &req);
 	return 0;
 }
 

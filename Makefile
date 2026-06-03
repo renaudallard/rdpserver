@@ -243,6 +243,21 @@ regress/wire/fuse_drive_obsd_test: regress/wire/fuse_drive_obsd_test.c \
 		src/session/fuse_drive.c src/session/fuse_drive_obsd.c \
 		src/common/io.c src/common/log.c
 
+# Live validation of the OpenBSD fusebuf backend against the REAL kernel.
+# NOT part of `regress` (it needs root and a working /dev/fuse0): build it by
+# hand and run it under doas:
+#   gmake regress/integ/obsd_fuse_live
+#   doas ./regress/integ/obsd_fuse_live
+# It links the drive core and the OpenBSD backend with a mock RDPDR FS, mounts
+# a real fusefs at a temp dir, and drives stat/ls/cat/write over it.
+regress/integ/obsd_fuse_live: regress/integ/obsd_fuse_live.c \
+		src/session/fuse_drive.c src/session/fuse_drive_obsd.c \
+		src/common/io.c src/common/log.c
+	$(CC) $(CFLAGS) -Isrc/include \
+		-o $@ regress/integ/obsd_fuse_live.c \
+		src/session/fuse_drive.c src/session/fuse_drive_obsd.c \
+		src/common/io.c src/common/log.c
+
 regress/fuzz/fuzz_parsers: regress/fuzz/fuzz_parsers.o \
 		$(WIRE_LIB) $(CHANNELS_LIB) $(SEC_LIB) $(COMMON_LIB)
 	$(CC) $(LDFLAGS) -o $@ regress/fuzz/fuzz_parsers.o \

@@ -1412,7 +1412,9 @@ main(int argc, char *argv[])
 	 * NULL on non-Linux builds, old kernels, or when sessionmgr did not
 	 * set up a mount, in which case the session runs without drives. */
 	struct fuse_drive *drive = fuse_drive_init(FUSE_FD, BE_FD);
+#if !HAVE_OBSD_FUSE
 	int drive_fd = fuse_drive_fd(drive);
+#endif
 
 	while (!want_shutdown) {
 		struct pollfd pfd[3];
@@ -1427,12 +1429,19 @@ main(int argc, char *argv[])
 		pfd[1].fd = xfd;
 		pfd[1].events = POLLIN;
 		pfd[1].revents = 0;
+#if !HAVE_OBSD_FUSE
+		/* On Linux the /dev/fuse fd is pollable, so wait on it for
+		 * prompt wakeups.  On OpenBSD the fusefs device has no d_poll
+		 * (poll() would busy-spin via seltrue), so it is left out of
+		 * the poll set and serviced on every frame-interval wakeup
+		 * below, where the backend self-gates with a kqueue probe. */
 		if (drive_fd >= 0) {
 			pfd[2].fd = drive_fd;
 			pfd[2].events = POLLIN;
 			pfd[2].revents = 0;
 			npfd = 3;
 		}
+#endif
 
 		(void)poll(pfd, (nfds_t)npfd, FRAME_INTERVAL_MS);
 
@@ -1523,12 +1532,23 @@ main(int argc, char *argv[])
 				break;
 			}
 		}
+#if HAVE_OBSD_FUSE
+		/* OpenBSD: the fuse fd is not in the poll set (poll is useless
+		 * there), so service it on every wakeup.  fuse_drive_process
+		 * self-gates with a non-blocking kqueue probe, so this is cheap
+		 * when nothing is queued and never blocks the loop. */
+		if (drive != NULL) {
+			if (fuse_drive_process(drive) < 0)
+				drive = NULL;   /* mount gone: stop servicing it */
+		}
+#else
 		if (drive_fd >= 0 && (pfd[2].revents & POLLIN)) {
 			if (fuse_drive_process(drive) < 0) {
 				/* The mount went away: stop polling the fd. */
 				drive_fd = -1;
 			}
 		}
+#endif
 		if (pfd[1].revents & POLLIN) {
 			while (XPending(dpy) > 0) {
 				XEvent ev;

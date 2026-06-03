@@ -27,6 +27,33 @@ allocates the per-user runtime directory, and forks the
 .Xr rdp-session 8
 helper as the target user.
 .Pp
+On
+.Ox ,
+where
+.Xr mount 2
+and
+.Xr unmount 2
+are restricted to the superuser and forbidden by
+.Xr pledge 2 ,
+.Nm
+forks an unpledged root mount-helper at startup, before pledging and
+before dropping privileges.
+The pledged broker delegates each per-session
+.Pa ~/RemoteDrive
+fusefs mount and unmount to the helper over a socketpair, using one
+fixed-size request structure per operation, and receives the
+.Pa /dev/fuse0
+descriptor back via
+.Dv SCM_RIGHTS .
+The helper validates the mountpoint, creates it with
+.Dv O_NOFOLLOW ,
+and mounts it through an
+.Xr fchdir 2 Ns -pinned
+target so a symlink in the user's home directory cannot redirect the
+root mount.
+A failure to mount is never fatal: the session simply runs without a
+redirected drive.
+.Pp
 Failed authentication is rate limited per source IP: after 5 failures
 within 60 seconds, further attempts from that IP are rejected without
 running PAM or
