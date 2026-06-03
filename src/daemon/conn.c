@@ -78,6 +78,7 @@
 #include "../channels/rdpsnd.h"
 #include "../channels/sndin.h"
 #include "../channels/rdpgfx.h"
+#include "../channels/autodetect.h"
 #include "../wire/h264enc.h"
 #include "../wire/avc444.h"
 #include "../wire/progressive.h"
@@ -86,6 +87,7 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <poll.h>
+#include <time.h>
 
 #include <errno.h>
 #include <fcntl.h>
@@ -196,6 +198,149 @@ strip_tpkt_x224(const uint8_t *buf, size_t len,
 	*mcs_out = buf + 4 + (size_t)dt;
 	*mcs_len_out = len - 4 - (size_t)dt;
 	return 0;
+}
+
+/* Connect-time network auto-detection (MS-RDPBCGR).  Runs after the
+ * Client Info PDU and before licensing, only when the client advertised
+ * support and the operator enabled it.  Measures RTT and link bandwidth
+ * over the MCS message channel and returns the bandwidth in kilobits per
+ * second, 0 when it could not measure (so the caller keeps the default
+ * bitrate), or -1 on a transport error (the caller should drop the
+ * connection because the stream may be mid-frame). */
+#define AUTODETECT_TIMEOUT_MS  5000
+#define AUTODETECT_PROBE_CHUNK 8192   /* one bandwidth payload, 4-aligned */
+#define AUTODETECT_PROBE_COUNT 4      /* 32 KiB total probe */
+#define AUTODETECT_PROBE_BYTES ((uint32_t)AUTODETECT_PROBE_CHUNK * AUTODETECT_PROBE_COUNT)
+#define AUTODETECT_KBPS_MAX    30000  /* peak bitrate ceiling (kbps) */
+/* sequenceNumbers are protocol-informational only (responses are matched
+ * by message type, not echoed seq). */
+#define AUTODETECT_SEQ_RTT     0x23
+#define AUTODETECT_SEQ_BW      0x24
+#define AUTODETECT_SEQ_RESULT  0x25
+
+/* Send one autodetect request payload on the message channel, wrapping it
+ * in a security header with SEC_AUTODETECT_REQ. */
+static int
+autodetect_send(struct rdp_tls *t, uint16_t user_id, uint16_t chan,
+		const uint8_t *ad, size_t ad_len)
+{
+	uint8_t body[RDP_CONN_BUF];
+	if (ad_len + RDP_SEC_HDR_LEN > sizeof body) return -1;
+	if (rdp_sec_build_header(body, sizeof body,
+		RDP_SEC_AUTODETECT_REQ) < 0) return -1;
+	memcpy(body + RDP_SEC_HDR_LEN, ad, ad_len);
+	return send_send_data(t, user_id, chan, body,
+		RDP_SEC_HDR_LEN + ad_len);
+}
+
+/* Wait for and parse one autodetect response on the message channel.
+ * Returns 0 on success, 1 on a clean timeout (no bytes consumed), -1 on a
+ * transport or protocol error. */
+static int
+autodetect_recv(struct rdp_tls *t, uint16_t chan,
+		struct rdp_autodetect_rsp *rsp)
+{
+	uint8_t buf[2048];
+	const uint8_t *mcs_p, *payload;
+	size_t mcs_len, payload_len;
+	uint16_t uid, cid;
+	uint32_t sec_flags;
+	ssize_t n, sh;
+	struct pollfd pfd;
+	int pr;
+
+	/* poll() only sees the raw socket; if OpenSSL already holds decrypted
+	 * bytes from a coalesced record, read them rather than wrongly time
+	 * out (which would desync the next read). */
+	if (rdp_tls_pending(t) == 0) {
+		pfd.fd = rdp_tls_fd(t);
+		pfd.events = POLLIN;
+		pfd.revents = 0;
+		do { pr = poll(&pfd, 1, AUTODETECT_TIMEOUT_MS); }
+		while (pr < 0 && errno == EINTR);
+		if (pr == 0) return 1;     /* nothing arrived; skip cleanly */
+		if (pr < 0) return -1;
+	}
+	n = read_tpkt_tls(t, buf, sizeof buf);
+	if (n <= 0) return -1;
+	if (strip_tpkt_x224(buf, (size_t)n, &mcs_p, &mcs_len) != 0)
+		return -1;
+	if (rdp_mcs_parse_send_data_request(mcs_p, mcs_len, &uid, &cid,
+		&payload, &payload_len) < 0)
+		return -1;
+	if (cid != chan)
+		return -1;
+	sh = rdp_sec_parse_header(payload, payload_len, &sec_flags);
+	if (sh < 0 || (sec_flags & RDP_SEC_AUTODETECT_RSP) == 0)
+		return -1;
+	return rdp_autodetect_parse_response(payload + (size_t)sh,
+		payload_len - (size_t)sh, rsp);
+}
+
+static int
+do_autodetect(struct rdp_tls *t, uint16_t user_id, uint16_t chan,
+		const char *peer)
+{
+	uint8_t ad[16 + AUTODETECT_PROBE_CHUNK];
+	struct rdp_autodetect_rsp rsp;
+	struct timespec t0, t1;
+	ssize_t adn;
+	int rc, i;
+	uint32_t rtt_ms, kbps;
+
+	/* RTT: time the round-trip of one RTT Measure Request. */
+	adn = rdp_autodetect_build_rtt_request(ad, sizeof ad,
+		AUTODETECT_SEQ_RTT);
+	if (adn < 0) return 0;
+	(void)clock_gettime(CLOCK_MONOTONIC, &t0);
+	if (autodetect_send(t, user_id, chan, ad, (size_t)adn) != 0)
+		return -1;
+	rc = autodetect_recv(t, chan, &rsp);
+	if (rc != 0) return rc > 0 ? 0 : -1;
+	(void)clock_gettime(CLOCK_MONOTONIC, &t1);
+	if (rsp.response_type != RDP_AUTODETECT_RTT_RSP) return 0;
+	rtt_ms = (uint32_t)((t1.tv_sec - t0.tv_sec) * 1000
+		+ (t1.tv_nsec - t0.tv_nsec) / 1000000);
+
+	/* Bandwidth: bracket a fixed payload burst with Start/Stop and read
+	 * the client's timing back. */
+	adn = rdp_autodetect_build_bw_start(ad, sizeof ad, AUTODETECT_SEQ_BW);
+	if (adn < 0 || autodetect_send(t, user_id, chan, ad,
+		(size_t)adn) != 0)
+		return -1;
+	for (i = 0; i < AUTODETECT_PROBE_COUNT; i++) {
+		adn = rdp_autodetect_build_bw_payload(ad, sizeof ad,
+			AUTODETECT_SEQ_BW, AUTODETECT_PROBE_CHUNK);
+		if (adn < 0 || autodetect_send(t, user_id, chan, ad,
+			(size_t)adn) != 0)
+			return -1;
+	}
+	adn = rdp_autodetect_build_bw_stop(ad, sizeof ad, AUTODETECT_SEQ_BW);
+	if (adn < 0 || autodetect_send(t, user_id, chan, ad,
+		(size_t)adn) != 0)
+		return -1;
+	rc = autodetect_recv(t, chan, &rsp);
+	if (rc != 0) return rc > 0 ? 0 : -1;
+	if (rsp.response_type != RDP_AUTODETECT_BW_RESULTS) return 0;
+	/* A client cannot have received more than we sent; cap byte_count to
+	 * the probe size so a lying result cannot inflate the measurement. */
+	if (rsp.byte_count > AUTODETECT_PROBE_BYTES)
+		rsp.byte_count = AUTODETECT_PROBE_BYTES;
+	kbps = rdp_autodetect_bandwidth_kbps(rsp.byte_count, rsp.time_delta);
+	/* Bound the result so the (int) return stays small and non-negative
+	 * (it must never be mistaken for a transport error). */
+	if (kbps > AUTODETECT_KBPS_MAX)
+		kbps = AUTODETECT_KBPS_MAX;
+
+	/* Inform the client of the result (best effort). */
+	adn = rdp_autodetect_build_netchar_result(ad, sizeof ad,
+		AUTODETECT_SEQ_RESULT, rtt_ms, kbps, rtt_ms);
+	if (adn > 0)
+		(void)autodetect_send(t, user_id, chan, ad, (size_t)adn);
+
+	rdp_info("conn[%s]: autodetect rtt=%ums bandwidth=%ukbps",
+		peer, rtt_ms, kbps);
+	return (int)kbps;
 }
 
 /* FNV-1a 64-bit hash; fold n bytes at p into the running state h. */
@@ -1883,6 +2028,7 @@ ensure_gfx_surface(struct rdp_tls *t, uint16_t user_id,
 static int g_allow_v10_avc;
 static int g_allow_progressive;
 static int g_allow_avc444;
+static int g_allow_autodetect;
 
 static void
 run_proxy(struct rdp_tls *t, int be_fd,
@@ -3082,6 +3228,8 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 	uint16_t io_channel = RDP_MCS_IO_CHANNEL_ID;
 	uint16_t desktop_w = 0, desktop_h = 0;
 	uint32_t client_lcid = 0;
+	uint16_t client_early_caps = 0;
+	uint16_t msgchannel_id = 0;
 	uint32_t client_max_request = 0;
 	uint16_t client_color_ptr = 0, client_large_ptr = 0;
 	uint16_t client_pointer_cache_size = 0;
@@ -3096,6 +3244,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 	g_allow_v10_avc = cfg->allow_v10_avc;
 	g_allow_progressive = cfg->allow_progressive;
 	g_allow_avc444 = cfg->allow_avc444;
+	g_allow_autodetect = cfg->allow_autodetect;
 	g_prefer_wan_audio = cfg->prefer_wan_audio;
 	g_allow_microphone = cfg->allow_microphone;
 	struct dynvc_state dynvc = {0};
@@ -3193,6 +3342,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 		desktop_w = ci.desktop_width ? ci.desktop_width : 1024;
 		desktop_h = ci.desktop_height ? ci.desktop_height : 768;
 		client_lcid = ci.keyboard_layout;
+		client_early_caps = ci.early_capability_flags;
 
 		if (ci.monitor_count > 1) {
 			int32_t min_x = 0, min_y = 0;
@@ -3260,6 +3410,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 			if (ci.has_msgchannel)
 				cr2.msgchannel_id =
 					(uint16_t)(1004 + ci.channel_count);
+			msgchannel_id = cr2.msgchannel_id;
 
 			dt_n = rdp_x224_build_dt(scratch + 4, sizeof scratch - 4);
 			cr_n = rdp_mcs_build_connect_response(
@@ -3374,6 +3525,25 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 			peer, mcs_p[0]);
 		goto done;
 	}}
+
+	/* 6b. Connect-time network auto-detection (opt-in via rdpd -N): the
+	 * sequence allows it after the Client Info PDU and before licensing.
+	 * Only when the client advertised support and a message channel was
+	 * negotiated; the measured bandwidth caps the encoder bitrate. */
+	if (g_allow_autodetect && msgchannel_id != 0
+	    && (client_early_caps & RDP_CS_EARLYCAP_NETCHAR_AUTODETECT) != 0) {
+		int kbps = do_autodetect(t, user_id, msgchannel_id, peer);
+		if (kbps < 0) goto done;   /* transport error mid-stream */
+		if (kbps > 0) {
+			/* Use 85% of the measured link as the peak cap, with a
+			 * floor and ceiling so a bad measurement cannot starve
+			 * or runaway the encoder. */
+			int cap = (int)(((uint32_t)kbps * 85) / 100);
+			if (cap < 1000) cap = 1000;
+			if (cap > 30000) cap = 30000;
+			rdp_h264_set_target_kbps(cap);
+		}
+	}
 
 	/* 7. Send License Valid Client. */
 	{

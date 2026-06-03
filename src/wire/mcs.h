@@ -102,6 +102,10 @@
 #define RDP_SC_SECURITY  0x0C02
 #define RDP_SC_NET       0x0C03
 
+/* CS_CORE earlyCapabilityFlags: client supports network characteristics
+ * auto-detection (RNS_UD_CS_SUPPORT_NETCHAR_AUTODETECT). */
+#define RDP_CS_EARLYCAP_NETCHAR_AUTODETECT 0x0080
+
 /* Parsed contents of an MCS Connect Initial -- the bits we need. */
 #define RDP_MCS_MAX_CHANNELS 32
 
@@ -131,6 +135,10 @@ struct rdp_mcs_connect_initial {
 	/* CS_CLUSTER. */
 	uint32_t cluster_flags;
 	uint32_t redirected_session_id;
+
+	/* CS_CORE earlyCapabilityFlags (bit 0x0080 = supports network
+	 * characteristics auto-detection). */
+	uint16_t early_capability_flags;
 
 	/* CS_MCS_MSGCHANNEL present? */
 	int has_msgchannel;

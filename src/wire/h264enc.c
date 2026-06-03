@@ -53,6 +53,17 @@ struct rdp_h264 {
 	size_t         nal_cap;
 };
 
+/* Peak bitrate cap (kbps) derived from network auto-detection; 0 keeps
+ * the fixed default.  Process-global because each connection is its own
+ * worker process, and it must be set before an encoder is opened. */
+static int g_target_kbps;
+
+void
+rdp_h264_set_target_kbps(int kbps)
+{
+	g_target_kbps = kbps;
+}
+
 static int
 init_encoder(struct rdp_h264 *e, int w, int h)
 {
@@ -76,8 +87,16 @@ init_encoder(struct rdp_h264 *e, int w, int h)
 	e->param.i_bframe = 0;
 	e->param.rc.i_rc_method = X264_RC_CRF;
 	e->param.rc.f_rf_constant = 32.0f;
-	e->param.rc.i_vbv_max_bitrate = 4000;
-	e->param.rc.i_vbv_buffer_size = 2000;
+	/* Cap the peak bitrate to the measured link when auto-detection ran,
+	 * so the constant-quality stream cannot overrun a slow connection;
+	 * otherwise keep the fixed default. */
+	if (g_target_kbps > 0) {
+		e->param.rc.i_vbv_max_bitrate = g_target_kbps;
+		e->param.rc.i_vbv_buffer_size = g_target_kbps / 2;
+	} else {
+		e->param.rc.i_vbv_max_bitrate = 4000;
+		e->param.rc.i_vbv_buffer_size = 2000;
+	}
 	e->param.rc.f_rf_constant_max = 45.0f;
 	e->param.i_log_level = X264_LOG_NONE;
 

@@ -211,6 +211,17 @@ rdp_mcs_parse_connect_initial(const uint8_t *p, size_t len,
 						out->client_hostname[i] =
 							(char)body[20 + i * 2];
 				}
+				/* earlyCapabilityFlags is a u16 at body offset
+				 * 140: clientName(32)@20, keyboardType group(12)
+				 * @52, imeFileName(64)@64, then
+				 * postBeta2ColorDepth(2)+clientProductId(2)+
+				 * serialNumber(4)+highColorDepth(2)+
+				 * supportedColorDepths(2)@128 land it at 140. */
+				if (blen >= 4 + 142) {
+					out->early_capability_flags =
+						(uint16_t)body[140]
+						| ((uint16_t)body[141] << 8);
+				}
 			}
 			break;
 		case RDP_CS_SECURITY:

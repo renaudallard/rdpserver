@@ -60,6 +60,11 @@ void rdp_h264_dims(const struct rdp_h264 *e, int *w, int *h);
  * have to wait for the periodic keyframe interval. */
 void rdp_h264_force_idr(struct rdp_h264 *e);
 
+/* Set the peak bitrate cap (kbps) used by encoders opened afterwards;
+ * pass a value derived from network auto-detection, or 0 for the fixed
+ * default.  Applies to both AVC420 and the AVC444 sub-streams. */
+void rdp_h264_set_target_kbps(int kbps);
+
 /* Encode one frame.  `bgr` is width*height*3 bytes, top-down,
  * packed BGR (the same format rdp-session sends).  On success the
  * encoded H.264 bitstream is in `*out_buf` / `*out_len`; the

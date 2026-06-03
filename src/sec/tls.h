@@ -80,6 +80,11 @@ ssize_t rdp_tls_write_full(struct rdp_tls *t, const void *buf, size_t n);
  * TCP_NODELAY).  Caller must not directly read/write on it. */
 int rdp_tls_fd(const struct rdp_tls *t);
 
+/* Bytes of already-decrypted application data buffered inside the TLS
+ * object (SSL_pending).  Poll on the raw fd misses these, so a readiness
+ * check must consult this before blocking. */
+int rdp_tls_pending(const struct rdp_tls *t);
+
 /* Negotiated TLS protocol version string (e.g. "TLSv1.3"), or "none". */
 const char *rdp_tls_version(const struct rdp_tls *t);
 

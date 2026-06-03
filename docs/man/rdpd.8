@@ -7,7 +7,7 @@
 .Nd Remote Desktop Protocol server
 .Sh SYNOPSIS
 .Nm
-.Op Fl 4AdfmPVW
+.Op Fl 4AdfmNPVW
 .Op Fl h Ar host
 .Op Fl p Ar port
 .Op Fl S Ar socket
@@ -133,6 +133,18 @@ GPU, so it accelerates GPU-less clients
 without the AVC teardown described above.
 Off by default; the per-frame codec is selected by the WireToSurface2
 command, so it does not affect clients that receive AVC.
+.It Fl N
+Run connect-time network auto-detection
+.Pq MS-RDPBCGR Network Characteristics Detection .
+After the Client Info PDU, on the MCS message channel, the server measures
+the round-trip time and link bandwidth and caps the H.264 peak bitrate to
+about 85% of the measured link
+.Pq bounded to between 1 and 30 Mbit/s ,
+so a constant-quality stream cannot overrun a slow link while a fast link
+is allowed a higher ceiling.
+Only attempted when the client advertised
+.Sy RNS_UD_CS_SUPPORT_NETCHAR_AUTODETECT .
+Off by default.
 .It Fl W
 Prefer G.711 A-law audio output when the client supports it.
 A-law is half the wire bandwidth of 16-bit PCM at a small quality cost,

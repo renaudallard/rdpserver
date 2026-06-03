@@ -325,6 +325,14 @@ rdp_tls_fd(const struct rdp_tls *t)
 	return t->fd;
 }
 
+int
+rdp_tls_pending(const struct rdp_tls *t)
+{
+	if (t == NULL || t->ssl == NULL)
+		return 0;
+	return SSL_pending(t->ssl);
+}
+
 const char *
 rdp_tls_version(const struct rdp_tls *t)
 {
