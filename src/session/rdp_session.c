@@ -71,6 +71,7 @@
 #include "audio.h"
 #include "kbdmap.h"
 #include "fuse_drive.h"
+#include "printer.h"
 #if HAVE_WLROOTS
 #include "wayland_comp.h"
 #endif
@@ -1407,7 +1408,9 @@ main(int argc, char *argv[])
 	 * (`proc`), and reading our own files.  We still need `proc`
 	 * for kill() on the children at shutdown.  On non-OpenBSD this
 	 * compiles to a no-op. */
-	if (pledge("stdio rpath wpath cpath unix proc", NULL) != 0)
+	/* `exec` is needed to fork+exec lpadmin for printer redirection (and
+	 * the xrandr resize helper); on non-OpenBSD this is a no-op. */
+	if (pledge("stdio rpath wpath cpath unix proc exec", NULL) != 0)
 		rdp_warn("pledge session: %s", strerror(errno));
 
 	struct rdp_audio *audio = rdp_audio_open();
@@ -1425,9 +1428,18 @@ main(int argc, char *argv[])
 	int drive_fd = fuse_drive_fd(drive);
 #endif
 
+	/* Printer redirection: one AF_UNIX listener serves the custom CUPS
+	 * backend.  Best effort: a failure here leaves the module inert and
+	 * never breaks the session. */
+	struct rdp_printer printer;
+	(void)rdp_printer_init(&printer, BE_FD);
+
 	while (!want_shutdown) {
-		struct pollfd pfd[3];
+		/* Fixed slots 0..2 (backend, X, optional fuse) plus the
+		 * printer listener and its accepted backend connections. */
+		struct pollfd pfd[3 + 1 + RDP_PRINTER_MAX_CONNS];
 		int npfd = 2;
+		int printer_base;
 		int xfd = ConnectionNumber(dpy);
 		struct timespec now;
 		long elapsed_ms;
@@ -1452,7 +1464,14 @@ main(int argc, char *argv[])
 		}
 #endif
 
+		printer_base = npfd;
+		(void)rdp_printer_fill_pollfds(&printer, pfd, &npfd,
+		    (int)(sizeof pfd / sizeof pfd[0]));
+
 		(void)poll(pfd, (nfds_t)npfd, FRAME_INTERVAL_MS);
+
+		rdp_printer_service(&printer, pfd + printer_base,
+		    npfd - printer_base);
 
 		if (pfd[0].revents & POLLIN) {
 			uint32_t type;
@@ -1540,6 +1559,10 @@ main(int argc, char *argv[])
 				fuse_drive_handle_fs_rsp(drive, &rsp,
 				    buf + sizeof rsp,
 				    (size_t)n - sizeof rsp);
+			} else if (type == RDP_BE_PRINTER_DEVICE
+			    && n >= (ssize_t)sizeof(struct rdp_be_printer_device)) {
+				rdp_printer_handle_device(&printer, buf,
+				    (size_t)n);
 			} else if (type == RDP_BE_BYE) {
 				break;
 			}
@@ -1628,6 +1651,7 @@ main(int argc, char *argv[])
 	}
 
 	rdp_info("rdp-session shutting down");
+	rdp_printer_close(&printer);
 	fuse_drive_free(drive);
 	rdp_h264_close(h264);
 	rdp_audio_close(audio);

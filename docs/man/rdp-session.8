@@ -186,14 +186,51 @@ is unavailable, the kernel is too old, or the host is neither Linux nor
 OpenBSD, the session simply runs without the mount and drive operations
 remain reachable only through the backend protocol.
 The mount is removed when the session process exits.
+.Pp
+Each printer the client redirects over the RDPDR channel is exposed
+inside the session as a CUPS print queue.
+When the worker announces a printer,
+.Nm
+sanitizes its name into a CUPS queue name (an
+.Sy rdp-
+prefix, with characters outside
+.Sy [A-Za-z0-9_-]
+mapped to
+.Sq _ )
+and runs
+.Xr lpadmin 8
+to create a RAW queue whose device URI points at a per-session
+.Ux Ns -domain
+socket served by the session.
+The companion CUPS backend
+.Sy rdp-cups-backend ,
+installed as
+.Pa /usr/lib/cups/backend/rdp ,
+forwards each job's spool to that socket;
+.Nm
+relays it to the worker (bounded at 4 MiB), which drives the MS-RDPEPC
+print sequence to the client.
+Printer redirection is best-effort: if
+.Xr lpadmin 8
+is absent or a queue cannot be created (for example the session user is
+not a CUPS administrator), it is logged and skipped and the session is
+unaffected.
+The created queues are removed and the socket unlinked when the session
+exits.
 .Sh FILES
 .Bl -tag -width Ds
 .It Pa ~/RemoteDrive
 Mount point for redirected client drives (Linux, read-write; OpenBSD
 read-write but experimental).
+.It Pa /usr/lib/cups/backend/rdp
+The
+.Sy rdp-cups-backend
+helper, installed by hand (root owned, mode 0755) so the system cupsd can
+forward redirected print jobs.
 .El
 .Sh SEE ALSO
 .Xr rdpd 8 ,
-.Xr rdp-sessionmgr 8
+.Xr rdp-sessionmgr 8 ,
+.Xr lpadmin 8
 .Sh AUTHORS
 .An Renaud Allard Aq Mt renaud@allard.it

@@ -76,14 +76,19 @@ BACKEND_LIB  = src/backend/libbackend.a
 SESSION_OBJS = src/session/rdp_session.o src/session/clip_x11.o \
 	src/channels/cliprdr.o \
 	src/session/fuse_drive.o $(FUSE_BACKEND_OBJ) \
+	src/session/printer.o \
 	$(WAYLAND_OBJ) $(AUDIO_OBJ)
 SESSION_PROG = src/session/rdp-session
+
+# Standalone CUPS backend, installed separately into the cupsd backend dir.
+CUPS_BACKEND_PROG = src/session/rdp-cups-backend
 
 # Daemon objects.
 RDPD_OBJS = src/daemon/rdpd.o src/daemon/conn.o src/daemon/sandbox.o $(SESSMGR_CLIENT_OBJ) \
 	$(BACKEND_OBJS) $(CHANNELS_OBJS)
 
-PROGS = src/daemon/rdpd src/sessionmgr/rdp-sessionmgr $(SESSION_PROG)
+PROGS = src/daemon/rdpd src/sessionmgr/rdp-sessionmgr $(SESSION_PROG) \
+	$(CUPS_BACKEND_PROG)
 
 REGRESS_PROGS = \
 	regress/common/buf_test \
@@ -99,6 +104,7 @@ REGRESS_PROGS = \
 	regress/wire/rdp_pdu_test \
 	regress/wire/rdpdr_test \
 	regress/wire/cliprdr_test \
+	regress/wire/printer_test \
 	$(FUSE_REGRESS) \
 	$(OBSD_FUSE_REGRESS)
 
@@ -159,6 +165,13 @@ src/session/clip_x11.o: src/session/clip_x11.c
 $(SESSION_PROG): $(SESSION_OBJS) $(BACKEND_LIB) $(WIRE_LIB) $(COMMON_LIB)
 	$(CC) $(LDFLAGS) -o $@ $(SESSION_OBJS) $(BACKEND_LIB) $(WIRE_LIB) $(COMMON_LIB) \
 		$(X11_LIBS) $(X264_LIBS) $(AUDIO_LIBS) $(WLROOTS_LIBS)
+
+# The CUPS backend is a tiny dependency free helper (no libcups, no
+# libcommon); it parses argv/env and does blocking socket I/O.  It is built
+# here but NOT auto-installed: it must be copied to the cupsd backend dir by
+# hand (see README), since that is root owned and outside $(PREFIX).
+$(CUPS_BACKEND_PROG): src/session/cups_backend.c
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ src/session/cups_backend.c
 
 .c.o:
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -225,6 +238,19 @@ regress/wire/cliprdr_test: regress/wire/cliprdr_test.c src/channels/cliprdr.c \
 		-o $@ regress/wire/cliprdr_test.c src/channels/cliprdr.c \
 		src/common/buf.c src/common/utf16.c
 
+# Printer module unit test.  printer.c is recompiled with the test so the
+# sanitization and the wire header layout are covered directly; $(TEST_SAN)
+# catches any out-of-bounds in the name sanitizer.  It links the backend
+# framing and io/log printer.c calls into, but exercises only the
+# dependency free pieces (no CUPS, no socket).
+regress/wire/printer_test: regress/wire/printer_test.c \
+		src/session/printer.c src/backend/proto.c \
+		src/common/io.c src/common/log.c
+	$(CC) $(CFLAGS) $(TEST_SAN) -Isrc/include \
+		-o $@ regress/wire/printer_test.c \
+		src/session/printer.c src/backend/proto.c \
+		src/common/io.c src/common/log.c
+
 # Drive read-path FUSE protocol test.  The protocol agnostic core
 # (fuse_drive.c) and the Linux raw /dev/fuse backend (fuse_drive_linux.c)
 # are recompiled together with -DRDP_FUSE_TEST so the dispatch is callable
@@ -284,6 +310,21 @@ regress/integ/linux_fuse_live: regress/integ/linux_fuse_live.c \
 		src/session/fuse_drive.c src/session/fuse_drive_linux.c \
 		src/common/io.c src/common/log.c
 
+# Live end to end test of the session printer redirection against a REAL
+# cupsd.  NOT part of `regress` (needs CUPS, lpadmin/lp, sudo to install the
+# backend).  Drive it through regress/integ/printer_live.sh:
+#   make regress/integ/printer_live
+#   ./regress/integ/printer_live.sh
+# It links printer.c with a harness that creates a real CUPS queue, prints a
+# file through lp, and verifies the mock worker received the RDP_BE_PRINT_JOB.
+regress/integ/printer_live: regress/integ/printer_live.c \
+		src/session/printer.c src/backend/proto.c \
+		src/common/io.c src/common/log.c src/common/str.c
+	$(CC) $(CFLAGS) -Isrc/include \
+		-o $@ regress/integ/printer_live.c \
+		src/session/printer.c src/backend/proto.c \
+		src/common/io.c src/common/log.c src/common/str.c
+
 # Live validation of the X11 clipboard bridge (clip_x11.c) against a REAL X
 # server (Xvfb) using the real xclip as the cooperating X client.  NOT part of
 # `regress` (it spawns Xvfb): build it by hand and run it:
@@ -327,6 +368,7 @@ clean:
 	rm -f $(BACKEND_OBJS) $(BACKEND_LIB)
 	rm -f $(CHANNELS_OBJS) $(CHANNELS_LIB)
 	rm -f $(SESSION_OBJS) $(SESSION_PROG)
+	rm -f $(CUPS_BACKEND_PROG)
 	rm -f $(RDPD_OBJS) $(PROGS)
 	rm -f $(DDX_OBJS) $(DDX_SO)
 	rm -f regress/common/*.o regress/wire/*.o $(REGRESS_PROGS)

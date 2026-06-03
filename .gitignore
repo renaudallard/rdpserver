@@ -9,6 +9,7 @@ src/include/config.h
 src/daemon/rdpd
 src/sessionmgr/rdp-sessionmgr
 src/session/rdp-session
+src/session/rdp-cups-backend
 
 # regress + fuzz
 regress/common/*_test
