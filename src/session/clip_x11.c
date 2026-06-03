@@ -60,6 +60,11 @@
 
 #define CHUNK 0x4000
 
+/* Upper bound on a single clipboard transfer in either direction.  Matches
+ * the backend's 4 MiB max payload and bounds memory against a hostile or
+ * runaway selection owner. */
+#define CLIP_X11_MAX (4u * 1024u * 1024u)
+
 static int xfixes_event_base = 0;
 
 int
@@ -80,6 +85,7 @@ rdp_clip_init(struct rdp_clip *c, Display *dpy, int be_fd)
 	c->a_text          = XInternAtom(dpy, "TEXT", False);
 	c->a_compound_text = XInternAtom(dpy, "COMPOUND_TEXT", False);
 	c->a_timestamp     = XInternAtom(dpy, "TIMESTAMP", False);
+	c->a_incr          = XInternAtom(dpy, "INCR", False);
 	c->a_property      = XInternAtom(dpy, "_RDP_CLIP_DATA", False);
 
 	memset(&wa, 0, sizeof wa);
@@ -107,37 +113,110 @@ rdp_clip_close(struct rdp_clip *c)
 		XDestroyWindow(c->dpy, c->owner_win);
 	free(c->x_text);
 	free(c->rdp_text);
+	free(c->incr_buf);
 	memset(c, 0, sizeof *c);
 }
 
-static char *
-read_text_property(struct rdp_clip *c, Window win, Atom prop, size_t *len_out)
+static void
+clip_incr_reset(struct rdp_clip *c)
 {
-	Atom actual_type;
-	int actual_format;
-	unsigned long nitems = 0, bytes_after = 0;
-	unsigned char *data = NULL;
-	char *out = NULL;
+	free(c->incr_buf);
+	c->incr_buf = NULL;
+	c->incr_len = 0;
+	c->incr_active = 0;
+	c->incr_discard = 0;
+}
 
-	if (XGetWindowProperty(c->dpy, win, prop, 0, (long)CHUNK,
-		True /* delete */, AnyPropertyType,
-		&actual_type, &actual_format,
-		&nitems, &bytes_after, &data) != Success)
-		return NULL;
-	if (data == NULL) {
-		*len_out = 0;
-		return NULL;
-	}
-	if (actual_format == 8 && nitems > 0) {
-		out = malloc(nitems + 1);
-		if (out != NULL) {
-			memcpy(out, data, nitems);
-			out[nitems] = '\0';
-			*len_out = nitems;
+/* Return a property's type without consuming it (a zero-length read). */
+static Atom
+peek_property_type(struct rdp_clip *c, Window win, Atom prop)
+{
+	Atom type = None;
+	int fmt;
+	unsigned long nitems = 0, bytes_after = 0;
+	unsigned char *chunk = NULL;
+
+	if (XGetWindowProperty(c->dpy, win, prop, 0, 0, False,
+		AnyPropertyType, &type, &fmt, &nitems, &bytes_after,
+		&chunk) != Success)
+		return None;
+	if (chunk != NULL)
+		XFree(chunk);
+	return type;
+}
+
+/* Read the whole current value of a format-8 property into a malloc'd,
+ * NUL-terminated buffer, looping over bytes_after so a value larger than
+ * CHUNK is not truncated; caller frees.  Does NOT delete the property.
+ * Returns NULL with *len_out = 0 on a non-8 format, an empty value, an
+ * oversize value (capped at CLIP_X11_MAX), or allocation failure. */
+static uint8_t *
+read_property_bytes(struct rdp_clip *c, Window win, Atom prop, size_t *len_out)
+{
+	uint8_t *out = NULL;
+	size_t out_len = 0;
+	long offset = 0;   /* in 32-bit units, as XGetWindowProperty expects */
+
+	*len_out = 0;
+	for (;;) {
+		Atom type;
+		int fmt;
+		unsigned long nitems = 0, bytes_after = 0;
+		unsigned char *chunk = NULL;
+		uint8_t *nb;
+
+		if (XGetWindowProperty(c->dpy, win, prop, offset,
+			(long)(CHUNK / 4), False, AnyPropertyType,
+			&type, &fmt, &nitems, &bytes_after, &chunk) != Success)
+			break;
+		if (fmt != 8 || nitems == 0 || chunk == NULL) {
+			if (chunk != NULL)
+				XFree(chunk);
+			break;
 		}
+		if (out_len + nitems > CLIP_X11_MAX) {
+			XFree(chunk);
+			break;   /* refuse oversize; drop the partial read */
+		}
+		nb = realloc(out, out_len + nitems + 1);
+		if (nb == NULL) {
+			XFree(chunk);
+			free(out);
+			out = NULL;
+			out_len = 0;
+			break;
+		}
+		out = nb;
+		memcpy(out + out_len, chunk, nitems);
+		out_len += nitems;
+		offset += (long)(nitems / 4);
+		XFree(chunk);
+		if (bytes_after == 0)
+			break;
 	}
-	XFree(data);
+	if (out != NULL) {
+		out[out_len] = '\0';
+		*len_out = out_len;
+	}
 	return out;
+}
+
+/* Cache freshly-fetched X selection bytes and tell the worker the X side
+ * now holds clipboard content.  Takes ownership of `data`. */
+static void
+deliver_x_selection(struct rdp_clip *c, uint8_t *data, size_t len)
+{
+	struct rdp_be_clip_offer offer = { RDP_BE_CLIP_FMT_TEXT };
+
+	if (data == NULL || len == 0) {
+		free(data);
+		return;
+	}
+	free(c->x_text);
+	c->x_text = (char *)data;
+	c->x_text_len = len;
+	rdp_debug("clip: cached X selection, %zu bytes", len);
+	(void)rdp_be_send(c->be_fd, RDP_BE_CLIP_OFFER, &offer, sizeof offer);
 }
 
 static void
@@ -152,40 +231,120 @@ on_xfixes_selection_notify(struct rdp_clip *c, XEvent *ev)
 	}
 	rdp_debug("clip: CLIPBOARD owner changed to 0x%lx; fetching",
 		(unsigned long)xe->owner);
+	clip_incr_reset(c);   /* abandon any in-progress incremental fetch */
 	c->x_fetch_pending = 1;
 	XConvertSelection(c->dpy, c->a_clipboard, c->a_utf8_string,
 		c->a_property, c->owner_win, xe->timestamp);
 	XFlush(c->dpy);
 }
 
+/* One INCR chunk has arrived in our scratch property (PropertyNotify with
+ * a new value).  Append it; a zero-length chunk marks the end. */
+static void
+on_incr_property(struct rdp_clip *c)
+{
+	uint8_t *chunk;
+	size_t clen;
+	uint8_t *nb;
+
+	chunk = read_property_bytes(c, c->owner_win, c->a_property, &clen);
+	/* Deleting the property tells the owner to send the next chunk. */
+	XDeleteProperty(c->dpy, c->owner_win, c->a_property);
+	XFlush(c->dpy);
+
+	if (chunk == NULL || clen == 0) {
+		/* Terminator: deliver the assembled value, unless we gave up
+		 * mid-transfer and were only draining the owner to its end. */
+		uint8_t *all = c->incr_discard ? NULL : c->incr_buf;
+		size_t alllen = c->incr_discard ? 0 : c->incr_len;
+		free(chunk);
+		c->incr_buf = NULL;
+		c->incr_len = 0;
+		c->incr_active = 0;
+		c->incr_discard = 0;
+		c->x_fetch_pending = 0;
+		deliver_x_selection(c, all, alllen);
+		return;
+	}
+	/* Once over budget (or after an allocation failure) we keep acking
+	 * each chunk so the owner's INCR handshake does not wedge, but throw
+	 * the data away and deliver nothing at the terminator. */
+	if (c->incr_discard) {
+		free(chunk);
+		return;
+	}
+	if (c->incr_len + clen > CLIP_X11_MAX) {
+		free(chunk);
+		free(c->incr_buf);
+		c->incr_buf = NULL;
+		c->incr_len = 0;
+		c->incr_discard = 1;
+		return;
+	}
+	nb = realloc(c->incr_buf, c->incr_len + clen);
+	if (nb == NULL) {
+		free(chunk);
+		free(c->incr_buf);
+		c->incr_buf = NULL;
+		c->incr_len = 0;
+		c->incr_discard = 1;
+		return;
+	}
+	c->incr_buf = nb;
+	memcpy(c->incr_buf + c->incr_len, chunk, clen);
+	c->incr_len += clen;
+	free(chunk);
+}
+
 static void
 on_selection_notify(struct rdp_clip *c, XEvent *ev)
 {
 	XSelectionEvent *se = &ev->xselection;
-	char *text;
+	uint8_t *data;
 	size_t len;
 
 	if (se->selection != c->a_clipboard) return;
-	c->x_fetch_pending = 0;
 	if (se->property == None) {
 		rdp_debug("clip: SelectionNotify with property None");
+		c->x_fetch_pending = 0;
 		return;
 	}
-	text = read_text_property(c, c->owner_win, se->property, &len);
-	if (text == NULL || len == 0) {
-		free(text);
+	/* A large value is delivered incrementally: the property carries the
+	 * INCR marker and the data follows one chunk per PropertyNotify.
+	 * Deleting the property signals the owner to begin. */
+	if (peek_property_type(c, c->owner_win, se->property) == c->a_incr) {
+		clip_incr_reset(c);
+		c->incr_active = 1;
+		XDeleteProperty(c->dpy, c->owner_win, se->property);
+		XFlush(c->dpy);
 		return;
 	}
-	free(c->x_text);
-	c->x_text = text;
-	c->x_text_len = len;
-	rdp_debug("clip: cached X text, %zu bytes", len);
+	c->x_fetch_pending = 0;
+	data = read_property_bytes(c, c->owner_win, se->property, &len);
+	XDeleteProperty(c->dpy, c->owner_win, se->property);
+	XFlush(c->dpy);
+	deliver_x_selection(c, data, len);
+}
 
-	{
-		struct rdp_be_clip_offer offer = { RDP_BE_CLIP_FMT_TEXT };
-		(void)rdp_be_send(c->be_fd, RDP_BE_CLIP_OFFER,
-			&offer, sizeof offer);
-	}
+/* Set a format-8 property in CHUNK-sized pieces (Replace then Append) so a
+ * value larger than the X server's maximum request size is still delivered;
+ * the server assembles the whole property before the requestor reads it. */
+static void
+put_property_chunked(struct rdp_clip *c, Window win, Atom prop, Atom type,
+		const unsigned char *data, size_t len)
+{
+	size_t off = 0;
+	int mode = PropModeReplace;
+
+	do {
+		size_t chunk = len - off;
+		if (chunk > CHUNK)
+			chunk = CHUNK;
+		XChangeProperty(c->dpy, win, prop, type, 8, mode,
+			data + off, (int)chunk);
+		mode = PropModeAppend;
+		off += chunk;
+	} while (off < len);
 }
 
 static void
@@ -201,8 +360,8 @@ answer_selection_request(struct rdp_clip *c, Window requestor,
 	ev.xselection.target    = target;
 	ev.xselection.time      = t;
 	if (data != NULL && len > 0) {
-		XChangeProperty(c->dpy, requestor, property, target, 8,
-			PropModeReplace, data, (int)len);
+		put_property_chunked(c, requestor, property, target,
+			(const unsigned char *)data, len);
 		ev.xselection.property = property;
 	} else {
 		ev.xselection.property = None;
@@ -295,6 +454,16 @@ rdp_clip_handle_xevent(struct rdp_clip *c, XEvent *ev)
 	if (ev->type == SelectionNotify) {
 		on_selection_notify(c, ev);
 		return 1;
+	}
+	if (ev->type == PropertyNotify) {
+		XPropertyEvent *pe = &ev->xproperty;
+		if (c->incr_active && pe->window == c->owner_win
+		    && pe->atom == c->a_property
+		    && pe->state == PropertyNewValue) {
+			on_incr_property(c);
+			return 1;
+		}
+		return 0;
 	}
 	if (ev->type == SelectionRequest) {
 		on_selection_request(c, ev);

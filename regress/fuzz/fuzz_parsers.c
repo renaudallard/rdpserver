@@ -212,6 +212,31 @@ fuzz_cliprdr(size_t iters)
 		(void)rdp_cliprdr_parse_format_list(buf, len, 0,
 			&has_uc, &has_text);
 		(void)rdp_cliprdr_parse_format_data_request(buf, len, &fmt);
+
+		/* Drive the channel reassembler with a fragment stream
+		 * derived from the random buffer: each record is a flags
+		 * byte, a 4-byte declared total, then a variable body. */
+		{
+			struct rdp_cliprdr_reasm r;
+			const uint8_t *pdu;
+			size_t pdu_len, off = 0;
+			rdp_cliprdr_reasm_init(&r, 1u << 20);
+			while (off + 5 <= len) {
+				uint32_t flags = buf[off] & 0x3u;
+				uint32_t total = (uint32_t)buf[off + 1]
+					| ((uint32_t)buf[off + 2] << 8)
+					| ((uint32_t)buf[off + 3] << 16)
+					| ((uint32_t)buf[off + 4] << 24);
+				size_t avail = len - (off + 5);
+				size_t fl = avail ? (buf[off] % (avail + 1)) : 0;
+				off += 5;
+				if (rdp_cliprdr_reasm_feed(&r, buf + off, fl,
+					total, flags, &pdu, &pdu_len) == 1)
+					rdp_cliprdr_reasm_reset(&r);
+				off += fl;
+			}
+			rdp_cliprdr_reasm_reset(&r);
+		}
 	}
 }
 

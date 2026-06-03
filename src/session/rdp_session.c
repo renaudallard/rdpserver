@@ -115,6 +115,13 @@
 
 static volatile sig_atomic_t want_shutdown;
 
+/* Backend receive buffer.  Sized to the backend's 4 MiB maximum payload so
+ * a large clipboard transfer (image or HTML) is not rejected with EMSGSIZE
+ * and the connection dropped.  Shared by the session lifecycle's recv
+ * loops, which never run concurrently. */
+#define BE_RECV_BUF_SZ (4u * 1024u * 1024u + 0x1000u)
+static uint8_t be_recv_buf[BE_RECV_BUF_SZ];
+
 static void
 on_signal(int sig)
 {
@@ -859,8 +866,9 @@ run_ddx_mode(int w, int h)
 
 		if (pfd[0].revents & POLLIN) {
 			uint32_t type;
-			static uint8_t buf[0x10000];
-			ssize_t n = rdp_be_recv(BE_FD, &type, buf, sizeof buf);
+			uint8_t *buf = be_recv_buf;
+			ssize_t n = rdp_be_recv(BE_FD, &type, buf,
+				sizeof be_recv_buf);
 			if (n <= 0) break;
 			if (type == RDP_BE_INPUT_KEY
 			    && n >= (ssize_t)sizeof(struct rdp_be_input_key)) {
@@ -1060,8 +1068,9 @@ run_wayland_mode(int w, int h)
 
 		if (pfd.revents & POLLIN) {
 			uint32_t type;
-			static uint8_t buf[0x10000];
-			ssize_t n = rdp_be_recv(BE_FD, &type, buf, sizeof buf);
+			uint8_t *buf = be_recv_buf;
+			ssize_t n = rdp_be_recv(BE_FD, &type, buf,
+				sizeof be_recv_buf);
 			if (n <= 0) break;
 			if (type == RDP_BE_INPUT_KEY
 			    && n >= (ssize_t)sizeof(struct rdp_be_input_key)) {
@@ -1447,8 +1456,9 @@ main(int argc, char *argv[])
 
 		if (pfd[0].revents & POLLIN) {
 			uint32_t type;
-			static uint8_t buf[0x10000];
-			ssize_t n = rdp_be_recv(BE_FD, &type, buf, sizeof buf);
+			uint8_t *buf = be_recv_buf;
+			ssize_t n = rdp_be_recv(BE_FD, &type, buf,
+				sizeof be_recv_buf);
 			if (n < 0) break;
 			if (n == 0) break;
 			if (type == RDP_BE_INPUT_KEY

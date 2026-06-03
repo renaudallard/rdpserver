@@ -57,7 +57,16 @@ struct rdp_clip {
 	Atom     a_text;
 	Atom     a_compound_text;
 	Atom     a_timestamp;
+	Atom     a_incr;            /* INCR transfer marker type */
 	Atom     a_property;         /* our scratch property name */
+
+	/* Incremental (INCR) read in progress: a remote owner is feeding us
+	 * a large selection one chunk per PropertyNotify.  Accumulate here
+	 * until a zero-length chunk marks the end, bounded by CLIP_X11_MAX. */
+	int      incr_active;
+	int      incr_discard;     /* over budget: drain chunks, keep none */
+	uint8_t *incr_buf;
+	size_t   incr_len;
 
 	/* Cached content offered by the X side (from xterm copy etc.). */
 	char    *x_text;

@@ -226,7 +226,17 @@ struct clip_state {
 	uint16_t user_id;
 	int      use_long_names;
 	int      caps_sent;
+
+	/* Inbound CLIPRDR channel fragment reassembly (CHANNEL_PDU_HEADER
+	 * FIRST..LAST), bounded by CLIP_MAX_PDU. */
+	struct rdp_cliprdr_reasm reasm;
 };
+
+/* Largest reassembled inbound CLIPRDR PDU we accept.  A format-data
+ * response can carry up to BE_MAX_PAYLOAD of UTF-8 text, which the client
+ * sends as UTF-16 (twice the size) plus headers; 8 MiB covers it and
+ * bounds memory against a hostile client. */
+#define CLIP_MAX_PDU (8u * 1024u * 1024u)
 
 /* Send a CLIPRDR PDU: wrap `payload[0..len)` in a CHANNEL_PDU_HEADER
  * (FIRST | LAST) and ship via MCS Send Data Indication on the
@@ -449,18 +459,33 @@ clip_handle_be(struct rdp_tls *t, struct clip_state *cs,
 		utf16 = malloc(need);
 		if (utf16 == NULL) return -1;
 		{
+			uint8_t *resp;
+			size_t resp_cap;
 			size_t got = rdp_utf8_to_utf16le(utf16, need - 2,
 				(const char *)payload + sizeof h,
 				len - sizeof h);
 			if (got == (size_t)-1) got = 0;
 			utf16[got]     = 0;
 			utf16[got + 1] = 0;
+			/* The response (header + UTF-16 data) can far exceed the
+			 * fixed pdu buffer for a large paste; size it to the
+			 * data.  send_clip_pdu fragments it onto the wire. */
+			resp_cap = RDP_CLIPRDR_HDR_LEN + got + 2;
+			resp = malloc(resp_cap);
+			if (resp == NULL) {
+				free(utf16);
+				return -1;
+			}
 			n = rdp_cliprdr_build_format_data_response(
-				pdu, sizeof pdu, utf16, got + 2, 1);
+				resp, resp_cap, utf16, got + 2, 1);
 			free(utf16);
-			if (n < 0) return -1;
+			if (n < 0) {
+				free(resp);
+				return -1;
+			}
 			rc = send_clip_pdu(t, cs->user_id, cs->channel_id,
-				pdu, (size_t)n);
+				resp, (size_t)n);
+			free(resp);
 		}
 		return rc;
 	}
@@ -743,11 +768,28 @@ maybe_dispatch_clip(struct rdp_tls *t, int be_fd,
 		&payload, &payload_len) < 0)
 		return 0;
 
-	/* If this is on the CLIPRDR channel, hand off. */
+	/* If this is on the CLIPRDR channel, reassemble fragments then hand
+	 * off the complete PDU.  The 8-byte CHANNEL_PDU_HEADER carries the
+	 * full PDU length and FIRST/LAST flags; a single-fragment PDU (the
+	 * common case) is dispatched in place without a copy. */
 	if (cs->enabled && cid == cs->channel_id) {
+		uint32_t total, cflags;
+		const uint8_t *pdu;
+		size_t pdu_len;
+
 		if (payload_len < 8) return 1;
-		(void)clip_handle_pdu(t, be_fd, cs, payload + 8,
-			payload_len - 8);
+		total = (uint32_t)payload[0] | ((uint32_t)payload[1] << 8)
+			| ((uint32_t)payload[2] << 16)
+			| ((uint32_t)payload[3] << 24);
+		cflags = (uint32_t)payload[4] | ((uint32_t)payload[5] << 8)
+			| ((uint32_t)payload[6] << 16)
+			| ((uint32_t)payload[7] << 24);
+
+		if (rdp_cliprdr_reasm_feed(&cs->reasm, payload + 8,
+			payload_len - 8, total, cflags, &pdu, &pdu_len) == 1) {
+			(void)clip_handle_pdu(t, be_fd, cs, pdu, pdu_len);
+			rdp_cliprdr_reasm_reset(&cs->reasm);
+		}
 		return 1;
 	}
 
@@ -2232,6 +2274,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 	uint32_t logon_id = 0;
 	uint8_t  arc_random[16] = {0};
 	clip.user_id = user_id;
+	rdp_cliprdr_reasm_init(&clip.reasm, CLIP_MAX_PDU);
 	dynvc.dv.disp_channel_id = -1;
 	dynvc.dv.gfx_channel_id = -1;
 	memset(&client_info, 0, sizeof client_info);
@@ -2984,6 +3027,7 @@ send_disconnect:
 	}
 
 done:
+	rdp_cliprdr_reasm_reset(&clip.reasm);
 	explicit_bzero(nla_pass, sizeof nla_pass);
 	if (t != NULL) rdp_tls_close(t);
 	(void)close(fd);

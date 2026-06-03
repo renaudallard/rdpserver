@@ -34,6 +34,7 @@
 
 #include "../common/buf.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 static int
@@ -192,5 +193,65 @@ rdp_cliprdr_parse_format_data_request(const uint8_t *p, size_t len,
 	if (len < 4) return -1;
 	*format_id_out = (uint32_t)p[0] | ((uint32_t)p[1] << 8)
 		| ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+	return 0;
+}
+
+void
+rdp_cliprdr_reasm_init(struct rdp_cliprdr_reasm *r, size_t max_pdu)
+{
+	r->buf = NULL;
+	r->cap = 0;
+	r->len = 0;
+	r->max_pdu = max_pdu;
+	r->active = 0;
+}
+
+void
+rdp_cliprdr_reasm_reset(struct rdp_cliprdr_reasm *r)
+{
+	free(r->buf);
+	r->buf = NULL;
+	r->cap = 0;
+	r->len = 0;
+	r->active = 0;
+}
+
+int
+rdp_cliprdr_reasm_feed(struct rdp_cliprdr_reasm *r,
+		const uint8_t *frag, size_t frag_len,
+		uint32_t total, uint32_t flags,
+		const uint8_t **pdu, size_t *pdu_len)
+{
+	/* A self-contained single fragment is the common case: hand it back
+	 * in place with no allocation. */
+	if ((flags & CHANNEL_FLAG_FIRST) && (flags & CHANNEL_FLAG_LAST)) {
+		rdp_cliprdr_reasm_reset(r);
+		*pdu = frag;
+		*pdu_len = frag_len;
+		return 1;
+	}
+	if (flags & CHANNEL_FLAG_FIRST) {
+		rdp_cliprdr_reasm_reset(r);
+		if (total == 0 || total > r->max_pdu)
+			return -1;
+		r->buf = malloc(total);
+		if (r->buf == NULL)
+			return -1;
+		r->cap = total;
+		r->active = 1;
+	}
+	if (!r->active)
+		return -1;   /* a NEXT/LAST fragment without a FIRST */
+	if (frag_len > r->cap - r->len) {
+		rdp_cliprdr_reasm_reset(r);
+		return -1;   /* fragment overruns the declared total */
+	}
+	memcpy(r->buf + r->len, frag, frag_len);
+	r->len += frag_len;
+	if (flags & CHANNEL_FLAG_LAST) {
+		*pdu = r->buf;
+		*pdu_len = r->len;
+		return 1;
+	}
 	return 0;
 }

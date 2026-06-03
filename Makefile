@@ -97,6 +97,7 @@ REGRESS_PROGS = \
 	regress/wire/capset_test \
 	regress/wire/rdp_pdu_test \
 	regress/wire/rdpdr_test \
+	regress/wire/cliprdr_test \
 	$(FUSE_REGRESS) \
 	$(OBSD_FUSE_REGRESS)
 
@@ -215,6 +216,14 @@ regress/wire/rdpdr_test: regress/wire/rdpdr_test.c src/channels/rdpdr.c \
 		-o $@ regress/wire/rdpdr_test.c src/channels/rdpdr.c \
 		src/common/log.c
 
+# CLIPRDR channel reassembly test.  cliprdr.c is recompiled with the test;
+# $(TEST_SAN) covers the attacker-controlled fragment-length bounds.
+regress/wire/cliprdr_test: regress/wire/cliprdr_test.c src/channels/cliprdr.c \
+		src/common/buf.c
+	$(CC) $(CFLAGS) $(TEST_SAN) -Isrc/include \
+		-o $@ regress/wire/cliprdr_test.c src/channels/cliprdr.c \
+		src/common/buf.c
+
 # Drive read-path FUSE protocol test.  The protocol agnostic core
 # (fuse_drive.c) and the Linux raw /dev/fuse backend (fuse_drive_linux.c)
 # are recompiled together with -DRDP_FUSE_TEST so the dispatch is callable
@@ -273,6 +282,28 @@ regress/integ/linux_fuse_live: regress/integ/linux_fuse_live.c \
 		-o $@ regress/integ/linux_fuse_live.c \
 		src/session/fuse_drive.c src/session/fuse_drive_linux.c \
 		src/common/io.c src/common/log.c
+
+# Live validation of the X11 clipboard bridge (clip_x11.c) against a REAL X
+# server (Xvfb) using the real xclip as the cooperating X client.  NOT part of
+# `regress` (it spawns Xvfb): build it by hand and run it:
+#   make regress/integ/clip_x11_live
+#   ./regress/integ/clip_x11_live
+# It links clip_x11.c with the backend framing and a harness that plays both
+# the session main loop and the worker.  It exercises the size-robustness
+# paths (bytes_after read loop, INCR reader, chunked PropModeAppend write) in
+# both directions for small and ~1 MiB text.  xclip ships even 1 MiB directly
+# (BIG-REQUESTS), so a dedicated case drives the INCR reader with the harness's
+# own INCR selection owner.  Built with $(TEST_SAN) where the toolchain
+# supports it so leaks/UAF/UB in the clipboard code are caught.
+regress/integ/clip_x11_live: regress/integ/clip_x11_live.c \
+		src/session/clip_x11.c src/backend/proto.c \
+		src/common/io.c src/common/log.c
+	$(CC) $(CFLAGS) $(TEST_SAN) $(X11_CFLAGS) -Isrc/include \
+		-DXVFB_PATH=\"$(XVFB_PATH)\" \
+		-o $@ regress/integ/clip_x11_live.c \
+		src/session/clip_x11.c src/backend/proto.c \
+		src/common/io.c src/common/log.c \
+		$(X11_LIBS)
 
 regress/fuzz/fuzz_parsers: regress/fuzz/fuzz_parsers.o \
 		$(WIRE_LIB) $(CHANNELS_LIB) $(SEC_LIB) $(COMMON_LIB)
