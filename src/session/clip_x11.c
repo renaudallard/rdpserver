@@ -57,8 +57,10 @@
 
 #include <sys/stat.h>
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -77,6 +79,20 @@
 #define CLIP_FILE_RANGE_MAX \
 	(4u * 1024u * 1024u - (unsigned)sizeof(struct rdp_be_clip_file_data_hdr))
 
+/* RDP -> X file paste: bytes requested per range when downloading a client
+ * file into the temp dir.  A file larger than this needs successive range
+ * requests at advancing offsets.  Like CLIP_FILE_RANGE_MAX it must leave room
+ * for the FILE_DATA header so the worker's relayed frame (header + bytes)
+ * stays under the backend 4 MiB payload cap; otherwise a 4 MiB paste would be
+ * rejected by rdp_be_recv and tear the session down. */
+#define CLIP_FILE_DL_CHUNK \
+	(4u * 1024u * 1024u - (unsigned)sizeof(struct rdp_be_clip_file_data_hdr))
+
+/* RDP -> X file paste: cap on a single downloaded file.  A declared size above
+ * this aborts the whole paste rather than filling the disk from a hostile
+ * descriptor. */
+#define CLIP_FILE_DL_MAX (256ULL * 1024ULL * 1024ULL)
+
 static int xfixes_event_base = 0;
 
 int
@@ -88,6 +104,7 @@ rdp_clip_init(struct rdp_clip *c, Display *dpy, int be_fd)
 	memset(c, 0, sizeof *c);
 	c->dpy = dpy;
 	c->be_fd = be_fd;
+	c->dl_fd = -1;
 	c->root = DefaultRootWindow(dpy);
 
 	c->a_clipboard     = XInternAtom(dpy, "CLIPBOARD", False);
@@ -135,6 +152,148 @@ clip_files_reset(struct rdp_clip *c)
 	c->file_count = 0;
 }
 
+/*
+ * Sanitize an attacker-controlled file name into a safe relative path.  The
+ * client controls these names, so a value like "..\\..\\.ssh\\authorized_keys"
+ * or "/etc/cron.d/x" or "a/../../b" must never escape the base directory.  We
+ * fold backslashes to forward slashes, then walk the components: any empty,
+ * ".", or ".." component, an embedded NUL, or a leading slash (absolute path)
+ * rejects the whole name.  The surviving components are re-joined with single
+ * '/' separators into out.
+ */
+int
+rdp_clip_sanitize_name(const char *name, char *out, size_t out_cap)
+{
+	size_t i, comp_start, n, o = 0;
+
+	if (name == NULL || out == NULL || out_cap == 0)
+		return -1;
+	n = strlen(name);
+	if (n == 0)
+		return -1;
+	/* A leading separator (after folding) means an absolute path: reject. */
+	if (name[0] == '/' || name[0] == '\\')
+		return -1;
+
+	comp_start = 0;
+	for (i = 0; i <= n; i++) {
+		int sep = (i == n) || name[i] == '/' || name[i] == '\\';
+		if (!sep)
+			continue;
+		{
+			size_t clen = i - comp_start;
+			const char *comp = name + comp_start;
+
+			/* Reject an empty component (covers a trailing separator
+			 * and any "//" run) and the two traversal components. */
+			if (clen == 0)
+				return -1;
+			if (clen == 1 && comp[0] == '.')
+				return -1;
+			if (clen == 2 && comp[0] == '.' && comp[1] == '.')
+				return -1;
+			/* The split removed real separators; a NUL inside a
+			 * component would truncate the path, so refuse it. */
+			if (memchr(comp, '\0', clen) != NULL)
+				return -1;
+			/* Emit "/" before every component but the first. */
+			if (o != 0) {
+				if (o + 1 >= out_cap)
+					return -1;
+				out[o++] = '/';
+			}
+			if (o + clen >= out_cap)
+				return -1;
+			memcpy(out + o, comp, clen);
+			o += clen;
+		}
+		comp_start = i + 1;
+	}
+	if (o == 0 || o >= out_cap)
+		return -1;
+	out[o] = '\0';
+	return 0;
+}
+
+/* Recursively remove a directory tree.  Best effort: a failure to remove one
+ * entry does not abort the rest.  path must be a directory we created. */
+static void
+clip_rmtree(const char *path)
+{
+	DIR *d;
+	struct dirent *de;
+
+	if (path == NULL)
+		return;
+	d = opendir(path);
+	if (d == NULL) {
+		/* Not a directory (or gone): try to unlink it as a file. */
+		(void)unlink(path);
+		return;
+	}
+	while ((de = readdir(d)) != NULL) {
+		char child[4096];
+		struct stat st;
+
+		if (strcmp(de->d_name, ".") == 0
+		    || strcmp(de->d_name, "..") == 0)
+			continue;
+		if ((size_t)snprintf(child, sizeof child, "%s/%s",
+			path, de->d_name) >= sizeof child)
+			continue;
+		if (lstat(child, &st) != 0)
+			continue;
+		if (S_ISDIR(st.st_mode))
+			clip_rmtree(child);
+		else
+			(void)unlink(child);
+	}
+	(void)closedir(d);
+	(void)rmdir(path);
+}
+
+/* Clear the per-transfer download bookkeeping (open fd, descriptor table,
+ * counters) WITHOUT touching the temp dir.  Used when a paste completes
+ * successfully: the downloaded files must outlive the transfer so the pasting
+ * app can read them; the temp dir is removed by the next clip_dl_reset (a new
+ * paste, owner change, or close). */
+static void
+clip_dl_clear_state(struct rdp_clip *c)
+{
+	size_t i;
+
+	if (c->dl_fd >= 0) {
+		(void)close(c->dl_fd);
+		c->dl_fd = -1;
+	}
+	if (c->dl_descs != NULL) {
+		for (i = 0; i < c->dl_n; i++)
+			free(c->dl_descs[i].path);
+		free(c->dl_descs);
+		c->dl_descs = NULL;
+	}
+	c->dl_n = 0;
+	c->dl_idx = 0;
+	c->dl_off = 0;
+	c->dl_size = 0;
+	c->dl_stream = 0;
+	c->dl_active = 0;
+}
+
+/* Tear down any RDP -> X file paste fully: clear the bookkeeping AND
+ * recursively remove the temp dir and its downloaded files.  Leaves no fd,
+ * memory, or scratch files behind. */
+static void
+clip_dl_reset(struct rdp_clip *c)
+{
+	clip_dl_clear_state(c);
+	if (c->dl_tmpdir != NULL) {
+		clip_rmtree(c->dl_tmpdir);
+		free(c->dl_tmpdir);
+		c->dl_tmpdir = NULL;
+	}
+}
+
 void
 rdp_clip_close(struct rdp_clip *c)
 {
@@ -142,6 +301,7 @@ rdp_clip_close(struct rdp_clip *c)
 		XDestroyWindow(c->dpy, c->owner_win);
 	free(c->incr_buf);
 	clip_files_reset(c);
+	clip_dl_reset(c);
 	memset(c, 0, sizeof *c);
 }
 
@@ -215,6 +375,25 @@ send_clip_data(struct rdp_clip *c, uint32_t fmt, const uint8_t *data,
 		memcpy(buf + sizeof h, data, len);
 	(void)rdp_be_send(c->be_fd, RDP_BE_CLIP_DATA, buf, buf_len);
 	free(buf);
+}
+
+/* Ask the worker (which forwards to the RDP client) for one file's size or a
+ * byte range from the client's FileGroupDescriptorW offer.  Used by the RDP ->
+ * X file paste to download each file into the temp dir. */
+static void
+send_clip_file_request(struct rdp_clip *c, uint32_t stream_id, uint32_t lindex,
+		uint32_t flags, uint64_t pos, uint32_t cb_requested)
+{
+	struct rdp_be_clip_file_req rq;
+
+	memset(&rq, 0, sizeof rq);
+	rq.stream_id = stream_id;
+	rq.lindex = lindex;
+	rq.flags = flags;
+	rq.pos_low = (uint32_t)(pos & 0xffffffffu);
+	rq.pos_high = (uint32_t)(pos >> 32);
+	rq.cb_requested = cb_requested;
+	(void)rdp_be_send(c->be_fd, RDP_BE_CLIP_FILE_REQUEST, &rq, sizeof rq);
 }
 
 /* Send CLIP_FILE_DATA back to the worker: an 8-byte header (stream_id +
@@ -592,6 +771,366 @@ answer_selection_request(struct rdp_clip *c, Window requestor,
 	XFlush(c->dpy);
 }
 
+/* --- RDP -> X file paste: download client files into a temp dir --- */
+
+/* Ensure intermediate directories of the relative path `rel` exist under base
+ * (each created 0700).  rel has already been sanitized so no component can
+ * escape base.  Returns 0 on success, -1 on a mkdir failure. */
+static int
+clip_mkdirs_for(const char *base, const char *rel)
+{
+	char buf[4096];
+	size_t i;
+
+	for (i = 0; rel[i] != '\0'; i++) {
+		if (rel[i] != '/')
+			continue;
+		/* "base/" + rel[0..i) */
+		if ((size_t)snprintf(buf, sizeof buf, "%s/%.*s",
+			base, (int)i, rel) >= sizeof buf)
+			return -1;
+		if (mkdir(buf, 0700) != 0 && errno != EEXIST)
+			return -1;
+	}
+	return 0;
+}
+
+/* Create the private temp dir for an RDP -> X file paste.  Prefer
+ * $XDG_RUNTIME_DIR, then $TMPDIR, then /tmp (this is the running session's own
+ * scratch, owned by the user).  Stores the path in c->dl_tmpdir; returns 0 on
+ * success. */
+static int
+clip_make_tmpdir(struct rdp_clip *c)
+{
+	const char *bases[3];
+	size_t i;
+
+	bases[0] = getenv("XDG_RUNTIME_DIR");
+	bases[1] = getenv("TMPDIR");
+	bases[2] = "/tmp";
+	for (i = 0; i < 3; i++) {
+		char tmpl[4096];
+		char *res;
+
+		if (bases[i] == NULL || bases[i][0] == '\0')
+			continue;
+		if ((size_t)snprintf(tmpl, sizeof tmpl, "%s/rdpclip.XXXXXX",
+			bases[i]) >= sizeof tmpl)
+			continue;
+		res = mkdtemp(tmpl);
+		if (res == NULL)
+			continue;
+		c->dl_tmpdir = strdup(tmpl);
+		if (c->dl_tmpdir == NULL) {
+			(void)rmdir(tmpl);
+			return -1;
+		}
+		return 0;
+	}
+	return -1;
+}
+
+/* Percent-encode one path byte that is not a safe URI pchar.  We keep the
+ * unreserved set plus '/' and the few sub-delims that file managers expect
+ * verbatim; everything else (space, control, high-bit, reserved) is escaped. */
+static int
+uri_pchar_ok(unsigned char ch)
+{
+	if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z')
+	    || (ch >= '0' && ch <= '9'))
+		return 1;
+	switch (ch) {
+	case '/': case '-': case '_': case '.': case '~':
+	case '!': case '$': case '&': case '\'': case '(': case ')':
+	case '*': case '+': case ',': case ';': case '=': case ':': case '@':
+		return 1;
+	}
+	return 0;
+}
+
+/* Append the file:// URI for an absolute path to *buf (a growing heap buffer),
+ * percent-encoding any byte that is not a URI pchar, then a CRLF.  Returns 0 on
+ * success, -1 on allocation failure (in which case *buf is freed). */
+static int
+uri_list_append(char **buf, size_t *len, size_t *cap, const char *abspath)
+{
+	static const char host[] = "file://localhost";
+	const char *p;
+	size_t need;
+	char *nb;
+
+	/* Worst case: every byte expands to "%XX" (3 bytes), plus the scheme,
+	 * the CRLF and a NUL. */
+	need = *len + sizeof host - 1 + strlen(abspath) * 3 + 3;
+	if (need > *cap) {
+		size_t nc = *cap == 0 ? 256 : *cap;
+		while (nc < need)
+			nc *= 2;
+		nb = realloc(*buf, nc);
+		if (nb == NULL) {
+			free(*buf);
+			*buf = NULL;
+			return -1;
+		}
+		*buf = nb;
+		*cap = nc;
+	}
+	memcpy(*buf + *len, host, sizeof host - 1);
+	*len += sizeof host - 1;
+	for (p = abspath; *p != '\0'; p++) {
+		unsigned char ch = (unsigned char)*p;
+		if (uri_pchar_ok(ch)) {
+			(*buf)[(*len)++] = (char)ch;
+		} else {
+			static const char hex[] = "0123456789ABCDEF";
+			(*buf)[(*len)++] = '%';
+			(*buf)[(*len)++] = hex[ch >> 4];
+			(*buf)[(*len)++] = hex[ch & 0x0f];
+		}
+	}
+	(*buf)[(*len)++] = '\r';
+	(*buf)[(*len)++] = '\n';
+	return 0;
+}
+
+/* Answer the deferred SelectionRequest with a text/uri-list of file:// URIs,
+ * one per top-level downloaded entry, then tear the download down. */
+static void
+clip_dl_finish_ok(struct rdp_clip *c)
+{
+	char *uri = NULL;
+	size_t ulen = 0, ucap = 0;
+	size_t i;
+	int ok = 1;
+
+	for (i = 0; i < c->dl_n && ok; i++) {
+		if (!c->dl_descs[i].top_level)
+			continue;
+		if (uri_list_append(&uri, &ulen, &ucap,
+			c->dl_descs[i].path) != 0)
+			ok = 0;
+	}
+	if (c->rdp_data_pending) {
+		c->rdp_data_pending = 0;
+		answer_selection_request(c, c->defer_requestor,
+			c->defer_property, c->a_clipboard,
+			c->defer_target, c->defer_time,
+			(ok && ulen > 0) ? uri : NULL, ok ? ulen : 0);
+	}
+	free(uri);
+	/* Keep dl_tmpdir and the downloaded files in place so the pasting app
+	 * can read them; only clear the transfer bookkeeping.  The temp dir is
+	 * removed on the next paste / owner change / close. */
+	clip_dl_clear_state(c);
+}
+
+/* Refuse the deferred SelectionRequest (property None) and tear the download
+ * down.  Called on any fatal error during the paste. */
+static void
+clip_dl_abort(struct rdp_clip *c)
+{
+	if (c->rdp_data_pending) {
+		c->rdp_data_pending = 0;
+		answer_selection_request(c, c->defer_requestor,
+			c->defer_property, c->a_clipboard,
+			c->defer_target, c->defer_time, NULL, 0);
+	}
+	clip_dl_reset(c);
+}
+
+/* Open (creating/truncating) the current entry's temp file and issue the first
+ * range request for it; directory entries are created with mkdir and skipped.
+ * Advances dl_idx past directories.  On the last entry's completion the caller
+ * finishes the paste.  Returns 0 while a request is outstanding or the paste
+ * finished, -1 on a fatal error (the caller aborts). */
+static int
+clip_dl_begin_current(struct rdp_clip *c)
+{
+	while (c->dl_idx < c->dl_n) {
+		struct rdp_clip_dlent *e = &c->dl_descs[c->dl_idx];
+
+		if (e->is_dir) {
+			if (mkdir(e->path, 0700) != 0 && errno != EEXIST)
+				return -1;
+			c->dl_idx++;
+			continue;
+		}
+		/* A regular file: create it, then request its first range.  A
+		 * zero-byte file needs no bytes, so close it and advance. */
+		c->dl_fd = open(e->path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+		if (c->dl_fd < 0)
+			return -1;
+		c->dl_off = 0;
+		c->dl_size = e->size;
+		if (c->dl_size == 0) {
+			(void)close(c->dl_fd);
+			c->dl_fd = -1;
+			c->dl_idx++;
+			continue;
+		}
+		c->dl_stream++;
+		send_clip_file_request(c, c->dl_stream, e->lindex,
+			CB_FILECONTENTS_RANGE, 0,
+			c->dl_size < CLIP_FILE_DL_CHUNK
+				? (uint32_t)c->dl_size : CLIP_FILE_DL_CHUNK);
+		return 0;
+	}
+	/* Every entry written: hand the uri-list to the deferred requestor. */
+	clip_dl_finish_ok(c);
+	return 0;
+}
+
+/* Begin an RDP -> X file paste: parse the FileGroupDescriptorW blob the client
+ * returned, sanitize each name under a fresh temp dir, then start downloading.
+ * A deferred SelectionRequest is already held in the defer_* slot.  On any
+ * fatal setup error the deferred request is refused. */
+static void
+clip_dl_start(struct rdp_clip *c, const uint8_t *blob, size_t len)
+{
+	struct rdp_clip_filedesc descs[RDP_CLIP_MAX_FILES];
+	size_t nf = RDP_CLIP_MAX_FILES;
+	size_t i, n = 0;
+
+	clip_dl_reset(c);
+
+	if (rdp_cliprdr_parse_file_list(blob, len, descs, &nf) != 0 || nf == 0) {
+		clip_dl_abort(c);
+		return;
+	}
+	if (clip_make_tmpdir(c) != 0) {
+		clip_dl_abort(c);
+		return;
+	}
+	c->dl_descs = calloc(nf, sizeof *c->dl_descs);
+	if (c->dl_descs == NULL) {
+		clip_dl_abort(c);
+		return;
+	}
+	for (i = 0; i < nf; i++) {
+		char rel[1024];
+		char abspath[4096];
+		struct rdp_clip_dlent *e;
+		int is_dir;
+
+		/* Reject any name that is not a safe relative path; skip it
+		 * rather than write outside the temp dir. */
+		if (rdp_clip_sanitize_name(descs[i].name, rel, sizeof rel) != 0) {
+			rdp_warn("clip: skipping unsafe paste name '%s'",
+				descs[i].name);
+			continue;
+		}
+		if ((size_t)snprintf(abspath, sizeof abspath, "%s/%s",
+			c->dl_tmpdir, rel) >= sizeof abspath)
+			continue;
+		is_dir = (descs[i].attrs & FILE_ATTRIBUTE_DIRECTORY) ? 1 : 0;
+		if (!is_dir && descs[i].size > CLIP_FILE_DL_MAX) {
+			rdp_warn("clip: paste file '%s' too large (%llu)",
+				rel, (unsigned long long)descs[i].size);
+			clip_dl_abort(c);
+			return;
+		}
+		/* Create the parent directories of this entry under the temp
+		 * dir (validated components only). */
+		if (clip_mkdirs_for(c->dl_tmpdir, rel) != 0) {
+			clip_dl_abort(c);
+			return;
+		}
+		e = &c->dl_descs[n];
+		e->path = strdup(abspath);
+		if (e->path == NULL) {
+			clip_dl_abort(c);
+			return;
+		}
+		e->size = is_dir ? 0 : descs[i].size;
+		e->is_dir = is_dir;
+		e->lindex = (uint32_t)i;
+		/* A top-level entry has no '/' in its sanitized relative path;
+		 * only those go into the answering uri-list. */
+		e->top_level = (strchr(rel, '/') == NULL) ? 1 : 0;
+		n++;
+		/* Keep dl_n in step so a later mid-loop abort frees the paths
+		 * committed so far (clip_dl_clear_state walks dl_n). */
+		c->dl_n = n;
+	}
+	c->dl_n = n;
+	if (n == 0) {
+		/* Every descriptor was unsafe: nothing to paste. */
+		clip_dl_abort(c);
+		return;
+	}
+	c->dl_active = 1;
+	c->dl_idx = 0;
+	c->dl_fd = -1;
+	if (clip_dl_begin_current(c) != 0)
+		clip_dl_abort(c);
+}
+
+/* A CLIP_FILE_DATA for our download arrived: write the bytes to the current
+ * temp file, then either request the next range or advance to the next entry.
+ * status != 0, or a short reply mid-file, aborts the whole paste. */
+static void
+clip_dl_on_file_data(struct rdp_clip *c, uint32_t stream_id, uint32_t status,
+		const uint8_t *data, size_t len)
+{
+	struct rdp_clip_dlent *e;
+
+	if (!c->dl_active || c->dl_idx >= c->dl_n)
+		return;
+	if (stream_id != c->dl_stream)
+		return;   /* stale reply from an aborted transfer */
+	if (status != 0) {
+		clip_dl_abort(c);
+		return;
+	}
+	if (c->dl_fd < 0) {
+		clip_dl_abort(c);
+		return;
+	}
+	e = &c->dl_descs[c->dl_idx];
+	/* Never write past the declared size, even if the client over-delivers. */
+	if (len > 0) {
+		size_t towrite = len;
+		size_t off = 0;
+		if ((uint64_t)towrite > c->dl_size - c->dl_off)
+			towrite = (size_t)(c->dl_size - c->dl_off);
+		while (off < towrite) {
+			ssize_t w = write(c->dl_fd, data + off, towrite - off);
+			if (w < 0) {
+				if (errno == EINTR)
+					continue;
+				clip_dl_abort(c);
+				return;
+			}
+			off += (size_t)w;
+		}
+		c->dl_off += towrite;
+	}
+	/* A zero-length reply before the file is full means the client ran out
+	 * of data: treat a short file as an error. */
+	if (len == 0 && c->dl_off < c->dl_size) {
+		clip_dl_abort(c);
+		return;
+	}
+	if (c->dl_off >= c->dl_size) {
+		/* This file is complete: close it and move to the next entry. */
+		(void)close(c->dl_fd);
+		c->dl_fd = -1;
+		c->dl_idx++;
+		if (clip_dl_begin_current(c) != 0)
+			clip_dl_abort(c);
+		return;
+	}
+	/* More to read: request the next range. */
+	{
+		uint64_t remain = c->dl_size - c->dl_off;
+		uint32_t want = remain < CLIP_FILE_DL_CHUNK
+			? (uint32_t)remain : CLIP_FILE_DL_CHUNK;
+		c->dl_stream++;
+		send_clip_file_request(c, c->dl_stream, e->lindex,
+			CB_FILECONTENTS_RANGE, c->dl_off, want);
+	}
+}
+
 /* --- X -> RDP: fetch from the X selection owner --- */
 
 static void
@@ -758,7 +1297,7 @@ on_selection_request(struct rdp_clip *c, XEvent *ev)
 		return;
 
 	if (re->target == c->a_targets) {
-		Atom targets[8];
+		Atom targets[10];
 		int n = 0;
 		targets[n++] = c->a_targets;
 		targets[n++] = c->a_timestamp;
@@ -773,6 +1312,8 @@ on_selection_request(struct rdp_clip *c, XEvent *ev)
 		}
 		if (c->rdp_offered & RDP_BE_CLIP_FMT_HTML)
 			targets[n++] = c->a_text_html;
+		if (c->rdp_offered & RDP_BE_CLIP_FMT_FILES)
+			targets[n++] = c->a_uri_list;
 		XChangeProperty(c->dpy, re->requestor, re->property,
 			XA_ATOM, 32, PropModeReplace,
 			(unsigned char *)targets, n);
@@ -854,6 +1395,7 @@ rdp_clip_handle_xevent(struct rdp_clip *c, XEvent *ev)
 			c->rdp_offered = 0;
 			c->rdp_data_pending = 0;
 			clip_files_reset(c);
+			clip_dl_reset(c);
 		}
 		return 1;
 	}
@@ -874,6 +1416,7 @@ rdp_clip_handle_be_msg(struct rdp_clip *c, uint32_t type,
 			memcpy(&o, payload, sizeof o);
 		c->rdp_offered = o.formats;
 		c->rdp_data_pending = 0;
+		clip_dl_reset(c);
 		XSetSelectionOwner(c->dpy, c->a_clipboard,
 			c->owner_win, CurrentTime);
 		XFlush(c->dpy);
@@ -913,12 +1456,43 @@ rdp_clip_handle_be_msg(struct rdp_clip *c, uint32_t type,
 			data = payload + sizeof h;
 			dlen = len - sizeof h;
 		}
+		if (h.format == RDP_BE_CLIP_FMT_FILES) {
+			/* The bytes are a FileGroupDescriptorW blob.  Download
+			 * every file into a private temp dir and answer the
+			 * deferred SelectionRequest with a text/uri-list once they
+			 * are all written; a failure refuses the request. */
+			if (!c->rdp_data_pending)
+				break;
+			if (h.status != 0 || data == NULL || dlen == 0) {
+				clip_dl_abort(c);
+				break;
+			}
+			clip_dl_start(c, data, dlen);
+			break;
+		}
 		if (c->rdp_data_pending) {
 			c->rdp_data_pending = 0;
 			answer_selection_request(c, c->defer_requestor,
 				c->defer_property, c->a_clipboard,
 				c->defer_target, c->defer_time, data, dlen);
 		}
+		break;
+	}
+	case RDP_BE_CLIP_FILE_DATA: {
+		/* The worker relayed the client's CB_FILECONTENTS_RESPONSE for a
+		 * file we are downloading into the temp dir. */
+		struct rdp_be_clip_file_data_hdr h;
+		const uint8_t *data = NULL;
+		size_t dlen = 0;
+
+		if (len < sizeof h)
+			break;
+		memcpy(&h, payload, sizeof h);
+		if (h.status == 0 && len > sizeof h) {
+			data = payload + sizeof h;
+			dlen = len - sizeof h;
+		}
+		clip_dl_on_file_data(c, h.stream_id, h.status, data, dlen);
 		break;
 	}
 	case RDP_BE_CLIP_FILE_REQUEST: {

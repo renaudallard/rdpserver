@@ -34,12 +34,23 @@ target is mapped to the Windows
 and
 .Sy CF_DIBV5
 formats by a zero-dependency BMP conversion).
-A file copied in the session (the X
+Files are copied in both directions over the X
 .Sy text/uri-list
-target) is offered to the client as a
+target and the Windows
 .Sy FileGroupDescriptorW
-and streamed on demand, so it can be pasted in the client; pasting a
-client file into the session is in progress.
+format with on-demand
+.Sy FILECONTENTS
+transfers: a file copied in the session can be pasted in the client, and
+a file copied in the client is downloaded into a per-session temporary
+directory and exposed to the local application as a
+.Sy file://
+URI.
+The client-supplied file names are untrusted, so each is sanitized
+(back-slashes folded, and any empty,
+.Sy \&. ,
+.Sy \&.. ,
+or absolute component rejected) before use, so a paste cannot escape
+that temporary directory.
 Large transfers are reassembled and read or written incrementally,
 bounded at 4 MiB.
 Scancode key events map directly to X keycodes; the Xvfb keyboard

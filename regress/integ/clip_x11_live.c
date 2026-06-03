@@ -85,6 +85,14 @@
  *      file:// URI for a real temp file, clip emits CLIP_OFFER with the FILES
  *      bit and returns a FileGroupDescriptorW for it; CLIP_FILE_REQUEST then
  *      pulls the file's size and its bytes back.
+ *   K  RDP -> X, file paste; the harness offers FILES, xclip -t text/uri-list
+ *      -o pulls it, clip requests the FileGroupDescriptorW, downloads the one
+ *      5000-byte file into its temp dir via CLIP_FILE_REQUEST/FILE_DATA, and
+ *      answers xclip with a file:// URI whose bytes match the pattern.
+ *   L  RDP -> X, file paste SECURITY; the FileGroupDescriptorW carries path
+ *      traversal decoys ("..\\..\\evil.dat", "/tmp/evil_abs.dat") alongside one
+ *      benign file.  Only the benign file may be written; the traversal targets
+ *      must never appear outside the temp dir.
  */
 
 #include "../../src/session/clip_x11.h"
@@ -96,6 +104,7 @@
 
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 
 #include <errno.h>
@@ -2088,6 +2097,666 @@ reap:
 	}
 }
 
+/* The byte at offset i of the synthetic pasted-file content. */
+static uint8_t
+paste_byte(size_t i)
+{
+	return (uint8_t)((i * 41 + 13) & 0xff);
+}
+
+/* Hex nibble value of an ASCII hex digit, or -1. */
+static int
+hex_nyb(int ch)
+{
+	if (ch >= '0' && ch <= '9')
+		return ch - '0';
+	if (ch >= 'a' && ch <= 'f')
+		return ch - 'a' + 10;
+	if (ch >= 'A' && ch <= 'F')
+		return ch - 'A' + 10;
+	return -1;
+}
+
+/* Harness (playing the worker) sends a CLIP_FILE_DATA to the session on sv0:
+ * an 8-byte header (stream_id + status) then `len` file bytes.  This answers a
+ * CLIP_FILE_REQUEST the session issued while downloading a pasted file. */
+static void
+send_clip_file_data(uint32_t stream_id, uint32_t status, const uint8_t *data,
+		size_t len)
+{
+	struct rdp_be_clip_file_data_hdr h;
+	uint8_t *buf;
+	size_t buf_len = sizeof h + ((status == 0 && data != NULL) ? len : 0);
+
+	h.stream_id = stream_id;
+	h.status = status;
+	buf = malloc(buf_len);
+	if (buf == NULL)
+		return;
+	memcpy(buf, &h, sizeof h);
+	if (status == 0 && data != NULL && len > 0)
+		memcpy(buf + sizeof h, data, len);
+	if (rdp_be_send(g_sv0, RDP_BE_CLIP_FILE_DATA, buf, buf_len) != 0)
+		FAILF("send CLIP_FILE_DATA: %s", strerror(errno));
+	free(buf);
+}
+
+/*
+ * Drive an RDP -> X file paste end to end and return xclip's text/uri-list
+ * output.  The harness plays the client/worker:
+ *
+ *   1. Offer FILES to the session (CLIP_OFFER), so the session claims CLIPBOARD.
+ *   2. Fork `xclip -t text/uri-list -o`, which converts TARGETS then the
+ *      text/uri-list target; the session defers and emits CLIP_REQUEST{FILES}.
+ *   3. Answer CLIP_REQUEST{FILES} with CLIP_DATA{FILES} carrying the supplied
+ *      FileGroupDescriptorW blob.
+ *   4. Service the session's CLIP_FILE_REQUEST messages: a SIZE request gets the
+ *      8-byte size of file `content_lindex`, a RANGE request gets the requested
+ *      bytes of the synthetic content (paste_byte pattern), bounded by the
+ *      content length.  Any other lindex is the traversal decoy and is never
+ *      requested by a correct implementation; if it is, reply with the pattern
+ *      so a bug still produces observable (wrong) output.
+ *   5. Collect xclip's stdout (the answering uri-list).
+ *
+ * On success copies xclip's output into out (capacity cap, NUL-terminated) and
+ * returns its length; returns (size_t)-1 on failure (a FAILF is logged).
+ */
+static size_t
+run_file_paste(const char *name, const uint8_t *blob, size_t blob_len,
+		uint32_t content_lindex, size_t content_len,
+		char *out, size_t cap)
+{
+	struct rdp_be_clip_offer offer;
+	int op[2];
+	pid_t pid;
+	uint8_t *buf = NULL;
+	size_t cbuf = 0, used = 0;
+	long deadline = now_ms() + 12000;
+	int eof = 0, files_answered = 0;
+	int status;
+	uint32_t type = 0;
+	uint8_t small[256];
+	ssize_t n;
+
+	(void)printf("%s: RDP -> X, file paste\n", name);
+
+	offer.formats = RDP_BE_CLIP_FMT_TEXT | RDP_BE_CLIP_FMT_FILES;
+	if (rdp_be_send(g_sv0, RDP_BE_CLIP_OFFER, &offer, sizeof offer) != 0) {
+		FAILF("send CLIP_OFFER: %s", strerror(errno));
+		return (size_t)-1;
+	}
+	(void)drive_until(NULL, NULL, 300);
+
+	if (pipe(op) != 0) {
+		FAILF("pipe: %s", strerror(errno));
+		return (size_t)-1;
+	}
+	pid = fork();
+	if (pid < 0) {
+		FAILF("fork xclip -o: %s", strerror(errno));
+		(void)close(op[0]);
+		(void)close(op[1]);
+		return (size_t)-1;
+	}
+	if (pid == 0) {
+		(void)dup2(op[1], STDOUT_FILENO);
+		(void)close(op[0]);
+		(void)close(op[1]);
+		{
+			int dn = open("/dev/null", O_WRONLY);
+			if (dn >= 0) {
+				(void)dup2(dn, STDERR_FILENO);
+				if (dn > 2)
+					(void)close(dn);
+			}
+		}
+		execl("/usr/bin/xclip", "xclip", "-display", g_display,
+			"-selection", "clipboard", "-t", "text/uri-list",
+			"-o", (char *)NULL);
+		_exit(127);
+	}
+	(void)close(op[1]);
+	(void)fcntl(op[0], F_SETFL, O_NONBLOCK);
+
+	while (!eof && now_ms() < deadline) {
+		struct pollfd p[3];
+
+		pump_once();
+
+		/* Service every backend message the session emits on sv0:
+		 * first CLIP_REQUEST{FILES}, then a run of CLIP_FILE_REQUESTs. */
+		while (pred_sv0_readable(NULL)) {
+			n = rdp_be_recv(g_sv0, &type, small, sizeof small);
+			if (n < 0) {
+				FAILF("recv from session: %s", strerror(errno));
+				eof = 1;
+				break;
+			}
+			if (type == RDP_BE_CLIP_REQUEST) {
+				struct rdp_be_clip_request rq;
+				uint8_t *db;
+				size_t blen;
+				struct rdp_be_clip_data_hdr h;
+
+				if ((size_t)n < sizeof rq) {
+					FAILF("CLIP_REQUEST too short");
+					eof = 1;
+					break;
+				}
+				memcpy(&rq, small, sizeof rq);
+				if (rq.format != RDP_BE_CLIP_FMT_FILES) {
+					FAILF("CLIP_REQUEST format 0x%x "
+						"(expected FILES 0x%x)",
+						rq.format, RDP_BE_CLIP_FMT_FILES);
+					eof = 1;
+					break;
+				}
+				(void)printf("  got CLIP_REQUEST{FILES}; "
+					"answering with CLIP_DATA{FILES}\n");
+				blen = sizeof h + blob_len;
+				db = malloc(blen);
+				if (db == NULL) {
+					FAILF("oom");
+					eof = 1;
+					break;
+				}
+				h.format = RDP_BE_CLIP_FMT_FILES;
+				h.status = 0;
+				memcpy(db, &h, sizeof h);
+				memcpy(db + sizeof h, blob, blob_len);
+				if (rdp_be_send(g_sv0, RDP_BE_CLIP_DATA, db,
+					blen) != 0)
+					FAILF("send CLIP_DATA{FILES}: %s",
+						strerror(errno));
+				free(db);
+				files_answered = 1;
+			} else if (type == RDP_BE_CLIP_FILE_REQUEST) {
+				struct rdp_be_clip_file_req rq;
+				uint64_t pos;
+
+				if ((size_t)n < sizeof rq) {
+					FAILF("CLIP_FILE_REQUEST too short");
+					eof = 1;
+					break;
+				}
+				memcpy(&rq, small, sizeof rq);
+				pos = (uint64_t)rq.pos_low
+					| ((uint64_t)rq.pos_high << 32);
+				if (rq.flags & CB_FILECONTENTS_SIZE) {
+					uint8_t sz[8];
+					uint64_t s = content_len;
+					size_t i;
+					for (i = 0; i < 8; i++)
+						sz[i] = (uint8_t)(s >> (i * 8));
+					send_clip_file_data(rq.stream_id, 0,
+						sz, sizeof sz);
+				} else {
+					/* RANGE: serve the synthetic pattern,
+					 * bounded by the content length. */
+					uint32_t want = rq.cb_requested;
+					uint8_t *rb;
+					uint64_t avail = pos < content_len
+						? content_len - pos : 0;
+					size_t give = want;
+					size_t i;
+
+					if ((uint64_t)give > avail)
+						give = (size_t)avail;
+					/* Serve at most BIG_LEN per reply so each
+					 * relayed frame fits this single-threaded
+					 * harness (kernel wmem_max caps the socket
+					 * buffer at 4 MiB); a larger file is fetched
+					 * over several ranges, which exercises the
+					 * session's multi-range download loop and
+					 * short-reply handling. */
+					if (give > BIG_LEN)
+						give = BIG_LEN;
+					rb = give > 0 ? malloc(give) : NULL;
+					for (i = 0; i < give; i++)
+						rb[i] = paste_byte(
+							(size_t)pos + i);
+					send_clip_file_data(rq.stream_id, 0,
+						rb, give);
+					free(rb);
+				}
+				(void)content_lindex;
+			} else {
+				FAILF("unexpected backend type %u from session",
+					type);
+				eof = 1;
+				break;
+			}
+		}
+
+		XFlush(g_dpy);
+		p[0].fd = g_xfd;
+		p[0].events = POLLIN;
+		p[0].revents = 0;
+		p[1].fd = g_sv1;
+		p[1].events = POLLIN;
+		p[1].revents = 0;
+		p[2].fd = op[0];
+		p[2].events = POLLIN;
+		p[2].revents = 0;
+		(void)poll(p, 3, 50);
+
+		if (p[2].revents & (POLLIN | POLLHUP)) {
+			for (;;) {
+				ssize_t r;
+				if (used + 65536 > cbuf) {
+					size_t nc = cbuf == 0 ? 65536 : cbuf * 2;
+					uint8_t *nb = realloc(buf, nc);
+					if (nb == NULL) {
+						free(buf);
+						buf = NULL;
+						eof = 1;
+						break;
+					}
+					buf = nb;
+					cbuf = nc;
+				}
+				r = read(op[0], buf + used, cbuf - used);
+				if (r > 0) {
+					used += (size_t)r;
+					continue;
+				}
+				if (r == 0) {
+					eof = 1;
+					break;
+				}
+				if (errno == EAGAIN || errno == EWOULDBLOCK)
+					break;
+				if (errno == EINTR)
+					continue;
+				eof = 1;
+				break;
+			}
+		}
+	}
+	(void)close(op[0]);
+	(void)waitpid(pid, &status, 0);
+
+	if (!files_answered)
+		FAILF("session never emitted CLIP_REQUEST{FILES}");
+	if (!eof) {
+		FAILF("xclip -t text/uri-list -o timed out");
+		free(buf);
+		return (size_t)-1;
+	}
+	if (used >= cap) {
+		FAILF("uri-list output %zu >= cap %zu", used, cap);
+		free(buf);
+		return (size_t)-1;
+	}
+	if (buf != NULL && used > 0)
+		memcpy(out, buf, used);
+	out[used] = '\0';
+	free(buf);
+	(void)drive_until(NULL, NULL, 100);
+	return used;
+}
+
+/* Build a FileGroupDescriptorW blob from an array of (name, size, is_dir)
+ * entries.  Returns the blob length, or 0 on failure. */
+static size_t
+build_paste_blob(uint8_t *out, size_t cap, const char *const *names,
+		const uint64_t *sizes, const int *dirs, size_t count)
+{
+	struct rdp_clip_filedesc descs[RDP_CLIP_MAX_FILES];
+	size_t i;
+	ssize_t bn;
+
+	if (count > RDP_CLIP_MAX_FILES)
+		return 0;
+	for (i = 0; i < count; i++) {
+		struct rdp_clip_filedesc *d = &descs[i];
+		size_t nl = strlen(names[i]);
+		memset(d, 0, sizeof *d);
+		d->flags = FD_ATTRIBUTES | FD_FILESIZE;
+		d->attrs = dirs[i] ? FILE_ATTRIBUTE_DIRECTORY : 0;
+		d->size = dirs[i] ? 0 : sizes[i];
+		if (nl >= sizeof d->name)
+			nl = sizeof d->name - 1;
+		memcpy(d->name, names[i], nl);
+		d->name[nl] = '\0';
+	}
+	bn = rdp_cliprdr_build_file_list(out, cap, descs, count);
+	return bn < 0 ? 0 : (size_t)bn;
+}
+
+/* Resolve one "file://[host]/path" URI line to its local path (host ignored).
+ * Returns 0 and writes the path to out on success, -1 otherwise. */
+static int
+uri_line_to_path(const char *line, char *out, size_t cap)
+{
+	const char *p;
+	size_t o = 0;
+
+	if (strncmp(line, "file://", 7) != 0)
+		return -1;
+	p = line + 7;
+	/* Skip the authority up to the first '/'. */
+	while (*p != '\0' && *p != '/')
+		p++;
+	if (*p != '/')
+		return -1;
+	for (; *p != '\0' && *p != '\r' && *p != '\n'; p++) {
+		int ch = (unsigned char)*p;
+		if (ch == '%' && p[1] != '\0' && p[2] != '\0') {
+			int hi = hex_nyb(p[1]), lo = hex_nyb(p[2]);
+			if (hi >= 0 && lo >= 0) {
+				ch = (hi << 4) | lo;
+				p += 2;
+			}
+		}
+		if (o + 1 >= cap)
+			return -1;
+		out[o++] = (char)ch;
+	}
+	out[o] = '\0';
+	return 0;
+}
+
+/* K.  RDP -> X, file paste: one 5000-byte file "pasted.dat".  The session must
+ * download it into its temp dir and answer xclip with a file:// URI whose path
+ * holds the 5000 pattern bytes. */
+static void
+test_rdp_to_x_files(const char *name)
+{
+	const char *names[1] = { "pasted.dat" };
+	const uint64_t sizes[1] = { 5000 };
+	const int dirs[1] = { 0 };
+	uint8_t blob[4 + RDP_CLIP_FILEDESC_WIRE];
+	size_t blob_len;
+	char uri[4096];
+	size_t ulen;
+	char path[4096];
+	int fd;
+	uint8_t rb[5000];
+	size_t off = 0;
+	int ok = 1;
+	size_t i;
+
+	blob_len = build_paste_blob(blob, sizeof blob, names, sizes, dirs, 1);
+	if (blob_len == 0) {
+		FAILF("build_paste_blob failed");
+		return;
+	}
+	ulen = run_file_paste(name, blob, blob_len, 0, 5000, uri, sizeof uri);
+	if (ulen == (size_t)-1)
+		return;
+	if (uri_line_to_path(uri, path, sizeof path) != 0) {
+		FAILF("uri-list output is not a file:// URI: '%.*s'",
+			(int)(ulen > 80 ? 80 : ulen), uri);
+		return;
+	}
+	(void)printf("  uri-list -> path '%s'\n", path);
+	/* The basename must be the pasted name. */
+	{
+		const char *base = strrchr(path, '/');
+		base = base != NULL ? base + 1 : path;
+		if (strcmp(base, "pasted.dat") != 0) {
+			FAILF("pasted basename '%s' (expected 'pasted.dat')",
+				base);
+			return;
+		}
+	}
+	fd = open(path, O_RDONLY);
+	if (fd < 0) {
+		FAILF("downloaded file '%s' missing: %s", path, strerror(errno));
+		return;
+	}
+	while (off < sizeof rb) {
+		ssize_t r = read(fd, rb + off, sizeof rb - off);
+		if (r <= 0) {
+			if (r < 0 && errno == EINTR)
+				continue;
+			break;
+		}
+		off += (size_t)r;
+	}
+	/* No trailing bytes beyond the declared size. */
+	{
+		uint8_t extra;
+		if (read(fd, &extra, 1) != 0)
+			ok = 0;
+	}
+	(void)close(fd);
+	if (off != sizeof rb) {
+		FAILF("downloaded file size %zu (expected %zu)", off, sizeof rb);
+		return;
+	}
+	for (i = 0; i < sizeof rb; i++)
+		if (rb[i] != paste_byte(i)) {
+			FAILF("downloaded byte %zu = 0x%02x (expected 0x%02x)",
+				i, rb[i], paste_byte(i));
+			ok = 0;
+			break;
+		}
+	if (!ok) {
+		FAILF("downloaded file has trailing bytes past its size");
+		return;
+	}
+	(void)printf("  downloaded 5000 bytes match pattern ok\n");
+}
+
+/* M.  RDP -> X, file paste of a file larger than one download range, to
+ * exercise the multi-range loop and confirm the worker's relayed FILE_DATA
+ * frame stays under the backend 4 MiB payload cap (a >= 4 MiB paste must not
+ * tear the session down). */
+static void
+test_rdp_to_x_files_big(const char *name, uint64_t size)
+{
+	const char *names[1] = { "big.dat" };
+	uint64_t sizes[1];
+	const int dirs[1] = { 0 };
+	uint8_t blob[4 + RDP_CLIP_FILEDESC_WIRE];
+	size_t blob_len, ulen;
+	char uri[4096], path[4096];
+	uint64_t off = 0;
+	uint8_t buf[65536];
+	int fd;
+
+	sizes[0] = size;
+	blob_len = build_paste_blob(blob, sizeof blob, names, sizes, dirs, 1);
+	if (blob_len == 0) {
+		FAILF("big: build_paste_blob failed");
+		return;
+	}
+	ulen = run_file_paste(name, blob, blob_len, 0, size, uri, sizeof uri);
+	if (ulen == (size_t)-1)
+		return;
+	if (uri_line_to_path(uri, path, sizeof path) != 0) {
+		FAILF("big: uri-list output is not a file:// URI");
+		return;
+	}
+	fd = open(path, O_RDONLY);
+	if (fd < 0) {
+		FAILF("big: downloaded file '%s' missing: %s", path,
+			strerror(errno));
+		return;
+	}
+	while (off < size) {
+		size_t chunk = (size - off > sizeof buf)
+			? sizeof buf : (size_t)(size - off);
+		size_t got = 0, i;
+		while (got < chunk) {
+			ssize_t r = read(fd, buf + got, chunk - got);
+			if (r <= 0) {
+				if (r < 0 && errno == EINTR)
+					continue;
+				break;
+			}
+			got += (size_t)r;
+		}
+		if (got != chunk) {
+			FAILF("big: short read at offset %llu",
+				(unsigned long long)off);
+			(void)close(fd);
+			return;
+		}
+		for (i = 0; i < chunk; i++)
+			if (buf[i] != paste_byte((size_t)(off + i))) {
+				FAILF("big: byte %llu mismatch",
+					(unsigned long long)(off + i));
+				(void)close(fd);
+				return;
+			}
+		off += chunk;
+	}
+	{
+		uint8_t extra;
+		if (read(fd, &extra, 1) != 0) {
+			FAILF("big: trailing bytes past declared size");
+			(void)close(fd);
+			return;
+		}
+	}
+	(void)close(fd);
+	(void)printf("  downloaded %llu bytes (multi-range) match pattern ok\n",
+		(unsigned long long)size);
+}
+
+/* L (security).  RDP -> X, file paste with traversal decoys.  One benign file
+ * "good.dat" plus descriptors whose names try to escape the temp dir
+ * ("..\\..\\evil.dat" and "/tmp/evil_abs.dat").  After the paste the benign
+ * file must exist with its bytes and the traversal targets must NOT exist. */
+static void
+test_rdp_to_x_files_traversal(const char *name)
+{
+	const char *names[3] = {
+		"..\\..\\evil.dat",      /* parent-escape via backslashes */
+		"good.dat",              /* the one benign file */
+		"/tmp/evil_abs.dat"      /* absolute path */
+	};
+	const uint64_t sizes[3] = { 4000, 5000, 4000 };
+	const int dirs[3] = { 0, 0, 0 };
+	uint8_t blob[4 + 3 * RDP_CLIP_FILEDESC_WIRE];
+	size_t blob_len;
+	char uri[4096];
+	size_t ulen;
+	char path[4096];
+	int fd;
+	uint8_t rb[5000];
+	size_t off = 0, i;
+
+	(void)printf("%s: security, file paste with traversal decoys\n", name);
+
+	/* Capture the would-be traversal targets resolved relative to CWD so
+	 * we can assert they were never created.  These mirror what a naive
+	 * implementation would write. */
+
+	blob_len = build_paste_blob(blob, sizeof blob, names, sizes, dirs, 3);
+	if (blob_len == 0) {
+		FAILF("build_paste_blob failed");
+		return;
+	}
+	/* The benign file is descriptor index 1, content length 5000. */
+	ulen = run_file_paste("  L-paste", blob, blob_len, 1, 5000,
+		uri, sizeof uri);
+	if (ulen == (size_t)-1)
+		return;
+
+	/* The answering uri-list must contain exactly one entry: good.dat. */
+	{
+		size_t lines = 0, q = 0;
+		while (q < ulen) {
+			size_t s = q;
+			while (q < ulen && uri[q] != '\n')
+				q++;
+			if (q < ulen)
+				q++;
+			if (q > s + 1)   /* non-empty (account for CR) */
+				lines++;
+		}
+		if (lines != 1) {
+			FAILF("uri-list has %zu entries (expected 1, only the "
+				"benign file)", lines);
+			return;
+		}
+	}
+	if (uri_line_to_path(uri, path, sizeof path) != 0) {
+		FAILF("uri-list output is not a file:// URI");
+		return;
+	}
+	{
+		const char *base = strrchr(path, '/');
+		base = base != NULL ? base + 1 : path;
+		if (strcmp(base, "good.dat") != 0) {
+			FAILF("pasted basename '%s' (expected 'good.dat')",
+				base);
+			return;
+		}
+	}
+	(void)printf("  benign file -> '%s'\n", path);
+
+	/* The benign file must hold its 5000 pattern bytes. */
+	fd = open(path, O_RDONLY);
+	if (fd < 0) {
+		FAILF("benign file '%s' missing: %s", path, strerror(errno));
+		return;
+	}
+	while (off < sizeof rb) {
+		ssize_t r = read(fd, rb + off, sizeof rb - off);
+		if (r <= 0) {
+			if (r < 0 && errno == EINTR)
+				continue;
+			break;
+		}
+		off += (size_t)r;
+	}
+	(void)close(fd);
+	if (off != sizeof rb) {
+		FAILF("benign file size %zu (expected %zu)", off, sizeof rb);
+		return;
+	}
+	for (i = 0; i < sizeof rb; i++)
+		if (rb[i] != paste_byte(i)) {
+			FAILF("benign byte %zu wrong", i);
+			return;
+		}
+
+	/* The traversal targets must NOT have been created.  Derive them the
+	 * way a naive implementation would: the temp dir is the parent of the
+	 * benign file; "..\\..\\evil.dat" with two parent escapes from there,
+	 * and the absolute "/tmp/evil_abs.dat". */
+	{
+		char tmpdir[4096];
+		char victim[4128];
+		char *slash;
+		struct stat st;
+
+		(void)snprintf(tmpdir, sizeof tmpdir, "%s", path);
+		slash = strrchr(tmpdir, '/');
+		if (slash != NULL)
+			*slash = '\0';   /* now tmpdir = the session temp dir */
+
+		/* Two levels up from the temp dir + evil.dat. */
+		(void)snprintf(victim, sizeof victim, "%s/../../evil.dat",
+			tmpdir);
+		if (stat(victim, &st) == 0) {
+			FAILF("TRAVERSAL: '%s' was created!", victim);
+			(void)unlink(victim);
+			return;
+		}
+		/* And the absolute decoy. */
+		if (stat("/tmp/evil_abs.dat", &st) == 0) {
+			FAILF("TRAVERSAL: '/tmp/evil_abs.dat' was created!");
+			(void)unlink("/tmp/evil_abs.dat");
+			return;
+		}
+		/* The temp dir itself must contain only good.dat (no escaped
+		 * sibling like an "evil.dat" that landed in the dir above). */
+		(void)snprintf(victim, sizeof victim, "%s/../evil.dat", tmpdir);
+		if (stat(victim, &st) == 0) {
+			FAILF("TRAVERSAL: sibling '%s' was created!", victim);
+			(void)unlink(victim);
+			return;
+		}
+	}
+	(void)printf("  traversal decoys were NOT written ok\n");
+}
+
 int
 main(void)
 {
@@ -2282,6 +2951,20 @@ main(void)
 			}
 		}
 	}
+
+	/* K: RDP -> X, file paste of a single 5000-byte file into the session's
+	 * temp dir, read back via xclip's file:// URI. */
+	test_rdp_to_x_files("K");
+
+	/* L: RDP -> X, file paste with path-traversal decoys; only the benign
+	 * file may land, the traversal targets must never be written. */
+	test_rdp_to_x_files_traversal("L");
+
+	/* M: RDP -> X, paste of a multi-megabyte file fetched over several
+	 * ranges, exercising the session's multi-range download loop and
+	 * short-reply handling (the harness caps each reply at BIG_LEN). */
+	(void)printf("M: RDP -> X, file paste 3.5 MB (multi-range)\n");
+	test_rdp_to_x_files_big("M", 3500000u);
 
 	free(big);
 

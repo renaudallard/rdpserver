@@ -95,6 +95,44 @@ struct rdp_clip {
 	 * bytes from here.  Reset on every owner change / SelectionClear. */
 	char   **file_paths;
 	size_t   file_count;
+
+	/* RDP -> X file paste (file copied in the RDP client, pasted into a
+	 * local app).  When a local app asks for text/uri-list we request the
+	 * FileGroupDescriptorW from the worker, eagerly download every file's
+	 * bytes into a private temp dir, then answer the deferred
+	 * SelectionRequest with a text/uri-list of file:// URIs under that dir.
+	 *
+	 * dl_active marks a download in progress.  dl_descs holds the parsed
+	 * (and path-sanitized) destination entries; dl_n is their count.
+	 * dl_idx is the entry being downloaded, dl_fd its open fd (-1 if none),
+	 * dl_off the bytes written so far, dl_size its declared size, and
+	 * dl_stream the stream_id of the FILE_REQUEST in flight.  dl_tmpdir is
+	 * the mkdtemp scratch directory (NULL when none); it is removed
+	 * recursively on reset and on close.  The deferred SelectionRequest is
+	 * held in the existing defer_* slot. */
+	int      dl_active;
+	struct rdp_clip_dlent *dl_descs;
+	size_t   dl_n;
+	size_t   dl_idx;
+	int      dl_fd;
+	uint64_t dl_off;
+	uint64_t dl_size;
+	uint32_t dl_stream;
+	char    *dl_tmpdir;
+};
+
+/* One entry of an in-progress RDP -> X file paste: the sanitized absolute
+ * destination path under the temp dir, the declared size, whether it is a
+ * directory (created with mkdir, no bytes downloaded), and the lindex it
+ * occupies in the client's FileGroupDescriptorW (needed to request its bytes).
+ * top_level is set for an entry whose sanitized path has a single component,
+ * so only those go into the answering text/uri-list. */
+struct rdp_clip_dlent {
+	char    *path;       /* absolute path under dl_tmpdir */
+	uint64_t size;
+	int      is_dir;
+	int      top_level;
+	uint32_t lindex;
 };
 
 /* Largest number of files carried in one clipboard file-copy offer. */
@@ -102,6 +140,19 @@ struct rdp_clip {
 
 int  rdp_clip_init(struct rdp_clip *c, Display *dpy, int be_fd);
 void rdp_clip_close(struct rdp_clip *c);
+
+/*
+ * Sanitize an attacker-controlled FileGroupDescriptorW file name into a
+ * relative path that is guaranteed to stay under a base directory.  `name`
+ * is the UTF-8 name from the client (its path separators may be backslashes).
+ * On success writes a clean, slash-separated relative path (no leading slash,
+ * no "." or ".." component, no empty component, no embedded NUL) into out
+ * (capacity out_cap including the terminating NUL) and returns 0.  Returns -1
+ * if the name is empty, absolute, contains a traversal or empty component, or
+ * does not fit, in which case the caller must skip the entry.  Exposed for
+ * unit testing.
+ */
+int  rdp_clip_sanitize_name(const char *name, char *out, size_t out_cap);
 
 /* Called by the session main loop whenever an X event has arrived.
  * Returns 1 if the event was consumed by the clipboard machinery,

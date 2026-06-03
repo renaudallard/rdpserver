@@ -283,6 +283,12 @@ clip_id_for_client(const struct clip_state *cs, uint32_t sem)
  * bounds memory against a hostile client. */
 #define CLIP_MAX_PDU (8u * 1024u * 1024u)
 
+/* Largest data we may put in a CLIP_DATA / CLIP_FILE_DATA frame to the
+ * session.  The 8-byte message header plus the data must stay under the
+ * backend's 4 MiB payload cap or rdp_be_recv rejects it and the session
+ * tears down, so a hostile client cannot weaponise an oversized blob. */
+#define CLIP_BE_DATA_MAX (4u * 1024u * 1024u - 8u)
+
 /* Send a CLIPRDR PDU: wrap `payload[0..len)` in a CHANNEL_PDU_HEADER
  * (FIRST | LAST) and ship via MCS Send Data Indication on the
  * CLIPRDR channel. */
@@ -411,10 +417,8 @@ clip_handle_pdu(struct rdp_tls *t, int be_fd,
 			bitmap |= RDP_BE_CLIP_FMT_IMAGE;
 		if (f.has_html)
 			bitmap |= RDP_BE_CLIP_FMT_HTML;
-		/* File paste from the client into the session is not offered
-		 * yet (it needs the temp-file download path); only the reverse
-		 * direction is wired.  client_files_id is still recorded above
-		 * for when that lands. */
+		if (f.has_files)
+			bitmap |= RDP_BE_CLIP_FMT_FILES;
 		if (bitmap != 0) {
 			struct rdp_be_clip_offer offer = { bitmap };
 			(void)rdp_be_send(be_fd, RDP_BE_CLIP_OFFER,
@@ -464,7 +468,24 @@ clip_handle_pdu(struct rdp_tls *t, int be_fd,
 				&h2, sizeof h2);
 			break;
 		}
-		if (sem == RDP_BE_CLIP_FMT_IMAGE) {
+		if (sem == RDP_BE_CLIP_FMT_FILES) {
+			/* The client returned the FileGroupDescriptorW blob; relay
+			 * it verbatim to the session as CLIP_DATA(FILES).  The
+			 * session parses it and downloads each file's bytes over the
+			 * FILE_REQUEST/FILE_DATA pair.  Truncate an oversized blob to
+			 * a whole number of descriptors the frame can hold; the
+			 * session clamps the file count anyway. */
+			if (data_len > CLIP_BE_DATA_MAX)
+				data_len = CLIP_BE_DATA_MAX;
+			out = malloc(sizeof h2 + data_len);
+			if (out == NULL) break;
+			memcpy(out, &h2, sizeof h2);
+			if (data_len > 0)
+				memcpy(out + sizeof h2, pdu + data_off, data_len);
+			(void)rdp_be_send(be_fd, RDP_BE_CLIP_DATA,
+				out, sizeof h2 + data_len);
+			free(out);
+		} else if (sem == RDP_BE_CLIP_FMT_IMAGE) {
 			/* CF_DIB/CF_DIBV5 -> BMP byte stream for the X side. */
 			uint8_t *bmp;
 			ssize_t bl;
@@ -545,6 +566,41 @@ clip_handle_pdu(struct rdp_tls *t, int be_fd,
 		be.cb_requested = fr.cb_requested;
 		(void)rdp_be_send(be_fd, RDP_BE_CLIP_FILE_REQUEST,
 			&be, sizeof be);
+		break;
+	}
+	case CB_FILECONTENTS_RESPONSE: {
+		/* The client answered a session-originated CB_FILECONTENTS_REQUEST
+		 * (file paste from the client into the session): forward the bytes
+		 * (or the failure status) to the session as FILE_DATA.  The file
+		 * data can be several MiB, so size the frame to it. */
+		uint32_t stream_id = 0;
+		const uint8_t *data = NULL;
+		size_t dlen = 0;
+		int fail = (h.msg_flags & CB_RESPONSE_FAIL) ? 1 : 0;
+		struct rdp_be_clip_file_data_hdr fh;
+		uint8_t *out;
+
+		if (rdp_cliprdr_parse_filecontents_response(pdu + 8,
+			len > 8 ? len - 8 : 0, &stream_id, &data, &dlen) != 0)
+			break;
+		if (fail) {
+			data = NULL;
+			dlen = 0;
+		}
+		/* A hostile client may over-deliver beyond the requested range;
+		 * keep the relayed frame under the backend payload cap. */
+		if (dlen > CLIP_BE_DATA_MAX)
+			dlen = CLIP_BE_DATA_MAX;
+		fh.stream_id = stream_id;
+		fh.status = fail;
+		out = malloc(sizeof fh + dlen);
+		if (out == NULL) break;
+		memcpy(out, &fh, sizeof fh);
+		if (dlen > 0)
+			memcpy(out + sizeof fh, data, dlen);
+		(void)rdp_be_send(be_fd, RDP_BE_CLIP_FILE_DATA,
+			out, sizeof fh + dlen);
+		free(out);
 		break;
 	}
 	default:
@@ -751,6 +807,34 @@ clip_handle_be(struct rdp_tls *t, struct clip_state *cs,
 			resp, (size_t)n);
 		free(resp);
 		return rc;
+	}
+	case RDP_BE_CLIP_FILE_REQUEST: {
+		/* File paste from the client into the session: the session wants
+		 * one file's size or a byte range from the FileGroupDescriptorW
+		 * the client offered.  Build a CB_FILECONTENTS_REQUEST and send it
+		 * to the client; its CB_FILECONTENTS_RESPONSE comes back as the
+		 * RDP_BE_CLIP_FILE_DATA relay in clip_handle_pdu. */
+		struct rdp_be_clip_file_req be;
+		struct rdp_cliprdr_filereq fr;
+		uint8_t req[40];
+
+		if (len < sizeof be) return -1;
+		memcpy(&be, payload, sizeof be);
+		memset(&fr, 0, sizeof fr);
+		/* The session picks the stream_id and uses it to match the file
+		 * chunk in flight; the client echoes it in CB_FILECONTENTS_RESPONSE
+		 * and the response relay hands it straight back, so pass it through
+		 * unchanged. */
+		fr.stream_id = be.stream_id;
+		fr.lindex = be.lindex;
+		fr.flags = be.flags;
+		fr.position = (uint64_t)be.pos_low
+			| ((uint64_t)be.pos_high << 32);
+		fr.cb_requested = be.cb_requested;
+		n = rdp_cliprdr_build_filecontents_request(req, sizeof req, &fr);
+		if (n < 0) return -1;
+		return send_clip_pdu(t, cs->user_id, cs->channel_id,
+			req, (size_t)n);
 	}
 	}
 	return 0;
@@ -2047,6 +2131,7 @@ run_proxy(struct rdp_tls *t, int be_fd,
 			} else if (type == RDP_BE_CLIP_OFFER
 			    || type == RDP_BE_CLIP_REQUEST
 			    || type == RDP_BE_CLIP_DATA
+			    || type == RDP_BE_CLIP_FILE_REQUEST
 			    || type == RDP_BE_CLIP_FILE_DATA) {
 				uint8_t *pl = NULL;
 				/* The session is the user's own helper, but bound
