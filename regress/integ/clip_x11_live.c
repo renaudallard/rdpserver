@@ -72,6 +72,10 @@
  *   C  RDP -> X, small text; xclip -o reads it back.
  *   D  RDP -> X, ~1 MiB text; xclip -o reads it back (put_property_chunked).
  *   E  X -> RDP, 256 KiB via a forced INCR transfer (INCR reader).
+ *   F  X -> RDP, HTML; an xclip -t text/html owner offers the HTML target,
+ *      clip emits CLIP_OFFER with the HTML bit and returns the raw fragment.
+ *   G  RDP -> X, HTML; clip claims CLIPBOARD advertising HTML, xclip -t
+ *      text/html -o pulls the raw fragment back.
  */
 
 #include "../../src/session/clip_x11.h"
@@ -366,6 +370,61 @@ xclip_set(const uint8_t *data, size_t len)
 }
 
 /*
+ * Run `xclip -t text/html -i` to put `data` (len bytes) on the CLIPBOARD
+ * offering the text/html target.  xclip 0.13's TARGETS reply for such an
+ * owner is exactly {TARGETS, text/html} (verified live), so clip_x11's
+ * fmt_for_target maps it to the HTML bit only.  Same fork/feed/detach shape
+ * as xclip_set; returns the daemon pid to reap, or -1 on error.
+ */
+static pid_t
+xclip_set_html(const uint8_t *data, size_t len)
+{
+	int in[2];
+	pid_t pid;
+
+	if (pipe(in) != 0)
+		return -1;
+	pid = fork();
+	if (pid < 0) {
+		(void)close(in[0]);
+		(void)close(in[1]);
+		return -1;
+	}
+	if (pid == 0) {
+		(void)dup2(in[0], STDIN_FILENO);
+		(void)close(in[0]);
+		(void)close(in[1]);
+		{
+			int devnull = open("/dev/null", O_WRONLY);
+			if (devnull >= 0) {
+				(void)dup2(devnull, STDERR_FILENO);
+				if (devnull > 2)
+					(void)close(devnull);
+			}
+		}
+		execl("/usr/bin/xclip", "xclip", "-display", g_display,
+			"-selection", "clipboard", "-t", "text/html",
+			"-i", (char *)NULL);
+		_exit(127);
+	}
+	(void)close(in[0]);
+	{
+		size_t off = 0;
+		while (off < len) {
+			ssize_t w = write(in[1], data + off, len - off);
+			if (w <= 0) {
+				if (w < 0 && errno == EINTR)
+					continue;
+				break;
+			}
+			off += (size_t)w;
+		}
+	}
+	(void)close(in[1]);
+	return pid;
+}
+
+/*
  * A minimal ICCCM INCR selection owner, run in a forked child with its own
  * X connection.  xclip does NOT switch to INCR even at 1 MiB on this server
  * (BIG-REQUESTS lets it ship the whole value in one XChangeProperty), so to
@@ -568,18 +627,20 @@ pred_sv0_readable(void *arg)
 
 /* ---- the test cases ---- */
 
-/* Send a CLIP_REQUEST to the session and collect the CLIP_DATA reply,
- * returning the payload (after the 8-byte data header) via out/out_len.
- * Returns 0 on success. */
+/* Send a CLIP_REQUEST(fmt) to the session and collect the CLIP_DATA reply,
+ * returning the payload (after the 8-byte data header) via out/out_len.  The
+ * reply's header format must equal the requested fmt.  Returns 0 on success. */
 static int
-request_and_read_data(uint8_t **out, size_t *out_len, int timeout_ms)
+request_and_read_data_fmt(uint32_t fmt, uint8_t **out, size_t *out_len,
+		int timeout_ms)
 {
-	struct rdp_be_clip_request req = { RDP_BE_CLIP_FMT_TEXT };
+	struct rdp_be_clip_request req;
 	static uint8_t buf[BIG_LEN + 1024];
 	uint32_t type = 0;
 	ssize_t n;
 	struct rdp_be_clip_data_hdr h;
 
+	req.format = fmt;
 	*out = NULL;
 	*out_len = 0;
 
@@ -603,6 +664,10 @@ request_and_read_data(uint8_t **out, size_t *out_len, int timeout_ms)
 	memcpy(&h, buf, sizeof h);
 	if (h.status != 0) {
 		FAILF("CLIP_DATA status %u (expected 0/ok)", h.status);
+		return -1;
+	}
+	if (h.format != fmt) {
+		FAILF("CLIP_DATA format 0x%x (expected 0x%x)", h.format, fmt);
 		return -1;
 	}
 	*out_len = (size_t)n - sizeof h;
@@ -665,7 +730,8 @@ test_x_to_rdp(const char *name, const uint8_t *data, size_t len)
 	(void)printf("  got CLIP_OFFER\n");
 
 	/* Now ask for the data. */
-	if (request_and_read_data(&got, &got_len, 8000) != 0)
+	if (request_and_read_data_fmt(RDP_BE_CLIP_FMT_TEXT, &got, &got_len,
+		8000) != 0)
 		goto reap;
 
 	if (got_len != len) {
@@ -792,7 +858,8 @@ test_x_to_rdp_incr(const char *name, const uint8_t *data, size_t len,
 		(void)wr;
 	}
 
-	if (request_and_read_data(&got, &got_len, 8000) != 0)
+	if (request_and_read_data_fmt(RDP_BE_CLIP_FMT_TEXT, &got, &got_len,
+		8000) != 0)
 		goto reap;
 
 	if (got_len != len) {
@@ -1045,6 +1112,308 @@ test_rdp_to_x(const char *name, const uint8_t *data, size_t len)
 	(void)drive_until(NULL, NULL, 100);
 }
 
+/* F.  X -> RDP, HTML.  An xclip -t text/html owner offers the text/html
+ * target carrying `html` (len bytes).  clip must probe TARGETS, emit a
+ * CLIP_OFFER whose bitmap has the HTML bit set (and, since this owner lists
+ * only TARGETS + text/html, ONLY the HTML bit), then on CLIP_REQUEST{HTML}
+ * convert the text/html target and return CLIP_DATA{HTML} equal to the raw
+ * fragment.  Mirrors test_x_to_rdp but on the HTML format. */
+static void
+test_x_to_rdp_html(const char *name, const uint8_t *html, size_t len)
+{
+	pid_t holder;
+	uint32_t type = 0;
+	uint8_t small[256];
+	ssize_t n;
+	struct rdp_be_clip_offer off;
+	uint8_t *got = NULL;
+	size_t got_len = 0;
+
+	(void)printf("%s: X -> RDP, HTML, %zu bytes\n", name, len);
+
+	holder = xclip_set_html(html, len);
+	if (holder < 0) {
+		FAILF("xclip -t text/html -i spawn failed");
+		return;
+	}
+
+	if (!drive_until(pred_sv0_readable, NULL, 5000)) {
+		FAILF("no CLIP_OFFER after xclip -t text/html -i");
+		goto reap;
+	}
+	n = rdp_be_recv(g_sv0, &type, small, sizeof small);
+	if (n < 0) {
+		FAILF("recv CLIP_OFFER: %s", strerror(errno));
+		goto reap;
+	}
+	if (type != RDP_BE_CLIP_OFFER) {
+		FAILF("expected CLIP_OFFER, got type %u", type);
+		goto reap;
+	}
+	if ((size_t)n < sizeof off) {
+		FAILF("CLIP_OFFER too short (%zd bytes)", n);
+		goto reap;
+	}
+	memcpy(&off, small, sizeof off);
+	if (!(off.formats & RDP_BE_CLIP_FMT_HTML)) {
+		FAILF("CLIP_OFFER bitmap 0x%x missing HTML bit 0x%x",
+			off.formats, RDP_BE_CLIP_FMT_HTML);
+		goto reap;
+	}
+	(void)printf("  got CLIP_OFFER, formats 0x%x (HTML bit set)\n",
+		off.formats);
+
+	/* Ask for the HTML format specifically. */
+	if (request_and_read_data_fmt(RDP_BE_CLIP_FMT_HTML, &got, &got_len,
+		8000) != 0)
+		goto reap;
+
+	if (got_len != len) {
+		FAILF("HTML length mismatch: got %zu, expected %zu",
+			got_len, len);
+		free(got);
+		goto reap;
+	}
+	if (memcmp(got, html, len) != 0) {
+		FAILF("HTML data mismatch: got '%.*s' expected '%.*s'",
+			(int)got_len, (const char *)got,
+			(int)len, (const char *)html);
+		free(got);
+		goto reap;
+	}
+	(void)printf("  CLIP_DATA{HTML} len %zu matches ('%.*s')\n",
+		got_len, (int)got_len, (const char *)got);
+	free(got);
+
+reap:
+	if (holder > 0) {
+		(void)kill(holder, SIGTERM);
+		(void)waitpid(holder, NULL, 0);
+		(void)drive_until(NULL, NULL, 200);
+	}
+}
+
+/* G.  RDP -> X, HTML.  The RDP side offers TEXT|HTML; clip claims CLIPBOARD
+ * and must advertise text/html in its TARGETS reply.  xclip -t text/html -o
+ * requests the text/html target, clip defers and emits CLIP_REQUEST{HTML},
+ * the harness answers CLIP_DATA{HTML, status=0, html}, and xclip's stdout
+ * must equal the fragment.  Mirrors test_rdp_to_x but on the HTML format and
+ * with a TEXT|HTML offer. */
+static void
+test_rdp_to_x_html(const char *name, const uint8_t *html, size_t len)
+{
+	struct rdp_be_clip_offer offer;
+	uint32_t type = 0;
+	uint8_t small[256];
+	ssize_t n;
+	uint8_t *got = NULL;
+	size_t got_len = 0;
+	int gr;
+
+	(void)printf("%s: RDP -> X, HTML, %zu bytes\n", name, len);
+
+	/* 1. RDP client announces TEXT and HTML content. */
+	offer.formats = RDP_BE_CLIP_FMT_TEXT | RDP_BE_CLIP_FMT_HTML;
+	if (rdp_be_send(g_sv0, RDP_BE_CLIP_OFFER, &offer, sizeof offer) != 0) {
+		FAILF("send CLIP_OFFER: %s", strerror(errno));
+		return;
+	}
+	(void)drive_until(NULL, NULL, 300);
+
+	/*
+	 * 2. Start xclip -t text/html -o.  It first converts TARGETS (clip
+	 *    answers directly, listing text/html since HTML was offered) then
+	 *    converts text/html, which clip defers via CLIP_REQUEST{HTML}.  We
+	 *    interleave: pump the loop, answer the request with CLIP_DATA{HTML},
+	 *    and collect xclip's stdout - the same structure as test_rdp_to_x.
+	 */
+	{
+		int op[2];
+		pid_t pid;
+		uint8_t *buf = NULL;
+		size_t cap = 0, used = 0;
+		long deadline = now_ms() + 8000;
+		int eof = 0, answered = 0, status;
+
+		if (pipe(op) != 0) {
+			FAILF("pipe: %s", strerror(errno));
+			return;
+		}
+		pid = fork();
+		if (pid < 0) {
+			FAILF("fork xclip -o: %s", strerror(errno));
+			(void)close(op[0]);
+			(void)close(op[1]);
+			return;
+		}
+		if (pid == 0) {
+			(void)dup2(op[1], STDOUT_FILENO);
+			(void)close(op[0]);
+			(void)close(op[1]);
+			{
+				int dn = open("/dev/null", O_WRONLY);
+				if (dn >= 0) {
+					(void)dup2(dn, STDERR_FILENO);
+					if (dn > 2)
+						(void)close(dn);
+				}
+			}
+			execl("/usr/bin/xclip", "xclip", "-display",
+				g_display, "-selection", "clipboard",
+				"-t", "text/html", "-o", (char *)NULL);
+			_exit(127);
+		}
+		(void)close(op[1]);
+		(void)fcntl(op[0], F_SETFL, O_NONBLOCK);
+
+		while (!eof && now_ms() < deadline) {
+			struct pollfd p[3];
+
+			pump_once();
+
+			if (!answered && pred_sv0_readable(NULL)) {
+				n = rdp_be_recv(g_sv0, &type, small,
+					sizeof small);
+				if (n < 0) {
+					FAILF("recv CLIP_REQUEST: %s",
+						strerror(errno));
+					eof = 1;
+					break;
+				}
+				if (type != RDP_BE_CLIP_REQUEST) {
+					FAILF("expected CLIP_REQUEST, got %u",
+						type);
+					eof = 1;
+					break;
+				}
+				if ((size_t)n
+					< sizeof(struct rdp_be_clip_request)) {
+					FAILF("CLIP_REQUEST too short");
+					eof = 1;
+					break;
+				}
+				{
+					struct rdp_be_clip_request rq;
+					memcpy(&rq, small, sizeof rq);
+					if (rq.format != RDP_BE_CLIP_FMT_HTML) {
+						FAILF("CLIP_REQUEST format "
+							"0x%x (expected HTML "
+							"0x%x)", rq.format,
+							RDP_BE_CLIP_FMT_HTML);
+						eof = 1;
+						break;
+					}
+				}
+				(void)printf("  got CLIP_REQUEST{HTML}; "
+					"answering with CLIP_DATA{HTML}\n");
+				{
+					size_t blen =
+						sizeof(struct rdp_be_clip_data_hdr)
+						+ len;
+					uint8_t *db = malloc(blen);
+					struct rdp_be_clip_data_hdr h;
+					h.format = RDP_BE_CLIP_FMT_HTML;
+					h.status = 0;
+					if (db == NULL) {
+						FAILF("oom");
+						eof = 1;
+						break;
+					}
+					memcpy(db, &h, sizeof h);
+					memcpy(db + sizeof h, html, len);
+					if (rdp_be_send(g_sv0,
+						RDP_BE_CLIP_DATA, db, blen)
+						!= 0)
+						FAILF("send CLIP_DATA: %s",
+							strerror(errno));
+					free(db);
+				}
+				answered = 1;
+			}
+
+			XFlush(g_dpy);
+			p[0].fd = g_xfd;
+			p[0].events = POLLIN;
+			p[0].revents = 0;
+			p[1].fd = g_sv1;
+			p[1].events = POLLIN;
+			p[1].revents = 0;
+			p[2].fd = op[0];
+			p[2].events = POLLIN;
+			p[2].revents = 0;
+			(void)poll(p, 3, 50);
+
+			if (p[2].revents & (POLLIN | POLLHUP)) {
+				for (;;) {
+					ssize_t r;
+					if (used + 65536 > cap) {
+						size_t nc = cap == 0
+							? 65536 : cap * 2;
+						uint8_t *nb =
+							realloc(buf, nc);
+						if (nb == NULL) {
+							free(buf);
+							buf = NULL;
+							eof = 1;
+							break;
+						}
+						buf = nb;
+						cap = nc;
+					}
+					r = read(op[0], buf + used,
+						cap - used);
+					if (r > 0) {
+						used += (size_t)r;
+						continue;
+					}
+					if (r == 0) {
+						eof = 1;
+						break;
+					}
+					if (errno == EAGAIN
+						|| errno == EWOULDBLOCK)
+						break;
+					if (errno == EINTR)
+						continue;
+					eof = 1;
+					break;
+				}
+			}
+		}
+		(void)close(op[0]);
+		(void)waitpid(pid, &status, 0);
+
+		got = buf;
+		got_len = used;
+		gr = (eof && (buf != NULL || used == 0)) ? 0 : -1;
+		if (!answered)
+			FAILF("clip never emitted CLIP_REQUEST{HTML}");
+	}
+
+	if (gr != 0) {
+		FAILF("xclip -t text/html -o produced no output (timeout?)");
+		free(got);
+		return;
+	}
+	if (got_len != len) {
+		FAILF("xclip -o HTML length mismatch: got %zu, expected %zu",
+			got_len, len);
+		free(got);
+		return;
+	}
+	if (memcmp(got, html, len) != 0)
+		FAILF("xclip -o HTML data mismatch: got '%.*s' expected '%.*s'",
+			(int)got_len, (const char *)got,
+			(int)len, (const char *)html);
+	else
+		(void)printf("  xclip -t text/html -o len %zu matches "
+			"('%.*s')\n", got_len, (int)got_len,
+			(const char *)got);
+	free(got);
+
+	(void)drive_until(NULL, NULL, 100);
+}
+
 int
 main(void)
 {
@@ -1168,6 +1537,14 @@ main(void)
 			free(pat);
 		}
 	}
+
+	/* F: X -> RDP, HTML via an xclip -t text/html owner. */
+	test_x_to_rdp_html("F", (const uint8_t *)"<b>hello</b> <i>html</i>",
+		strlen("<b>hello</b> <i>html</i>"));
+
+	/* G: RDP -> X, HTML; xclip -t text/html -o pulls it back. */
+	test_rdp_to_x_html("G", (const uint8_t *)"<p>from rdp</p>",
+		strlen("<p>from rdp</p>"));
 
 	free(big);
 

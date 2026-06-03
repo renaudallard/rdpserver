@@ -94,7 +94,19 @@
 
 #define CF_TEXT          1
 #define CF_OEMTEXT       7
+#define CF_DIB           8
 #define CF_UNICODETEXT  13
+#define CF_DIBV5        17
+
+/* Server-chosen format id used when we advertise the registered
+ * "HTML Format" to the client.  CLIPRDR requests carry the advertiser's
+ * id, so any stable id in the registered range (>= 0xC000) works; the
+ * worker maps it back to the semantic HTML format. */
+#define CB_FMT_HTML_ID  0xC100
+
+/* Registered clipboard format name (ASCII), matched case-sensitively in
+ * an incoming format list to learn the peer's dynamic id for it. */
+#define CB_FMT_NAME_HTML "HTML Format"
 
 /* Channel PDU header flags (MS-RDPBCGR 2.2.6.1.1). */
 #define CHANNEL_FLAG_FIRST           0x00000001
@@ -112,7 +124,20 @@ ssize_t rdp_cliprdr_build_monitor_ready(uint8_t *out, size_t cap);
 ssize_t rdp_cliprdr_build_clip_caps(uint8_t *out, size_t cap);
 ssize_t rdp_cliprdr_build_format_list_response(uint8_t *out, size_t cap,
 		int ok);
-ssize_t rdp_cliprdr_build_format_list_unicode_text(uint8_t *out, size_t cap);
+
+/* One advertised clipboard format: a numeric id and, for a registered
+ * format, an ASCII name (NULL for the standard CF_* ids). */
+struct rdp_clip_fmt {
+	uint32_t    id;
+	const char *name;
+};
+
+/* Build a CB_FORMAT_LIST advertising `fmts[0..n)`.  Honours the negotiated
+ * naming: long-format-names writes each name as UTF-16LE, short writes a
+ * fixed 32-byte ASCII field. */
+ssize_t rdp_cliprdr_build_format_list(uint8_t *out, size_t cap,
+		int use_long_names, const struct rdp_clip_fmt *fmts, size_t n);
+
 ssize_t rdp_cliprdr_build_format_data_request(uint8_t *out, size_t cap,
 		uint32_t format_id);
 ssize_t rdp_cliprdr_build_format_data_response(uint8_t *out, size_t cap,
@@ -129,13 +154,37 @@ struct rdp_cliprdr_hdr {
 int rdp_cliprdr_parse_hdr(const uint8_t *p, size_t len,
 		struct rdp_cliprdr_hdr *out);
 
-/* Parse a CB_FORMAT_LIST body (the bytes after the CLIPRDR header).
- * Sets *has_unicode_text / *has_text to 1 if those formats appear.
- * Honours the long-format-names path when use_long_names is true;
+/* Formats discovered in a peer's CB_FORMAT_LIST.  The standard text and
+ * image ids are matched numerically; the registered "HTML Format" is
+ * matched by name, and its dynamic id (assigned by the peer) is returned
+ * so we can request it later. */
+struct rdp_cliprdr_formats {
+	int      has_unicode_text;
+	int      has_text;
+	int      has_dib;
+	int      has_html;
+	uint32_t html_id;   /* peer's id for "HTML Format" if has_html */
+	uint32_t dib_id;    /* peer's id for CF_DIB/CF_DIBV5 if has_dib */
+};
+
+/* Parse a CB_FORMAT_LIST body (the bytes after the CLIPRDR header) into
+ * *out.  Honours the long-format-names path when use_long_names is true;
  * otherwise expects ASCII 32-byte format names. */
 int rdp_cliprdr_parse_format_list(const uint8_t *p, size_t len,
-		int use_long_names,
-		int *has_unicode_text, int *has_text);
+		int use_long_names, struct rdp_cliprdr_formats *out);
+
+/*
+ * CF_HTML ("HTML Format") clipboard wrapper (MS-OLEDS / the documented
+ * Windows clipboard HTML format).  rdp_cliprdr_html_wrap encodes raw HTML
+ * bytes into the Version/StartHTML/EndHTML/StartFragment/EndFragment
+ * envelope; rdp_cliprdr_html_unwrap parses the envelope and returns the
+ * fragment as an offset/length into the input (no copy).  Fragment bytes
+ * are treated as opaque (not transcoded).
+ */
+ssize_t rdp_cliprdr_html_wrap(uint8_t *out, size_t cap,
+		const uint8_t *html, size_t html_len);
+int rdp_cliprdr_html_unwrap(const uint8_t *cfhtml, size_t len,
+		size_t *frag_off, size_t *frag_len);
 
 /* Parse a CB_FORMAT_DATA_REQUEST body.  Returns the requested
  * format id. */

@@ -34,6 +34,7 @@
 
 #include "../common/buf.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -88,20 +89,51 @@ rdp_cliprdr_build_format_list_response(uint8_t *out, size_t cap, int ok)
 	return (ssize_t)rdp_buf_used(&b);
 }
 
-/* CB_FORMAT_LIST in long-format-names mode: a sequence of
- * { u32 formatId, wchar_t* formatName (UTF-16LE, NUL-terminated) }.
- * For an unnamed format we still write a single 0x0000 (the empty
- * name terminator). */
+/*
+ * CB_FORMAT_LIST.  Long-format-names mode is a sequence of
+ * { u32 formatId, UTF-16LE formatName (NUL-terminated) }; an unnamed
+ * format writes a single 0x0000 (the empty-name terminator).  Short mode
+ * is { u32 formatId, 32-byte ASCII name (NUL-padded) } per entry.  The
+ * header dataLen is backfilled once the body length is known.
+ */
 ssize_t
-rdp_cliprdr_build_format_list_unicode_text(uint8_t *out, size_t cap)
+rdp_cliprdr_build_format_list(uint8_t *out, size_t cap, int use_long_names,
+		const struct rdp_clip_fmt *fmts, size_t n)
 {
 	struct rdp_buf b;
-	uint32_t payload_len = 4 + 2;   /* one entry: u32 fmt + u16 NUL */
+	size_t i, used, body;
+
 	rdp_buf_init(&b, out, cap);
-	if (write_hdr(&b, CB_FORMAT_LIST, 0, payload_len) != 0) return -1;
-	if (rdp_buf_put_u32le(&b, CF_UNICODETEXT) != 0) return -1;
-	if (rdp_buf_put_u16le(&b, 0) != 0) return -1;
-	return (ssize_t)rdp_buf_used(&b);
+	if (write_hdr(&b, CB_FORMAT_LIST, 0, 0) != 0) return -1;
+	for (i = 0; i < n; i++) {
+		if (rdp_buf_put_u32le(&b, fmts[i].id) != 0) return -1;
+		if (use_long_names) {
+			const char *p = fmts[i].name;
+			for (; p != NULL && *p != '\0'; p++)
+				if (rdp_buf_put_u16le(&b, (uint8_t)*p) != 0)
+					return -1;
+			if (rdp_buf_put_u16le(&b, 0) != 0) return -1;
+		} else {
+			uint8_t name32[32];
+			size_t l = 0;
+			memset(name32, 0, sizeof name32);
+			if (fmts[i].name != NULL) {
+				l = strlen(fmts[i].name);
+				if (l > sizeof name32) l = sizeof name32;
+				memcpy(name32, fmts[i].name, l);
+			}
+			if (rdp_buf_put(&b, name32, sizeof name32) != 0)
+				return -1;
+		}
+	}
+	/* Backfill dataLen (body bytes after the 8-byte header). */
+	used = rdp_buf_used(&b);
+	body = used - RDP_CLIPRDR_HDR_LEN;
+	out[4] = (uint8_t)(body & 0xff);
+	out[5] = (uint8_t)((body >> 8) & 0xff);
+	out[6] = (uint8_t)((body >> 16) & 0xff);
+	out[7] = (uint8_t)((body >> 24) & 0xff);
+	return (ssize_t)used;
 }
 
 ssize_t
@@ -140,15 +172,72 @@ rdp_cliprdr_parse_hdr(const uint8_t *p, size_t len,
 	return 0;
 }
 
+/* Does the UTF-16LE name region p[0..plen) equal the ASCII string a
+ * (optionally followed by a 2-byte NUL terminator)? */
+static int
+utf16le_name_eq(const uint8_t *p, size_t plen, const char *a)
+{
+	size_t al = strlen(a), i;
+
+	if (plen != al * 2 && plen != al * 2 + 2)
+		return 0;
+	for (i = 0; i < al; i++)
+		if (p[i * 2] != (uint8_t)a[i] || p[i * 2 + 1] != 0)
+			return 0;
+	if (plen == al * 2 + 2 && (p[al * 2] != 0 || p[al * 2 + 1] != 0))
+		return 0;
+	return 1;
+}
+
+/* Does the 32-byte ASCII short-name field equal the NUL-terminated a? */
+static int
+ascii_name_eq(const uint8_t *p, const char *a)
+{
+	size_t al = strlen(a), i;
+
+	if (al >= 32)
+		return 0;
+	if (memcmp(p, a, al) != 0)
+		return 0;
+	for (i = al; i < 32; i++)
+		if (p[i] != 0)
+			return 0;
+	return 1;
+}
+
+/* Record one advertised format (id plus its name region) into *out. */
+static void
+classify_format(struct rdp_cliprdr_formats *out, uint32_t fmt,
+		const uint8_t *name, size_t name_len, int utf16)
+{
+	int is_html;
+
+	if (fmt == CF_UNICODETEXT)
+		out->has_unicode_text = 1;
+	else if (fmt == CF_TEXT)
+		out->has_text = 1;
+	else if (fmt == CF_DIB || fmt == CF_DIBV5) {
+		/* Prefer CF_DIB; only fall back to V5 if no plain DIB seen. */
+		if (!out->has_dib || fmt == CF_DIB) {
+			out->has_dib = 1;
+			out->dib_id = fmt;
+		}
+	}
+	is_html = utf16 ? utf16le_name_eq(name, name_len, CB_FMT_NAME_HTML)
+			: ascii_name_eq(name, CB_FMT_NAME_HTML);
+	if (is_html) {
+		out->has_html = 1;
+		out->html_id = fmt;
+	}
+}
+
 int
 rdp_cliprdr_parse_format_list(const uint8_t *p, size_t len,
-		int use_long_names,
-		int *has_unicode_text, int *has_text)
+		int use_long_names, struct rdp_cliprdr_formats *out)
 {
 	size_t off = 0;
 
-	*has_unicode_text = 0;
-	*has_text = 0;
+	memset(out, 0, sizeof *out);
 	if (use_long_names) {
 		while (off + 4 <= len) {
 			uint32_t fmt;
@@ -167,9 +256,8 @@ rdp_cliprdr_parse_format_list(const uint8_t *p, size_t len,
 				}
 				off += 2;
 			}
-			(void)name_start;
-			if (fmt == CF_UNICODETEXT) *has_unicode_text = 1;
-			else if (fmt == CF_TEXT)   *has_text = 1;
+			classify_format(out, fmt, p + name_start,
+				off - name_start, 1);
 		}
 	} else {
 		/* 36-byte stride: 4 fmt id + 32 ASCII name. */
@@ -178,9 +266,8 @@ rdp_cliprdr_parse_format_list(const uint8_t *p, size_t len,
 				| ((uint32_t)p[off + 1] << 8)
 				| ((uint32_t)p[off + 2] << 16)
 				| ((uint32_t)p[off + 3] << 24);
+			classify_format(out, fmt, p + off + 4, 32, 0);
 			off += 36;
-			if (fmt == CF_UNICODETEXT) *has_unicode_text = 1;
-			else if (fmt == CF_TEXT)   *has_text = 1;
 		}
 	}
 	return 0;
@@ -193,6 +280,135 @@ rdp_cliprdr_parse_format_data_request(const uint8_t *p, size_t len,
 	if (len < 4) return -1;
 	*format_id_out = (uint32_t)p[0] | ((uint32_t)p[1] << 8)
 		| ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+	return 0;
+}
+
+/* The fixed envelope around the HTML fragment.  StartHTML points at <html>,
+ * StartFragment just past the StartFragment comment, EndFragment at the
+ * EndFragment comment, EndHTML at the buffer end. */
+static const char html_pre[]  = "<html>\r\n<body>\r\n";
+static const char html_sfrag[] = "<!--StartFragment-->";
+static const char html_efrag[] = "<!--EndFragment-->";
+static const char html_post[] = "\r\n</body>\r\n</html>";
+static const char html_hdr_fmt[] =
+	"Version:0.9\r\n"
+	"StartHTML:%010zu\r\n"
+	"EndHTML:%010zu\r\n"
+	"StartFragment:%010zu\r\n"
+	"EndFragment:%010zu\r\n";
+
+ssize_t
+rdp_cliprdr_html_wrap(uint8_t *out, size_t cap, const uint8_t *html,
+		size_t html_len)
+{
+	char hdr[160];
+	int h0;
+	size_t hlen, start_html, start_frag, end_frag, end_html;
+
+	/* Offsets are 10 digits wide, so the header length is constant; size
+	 * it by formatting with zero offsets, then re-emit with the real
+	 * ones (same width). */
+	h0 = snprintf(hdr, sizeof hdr, html_hdr_fmt,
+		(size_t)0, (size_t)0, (size_t)0, (size_t)0);
+	if (h0 < 0 || (size_t)h0 >= sizeof hdr)
+		return -1;
+	hlen = (size_t)h0;
+	/* Bound html_len against the buffer BEFORE any offset addition, so a
+	 * near-SIZE_MAX length cannot wrap end_html below cap and slip past
+	 * the check into the memcpy. */
+	{
+		size_t overhead = hlen + (sizeof html_pre - 1)
+			+ (sizeof html_sfrag - 1) + (sizeof html_efrag - 1)
+			+ (sizeof html_post - 1);
+		if (overhead > cap || html_len > cap - overhead)
+			return -1;
+	}
+	start_html = hlen;
+	start_frag = hlen + (sizeof html_pre - 1) + (sizeof html_sfrag - 1);
+	end_frag   = start_frag + html_len;
+	end_html   = end_frag + (sizeof html_efrag - 1)
+		+ (sizeof html_post - 1);
+	if ((size_t)snprintf(hdr, sizeof hdr, html_hdr_fmt,
+		start_html, end_html, start_frag, end_frag) != hlen)
+		return -1;   /* an offset overran 10 digits */
+	memcpy(out, hdr, hlen);
+	memcpy(out + hlen, html_pre, sizeof html_pre - 1);
+	memcpy(out + hlen + (sizeof html_pre - 1), html_sfrag,
+		sizeof html_sfrag - 1);
+	memcpy(out + start_frag, html, html_len);
+	memcpy(out + end_frag, html_efrag, sizeof html_efrag - 1);
+	memcpy(out + end_frag + (sizeof html_efrag - 1), html_post,
+		sizeof html_post - 1);
+	return (ssize_t)end_html;
+}
+
+/* Find the first occurrence of NUL-terminated needle in p[0..len); on a
+ * match set *pos to its offset and return 0. */
+static int
+find_sub(const uint8_t *p, size_t len, const char *needle, size_t *pos)
+{
+	size_t nl = strlen(needle), i;
+
+	if (nl == 0 || len < nl)
+		return -1;
+	for (i = 0; i + nl <= len; i++)
+		if (memcmp(p + i, needle, nl) == 0) {
+			*pos = i;
+			return 0;
+		}
+	return -1;
+}
+
+/* Read the decimal value that follows "key" in the CF_HTML header. */
+static int
+html_offset(const uint8_t *p, size_t len, const char *key, size_t *out)
+{
+	size_t at, j, v = 0;
+	int any = 0;
+
+	if (find_sub(p, len, key, &at) != 0)
+		return -1;
+	for (j = at + strlen(key); j < len && p[j] >= '0' && p[j] <= '9';
+			j++) {
+		v = v * 10 + (size_t)(p[j] - '0');
+		if (v > ((size_t)1 << 40))
+			return -1;   /* implausible; bail before overflow */
+		any = 1;
+	}
+	if (!any)
+		return -1;
+	*out = v;
+	return 0;
+}
+
+int
+rdp_cliprdr_html_unwrap(const uint8_t *cfhtml, size_t len, size_t *frag_off,
+		size_t *frag_len)
+{
+	size_t sf, ef, smo, emo;
+
+	/* Preferred: the StartFragment/EndFragment byte offsets in the
+	 * header. */
+	if (html_offset(cfhtml, len, "StartFragment:", &sf) == 0
+	    && html_offset(cfhtml, len, "EndFragment:", &ef) == 0
+	    && sf <= ef && ef <= len) {
+		*frag_off = sf;
+		*frag_len = ef - sf;
+		return 0;
+	}
+	/* Fallback: the literal fragment comment markers. */
+	if (find_sub(cfhtml, len, html_sfrag, &smo) == 0
+	    && find_sub(cfhtml, len, html_efrag, &emo) == 0) {
+		size_t s = smo + (sizeof html_sfrag - 1);
+		if (s <= emo && emo <= len) {
+			*frag_off = s;
+			*frag_len = emo - s;
+			return 0;
+		}
+	}
+	/* No envelope recognised: treat the whole buffer as the fragment. */
+	*frag_off = 0;
+	*frag_len = len;
 	return 0;
 }
 

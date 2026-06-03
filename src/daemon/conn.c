@@ -227,10 +227,45 @@ struct clip_state {
 	int      use_long_names;
 	int      caps_sent;
 
+	/* The client's dynamic ids for named/standard formats, learned from
+	 * its CB_FORMAT_LIST, so we can request them on the X side's behalf. */
+	uint32_t client_html_id;
+
+	/* Semantic format of the CB_FORMAT_DATA_REQUEST we last sent to the
+	 * client, so its response (which carries no format id) is decoded
+	 * correctly.  CLIPRDR is request/response serialised in practice. */
+	uint32_t pending_req_fmt;
+
 	/* Inbound CLIPRDR channel fragment reassembly (CHANNEL_PDU_HEADER
 	 * FIRST..LAST), bounded by CLIP_MAX_PDU. */
 	struct rdp_cliprdr_reasm reasm;
 };
+
+/* Map a CLIPRDR format id the client advertised or requested to one of our
+ * semantic backend formats, or 0 if we do not handle it.  HTML uses the id
+ * we advertised (CB_FMT_HTML_ID); the client echoes the advertiser's id. */
+static uint32_t
+clip_sem_from_id(uint32_t id)
+{
+	if (id == CF_UNICODETEXT || id == CF_TEXT)
+		return RDP_BE_CLIP_FMT_TEXT;
+	if (id == CB_FMT_HTML_ID)
+		return RDP_BE_CLIP_FMT_HTML;
+	return 0;
+}
+
+/* Map a semantic format to the id to request from the client. */
+static uint32_t
+clip_id_for_client(const struct clip_state *cs, uint32_t sem)
+{
+	switch (sem) {
+	case RDP_BE_CLIP_FMT_TEXT:
+		return CF_UNICODETEXT;
+	case RDP_BE_CLIP_FMT_HTML:
+		return cs->client_html_id;
+	}
+	return 0;
+}
 
 /* Largest reassembled inbound CLIPRDR PDU we accept.  A format-data
  * response can carry up to BE_MAX_PAYLOAD of UTF-8 text, which the client
@@ -342,12 +377,13 @@ clip_handle_pdu(struct rdp_tls *t, int be_fd,
 			cs->use_long_names);
 		break;
 	case CB_FORMAT_LIST: {
-		int has_uc = 0, has_text = 0;
+		struct rdp_cliprdr_formats f;
+		uint32_t bitmap = 0;
 		(void)rdp_cliprdr_parse_format_list(pdu + 8,
-			len > 8 ? len - 8 : 0,
-			cs->use_long_names, &has_uc, &has_text);
-		rdp_debug("cliprdr: client format list (unicode=%d text=%d)",
-			has_uc, has_text);
+			len > 8 ? len - 8 : 0, cs->use_long_names, &f);
+		cs->client_html_id = f.has_html ? f.html_id : 0;
+		rdp_debug("cliprdr: client formats text=%d/%d html=%d",
+			f.has_unicode_text, f.has_text, f.has_html);
 		{
 			uint8_t r[16];
 			ssize_t rn = rdp_cliprdr_build_format_list_response(
@@ -356,9 +392,12 @@ clip_handle_pdu(struct rdp_tls *t, int be_fd,
 				(void)send_clip_pdu(t, cs->user_id,
 					cs->channel_id, r, (size_t)rn);
 		}
-		if (has_uc || has_text) {
-			struct rdp_be_clip_offer offer = {
-				RDP_BE_CLIP_FMT_TEXT };
+		if (f.has_unicode_text || f.has_text)
+			bitmap |= RDP_BE_CLIP_FMT_TEXT;
+		if (f.has_html)
+			bitmap |= RDP_BE_CLIP_FMT_HTML;
+		if (bitmap != 0) {
+			struct rdp_be_clip_offer offer = { bitmap };
 			(void)rdp_be_send(be_fd, RDP_BE_CLIP_OFFER,
 				&offer, sizeof offer);
 		}
@@ -370,43 +409,73 @@ clip_handle_pdu(struct rdp_tls *t, int be_fd,
 		uint32_t format = 0;
 		if (rdp_cliprdr_parse_format_data_request(pdu + 8,
 			len > 8 ? len - 8 : 0, &format) == 0) {
-			struct rdp_be_clip_request req = {
-				RDP_BE_CLIP_FMT_TEXT };
-			(void)format;
-			(void)rdp_be_send(be_fd, RDP_BE_CLIP_REQUEST,
-				&req, sizeof req);
+			uint32_t sem = clip_sem_from_id(format);
+			if (sem != 0) {
+				struct rdp_be_clip_request req = { sem };
+				(void)rdp_be_send(be_fd, RDP_BE_CLIP_REQUEST,
+					&req, sizeof req);
+			} else {
+				uint8_t r[16];
+				ssize_t rn =
+				    rdp_cliprdr_build_format_data_response(
+					r, sizeof r, NULL, 0, 0);
+				if (rn > 0)
+					(void)send_clip_pdu(t, cs->user_id,
+						cs->channel_id, r, (size_t)rn);
+			}
 		}
 		break;
 	}
 	case CB_FORMAT_DATA_RESPONSE: {
+		/* The client answered the request we sent on the X side's
+		 * behalf; pending_req_fmt tells us how to decode it. */
 		size_t data_off = 8;
 		size_t data_len = h.data_len;
+		uint32_t sem = cs->pending_req_fmt;
+		struct rdp_be_clip_data_hdr h2;
 		uint8_t *out;
-		size_t  out_size;
+		int fail = (h.msg_flags & CB_RESPONSE_FAIL) ? 1 : 0;
 
+		cs->pending_req_fmt = 0;
 		if (data_off + data_len > len) data_len = len - data_off;
-		out_size = sizeof(struct rdp_be_clip_data_hdr)
-			+ data_len * 2 + 1;
-		out = malloc(out_size);
-		if (out == NULL) break;
-		{
-			struct rdp_be_clip_data_hdr h2;
-			size_t got;
-			h2.format = RDP_BE_CLIP_FMT_TEXT;
-			h2.status = (h.msg_flags & CB_RESPONSE_FAIL) ? 1 : 0;
+		h2.format = sem;
+		h2.status = fail;
+		if (fail) {
+			(void)rdp_be_send(be_fd, RDP_BE_CLIP_DATA,
+				&h2, sizeof h2);
+			break;
+		}
+		if (sem == RDP_BE_CLIP_FMT_HTML) {
+			/* CF_HTML envelope -> raw fragment bytes. */
+			size_t fo = 0, fl = 0;
+			(void)rdp_cliprdr_html_unwrap(pdu + data_off, data_len,
+				&fo, &fl);
+			out = malloc(sizeof h2 + fl);
+			if (out == NULL) break;
 			memcpy(out, &h2, sizeof h2);
-			got = rdp_utf16le_to_utf8(
-				(char *)out + sizeof h2,
-				out_size - sizeof h2,
-				pdu + data_off, data_len);
+			if (fl > 0)
+				memcpy(out + sizeof h2, pdu + data_off + fo, fl);
+			(void)rdp_be_send(be_fd, RDP_BE_CLIP_DATA,
+				out, sizeof h2 + fl);
+			free(out);
+		} else {
+			/* Default: UTF-16LE text -> UTF-8. */
+			size_t out_size = sizeof h2 + data_len * 2 + 1;
+			size_t got;
+			out = malloc(out_size);
+			if (out == NULL) break;
+			h2.format = RDP_BE_CLIP_FMT_TEXT;
+			memcpy(out, &h2, sizeof h2);
+			got = rdp_utf16le_to_utf8((char *)out + sizeof h2,
+				out_size - sizeof h2, pdu + data_off, data_len);
 			if (got == (size_t)-1) got = 0;
 			while (got > 0
 			    && ((char *)out + sizeof h2)[got - 1] == '\0')
 				got--;
 			(void)rdp_be_send(be_fd, RDP_BE_CLIP_DATA,
 				out, sizeof h2 + got);
+			free(out);
 		}
-		free(out);
 		break;
 	}
 	default:
@@ -425,25 +494,60 @@ clip_handle_be(struct rdp_tls *t, struct clip_state *cs,
 	ssize_t n;
 
 	switch (type) {
-	case RDP_BE_CLIP_OFFER:
+	case RDP_BE_CLIP_OFFER: {
+		/* The X side announced clipboard content; advertise the
+		 * matching formats to the client.  HTML carries a registered
+		 * name so the client can map it. */
+		struct rdp_clip_fmt fmts[2];
+		size_t nf = 0;
+		uint32_t bitmap = RDP_BE_CLIP_FMT_TEXT;
+
 		if (!cs->enabled) return 0;
-		(void)payload; (void)len;
-		n = rdp_cliprdr_build_format_list_unicode_text(
-			pdu, sizeof pdu);
+		if (len >= sizeof(struct rdp_be_clip_offer)) {
+			struct rdp_be_clip_offer o;
+			memcpy(&o, payload, sizeof o);
+			bitmap = o.formats;
+		}
+		if (bitmap & RDP_BE_CLIP_FMT_TEXT) {
+			fmts[nf].id = CF_UNICODETEXT;
+			fmts[nf].name = NULL;
+			nf++;
+		}
+		if (bitmap & RDP_BE_CLIP_FMT_HTML) {
+			fmts[nf].id = CB_FMT_HTML_ID;
+			fmts[nf].name = CB_FMT_NAME_HTML;
+			nf++;
+		}
+		if (nf == 0) return 0;
+		n = rdp_cliprdr_build_format_list(pdu, sizeof pdu,
+			cs->use_long_names, fmts, nf);
 		if (n < 0) return -1;
 		return send_clip_pdu(t, cs->user_id, cs->channel_id,
 			pdu, (size_t)n);
-	case RDP_BE_CLIP_REQUEST:
-		(void)payload; (void)len;
-		n = rdp_cliprdr_build_format_data_request(pdu, sizeof pdu,
-			CF_UNICODETEXT);
+	}
+	case RDP_BE_CLIP_REQUEST: {
+		/* The X side asked for one format from the client. */
+		uint32_t sem = RDP_BE_CLIP_FMT_TEXT;
+		uint32_t cid;
+
+		if (len >= sizeof(struct rdp_be_clip_request)) {
+			struct rdp_be_clip_request rq;
+			memcpy(&rq, payload, sizeof rq);
+			sem = rq.format;
+		}
+		cid = clip_id_for_client(cs, sem);
+		if (cid == 0) return 0;   /* client did not advertise it */
+		cs->pending_req_fmt = sem;
+		n = rdp_cliprdr_build_format_data_request(pdu, sizeof pdu, cid);
 		if (n < 0) return -1;
 		return send_clip_pdu(t, cs->user_id, cs->channel_id,
 			pdu, (size_t)n);
+	}
 	case RDP_BE_CLIP_DATA: {
 		struct rdp_be_clip_data_hdr h;
-		uint8_t *utf16;
-		size_t need;
+		const uint8_t *data;
+		size_t dlen, resp_cap;
+		uint8_t *resp;
 		int rc;
 
 		if (len < sizeof h) return -1;
@@ -455,21 +559,44 @@ clip_handle_be(struct rdp_tls *t, struct clip_state *cs,
 			return send_clip_pdu(t, cs->user_id, cs->channel_id,
 				pdu, (size_t)n);
 		}
-		need = (len - sizeof h) * 2 + 2;
-		utf16 = malloc(need);
-		if (utf16 == NULL) return -1;
-		{
-			uint8_t *resp;
-			size_t resp_cap;
-			size_t got = rdp_utf8_to_utf16le(utf16, need - 2,
-				(const char *)payload + sizeof h,
-				len - sizeof h);
+		data = payload + sizeof h;
+		dlen = len - sizeof h;
+		if (h.format == RDP_BE_CLIP_FMT_HTML) {
+			/* Raw HTML fragment -> CF_HTML envelope. */
+			uint8_t *cfh;
+			ssize_t cl;
+			size_t cfh_cap = dlen + 256;   /* envelope overhead */
+
+			cfh = malloc(cfh_cap);
+			if (cfh == NULL) return -1;
+			cl = rdp_cliprdr_html_wrap(cfh, cfh_cap, data, dlen);
+			if (cl < 0) {
+				free(cfh);
+				return -1;
+			}
+			resp_cap = RDP_CLIPRDR_HDR_LEN + (size_t)cl;
+			resp = malloc(resp_cap);
+			if (resp == NULL) {
+				free(cfh);
+				return -1;
+			}
+			n = rdp_cliprdr_build_format_data_response(
+				resp, resp_cap, cfh, (size_t)cl, 1);
+			free(cfh);
+		} else {
+			/* Default: UTF-8 -> UTF-16LE text.  The response can
+			 * far exceed the fixed pdu buffer for a large paste, so
+			 * size it to the data; send_clip_pdu fragments it. */
+			size_t need = dlen * 2 + 2;
+			size_t got;
+			uint8_t *utf16 = malloc(need);
+
+			if (utf16 == NULL) return -1;
+			got = rdp_utf8_to_utf16le(utf16, need - 2,
+				(const char *)data, dlen);
 			if (got == (size_t)-1) got = 0;
 			utf16[got]     = 0;
 			utf16[got + 1] = 0;
-			/* The response (header + UTF-16 data) can far exceed the
-			 * fixed pdu buffer for a large paste; size it to the
-			 * data.  send_clip_pdu fragments it onto the wire. */
 			resp_cap = RDP_CLIPRDR_HDR_LEN + got + 2;
 			resp = malloc(resp_cap);
 			if (resp == NULL) {
@@ -479,14 +606,14 @@ clip_handle_be(struct rdp_tls *t, struct clip_state *cs,
 			n = rdp_cliprdr_build_format_data_response(
 				resp, resp_cap, utf16, got + 2, 1);
 			free(utf16);
-			if (n < 0) {
-				free(resp);
-				return -1;
-			}
-			rc = send_clip_pdu(t, cs->user_id, cs->channel_id,
-				resp, (size_t)n);
-			free(resp);
 		}
+		if (n < 0) {
+			free(resp);
+			return -1;
+		}
+		rc = send_clip_pdu(t, cs->user_id, cs->channel_id,
+			resp, (size_t)n);
+		free(resp);
 		return rc;
 	}
 	}

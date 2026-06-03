@@ -203,15 +203,15 @@ fuzz_cliprdr(size_t iters)
 	for (i = 0; i < iters; i++) {
 		size_t len = pick_len(2048);
 		struct rdp_cliprdr_hdr h;
+		struct rdp_cliprdr_formats fmts;
 		uint32_t fmt;
-		int has_uc = 0, has_text = 0;
+		size_t fo, fl;
 		fill_random(buf, len);
 		(void)rdp_cliprdr_parse_hdr(buf, len, &h);
-		(void)rdp_cliprdr_parse_format_list(buf, len, 1,
-			&has_uc, &has_text);
-		(void)rdp_cliprdr_parse_format_list(buf, len, 0,
-			&has_uc, &has_text);
+		(void)rdp_cliprdr_parse_format_list(buf, len, 1, &fmts);
+		(void)rdp_cliprdr_parse_format_list(buf, len, 0, &fmts);
 		(void)rdp_cliprdr_parse_format_data_request(buf, len, &fmt);
+		(void)rdp_cliprdr_html_unwrap(buf, len, &fo, &fl);
 
 		/* Drive the channel reassembler with a fragment stream
 		 * derived from the random buffer: each record is a flags

@@ -162,7 +162,14 @@ struct rdp_be_fs_device {
 	uint8_t  pad[2];
 };
 
+/* Semantic clipboard formats carried over the backend.  CLIP_OFFER is a
+ * bitmap of these; CLIP_REQUEST and the CLIP_DATA header select one.  For
+ * TEXT the data bytes are UTF-8; for IMAGE they are a BMP file byte
+ * stream; for HTML they are the raw HTML fragment (UTF-8), not the
+ * Windows CF_HTML envelope (the worker adds/strips that). */
 #define RDP_BE_CLIP_FMT_TEXT  0x00000001u
+#define RDP_BE_CLIP_FMT_IMAGE 0x00000002u
+#define RDP_BE_CLIP_FMT_HTML  0x00000004u
 
 /* Hello payload (8 bytes). */
 struct rdp_be_hello {

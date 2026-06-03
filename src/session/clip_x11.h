@@ -56,6 +56,7 @@ struct rdp_clip {
 	Atom     a_string;
 	Atom     a_text;
 	Atom     a_compound_text;
+	Atom     a_text_html;       /* text/html target */
 	Atom     a_timestamp;
 	Atom     a_incr;            /* INCR transfer marker type */
 	Atom     a_property;         /* our scratch property name */
@@ -68,20 +69,18 @@ struct rdp_clip {
 	uint8_t *incr_buf;
 	size_t   incr_len;
 
-	/* Cached content offered by the X side (from xterm copy etc.). */
-	char    *x_text;
-	size_t   x_text_len;
-	int      x_fetch_pending;
+	/* X -> RDP: the semantic format (RDP_BE_CLIP_FMT_*) currently being
+	 * fetched from the X selection owner; 0 means the initial TARGETS
+	 * probe that learns which formats the owner exposes. */
+	uint32_t x_fetch_fmt;
 
-	/* Cached content offered by the RDP client.  When set we own
-	 * the CLIPBOARD selection; serve external SelectionRequests
-	 * from this buffer. */
-	char    *rdp_text;
-	size_t   rdp_text_len;
-	int      rdp_data_pending;   /* SelectionRequest deferred */
+	/* RDP -> X: formats the RDP client offers (bitmap), advertised to
+	 * local apps as selection targets while we own CLIPBOARD. */
+	uint32_t rdp_offered;
 
-	/* If `rdp_data_pending`, remember the SelectionRequest so we
-	 * can answer it when CLIP_DATA arrives. */
+	/* A SelectionRequest deferred until the worker returns CLIP_DATA. */
+	int      rdp_data_pending;
+	uint32_t defer_fmt;
 	Window   defer_requestor;
 	Atom     defer_property;
 	Atom     defer_target;

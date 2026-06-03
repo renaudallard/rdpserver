@@ -228,6 +228,93 @@ test_exact_fill(void)
 	printf("  exact fill: 32+32 = 64 bytes, boundary ok\n");
 }
 
+/* A format list with text, the named HTML format, and an image round-trips
+ * through build then parse, in both naming modes. */
+static void
+test_format_list_roundtrip(void)
+{
+	uint8_t buf[256];
+	struct rdp_clip_fmt fmts[3] = {
+		{ CF_UNICODETEXT, NULL },
+		{ CB_FMT_HTML_ID, CB_FMT_NAME_HTML },
+		{ CF_DIB, NULL },
+	};
+	struct rdp_cliprdr_formats p;
+	ssize_t n;
+
+	n = rdp_cliprdr_build_format_list(buf, sizeof buf, 1, fmts, 3);
+	if (n < 8) FAIL("build long n=%lld", (long long)n);
+	rdp_cliprdr_parse_format_list(buf + 8, (size_t)n - 8, 1, &p);
+	if (!p.has_unicode_text) FAIL("long: missing unicode text");
+	if (!p.has_html || p.html_id != CB_FMT_HTML_ID)
+		FAIL("long: html id %u", p.html_id);
+	if (!p.has_dib || p.dib_id != CF_DIB) FAIL("long: missing dib");
+	printf("  format list long-names: text+html+dib round-trip ok\n");
+
+	n = rdp_cliprdr_build_format_list(buf, sizeof buf, 0, fmts, 3);
+	if (n < 8) FAIL("build short n=%lld", (long long)n);
+	rdp_cliprdr_parse_format_list(buf + 8, (size_t)n - 8, 0, &p);
+	if (!p.has_unicode_text || !p.has_html
+	    || p.html_id != CB_FMT_HTML_ID || !p.has_dib)
+		FAIL("short: round-trip incomplete");
+	printf("  format list short-names: text+html+dib round-trip ok\n");
+}
+
+/* The CF_HTML envelope preserves the fragment bytes exactly. */
+static void
+test_html_roundtrip(void)
+{
+	uint8_t buf[512];
+	const char *html = "<b>hi &amp; bye</b>";
+	size_t hl = strlen(html), fo = 0, fl = 0;
+	ssize_t n;
+
+	n = rdp_cliprdr_html_wrap(buf, sizeof buf, (const uint8_t *)html, hl);
+	if (n < 0) FAIL("html wrap");
+	if (rdp_cliprdr_html_unwrap(buf, (size_t)n, &fo, &fl) != 0)
+		FAIL("html unwrap");
+	if (fl != hl || memcmp(buf + fo, html, hl) != 0)
+		FAIL("html fragment mismatch (fl=%zu hl=%zu)", fl, hl);
+	printf("  html wrap/unwrap: fragment preserved ok\n");
+}
+
+/* unwrap falls back to the comment markers, and passes raw HTML through. */
+static void
+test_html_unwrap_fallback(void)
+{
+	const char *marked =
+		"x<!--StartFragment-->HELLO<!--EndFragment-->y";
+	const char *plain = "just plain html";
+	size_t fo = 0, fl = 0;
+
+	rdp_cliprdr_html_unwrap((const uint8_t *)marked, strlen(marked),
+		&fo, &fl);
+	if (fl != 5 || memcmp(marked + fo, "HELLO", 5) != 0)
+		FAIL("html fallback markers (fl=%zu)", fl);
+	rdp_cliprdr_html_unwrap((const uint8_t *)plain, strlen(plain),
+		&fo, &fl);
+	if (fo != 0 || fl != strlen(plain))
+		FAIL("html no-envelope passthrough (fo=%zu fl=%zu)", fo, fl);
+	printf("  html unwrap fallback: markers + passthrough ok\n");
+}
+
+/* A length that would overflow the offset arithmetic, or simply not fit,
+ * must be refused before any copy. */
+static void
+test_html_wrap_overflow(void)
+{
+	uint8_t buf[256];
+	ssize_t n;
+
+	n = rdp_cliprdr_html_wrap(buf, sizeof buf, (const uint8_t *)"x",
+		(size_t)-8);
+	if (n != -1) FAIL("html wrap overflow not refused (n=%lld)",
+		(long long)n);
+	n = rdp_cliprdr_html_wrap(buf, sizeof buf, (const uint8_t *)"x", 1024);
+	if (n != -1) FAIL("html wrap oversize not refused");
+	printf("  html wrap overflow/oversize: refused ok\n");
+}
+
 int
 main(void)
 {
@@ -239,6 +326,10 @@ main(void)
 	test_fragment_overrun();
 	test_recover_after_abort();
 	test_exact_fill();
+	test_format_list_roundtrip();
+	test_html_roundtrip();
+	test_html_unwrap_fallback();
+	test_html_wrap_overflow();
 	printf("cliprdr_test: all ok\n");
 	return 0;
 }
