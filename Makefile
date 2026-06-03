@@ -64,7 +64,8 @@ SESSMGR_DAEMON_OBJ = src/sessionmgr/sessionmgr.o $(SESSMGR_AUTH_OBJ)
 
 # Static virtual channels.
 CHANNELS_OBJS = src/channels/cliprdr.o src/channels/drdynvc.o src/channels/rdpsnd.o \
-	src/channels/sndin.o src/channels/rdpgfx.o src/channels/rdpdr.o
+	src/channels/sndin.o src/channels/rdpgfx.o src/channels/rdpdr.o \
+	src/channels/autodetect.o
 CHANNELS_LIB  = src/channels/libchannels.a
 
 # Backend RPC: shared between rdpd worker and rdp-session.
@@ -112,6 +113,7 @@ REGRESS_PROGS = \
 	regress/wire/mic_test \
 	regress/wire/avc444_test \
 	regress/wire/tz_test \
+	regress/wire/autodetect_test \
 	$(FUSE_REGRESS) \
 	$(OBSD_FUSE_REGRESS)
 
@@ -282,6 +284,14 @@ regress/wire/tz_test: regress/wire/tz_test.c src/wire/sec.c \
 	$(CC) $(CFLAGS) $(TEST_SAN) -Isrc/include \
 		-o $@ regress/wire/tz_test.c src/wire/sec.c \
 		src/common/utf16.c src/common/log.c
+
+# Network auto-detection PDU build/parse.  autodetect.c is recompiled
+# with the test so $(TEST_SAN) covers the response parse bounds.
+regress/wire/autodetect_test: regress/wire/autodetect_test.c \
+		src/channels/autodetect.c src/common/buf.c src/common/rand.c
+	$(CC) $(CFLAGS) $(TEST_SAN) -Isrc/include \
+		-o $@ regress/wire/autodetect_test.c \
+		src/channels/autodetect.c src/common/buf.c src/common/rand.c
 
 # Printer module unit test.  printer.c is recompiled with the test so the
 # sanitization and the wire header layout are covered directly; $(TEST_SAN)
