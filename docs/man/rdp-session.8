@@ -103,6 +103,17 @@ on
 CoreAudio on macOS.
 .El
 .Pp
+In the other direction, if the client redirects its microphone over the
+MS-RDPEAI
+.Sy AUDIO_INPUT
+channel, the captured PCM is presented inside the session as a PulseAudio
+capture source named
+.Sy rdp_microphone
+.Pq a Sy module-pipe-source No fed over a per-session FIFO ,
+so applications can select the client's microphone as their input.
+This is best effort: with no PulseAudio or no redirected microphone the
+session simply runs without the source.
+.Pp
 The options are as follows:
 .Bl -tag -width Ds
 .It Fl D

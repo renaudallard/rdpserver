@@ -69,6 +69,7 @@
 
 #include "clip_x11.h"
 #include "audio.h"
+#include "mic.h"
 #include "kbdmap.h"
 #include "fuse_drive.h"
 #include "printer.h"
@@ -1420,6 +1421,11 @@ main(int argc, char *argv[])
 		rdp_info("audio capture active");
 	}
 
+	/* Microphone redirection: present the client's captured PCM (arriving
+	 * as RDP_BE_AUDIO_INPUT) as a PulseAudio capture source.  Best effort:
+	 * a failure here leaves the module inert and never breaks the session. */
+	struct rdp_mic *mic = rdp_mic_open();
+
 	/* Probe the inherited fd 4 for an RDPDR drive FUSE mount.  Returns
 	 * NULL on non-Linux builds, old kernels, or when sessionmgr did not
 	 * set up a mount, in which case the session runs without drives. */
@@ -1563,6 +1569,8 @@ main(int argc, char *argv[])
 			    && n >= (ssize_t)sizeof(struct rdp_be_printer_device)) {
 				rdp_printer_handle_device(&printer, buf,
 				    (size_t)n);
+			} else if (type == RDP_BE_AUDIO_INPUT) {
+				rdp_mic_write(mic, buf, (size_t)n);
 			} else if (type == RDP_BE_BYE) {
 				break;
 			}
@@ -1655,6 +1663,7 @@ main(int argc, char *argv[])
 	fuse_drive_free(drive);
 	rdp_h264_close(h264);
 	rdp_audio_close(audio);
+	rdp_mic_close(mic);
 	free(audio_buf);
 	if (clip_ok) rdp_clip_close(&clip);
 	free(frame_buf);

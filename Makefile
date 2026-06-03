@@ -77,6 +77,7 @@ SESSION_OBJS = src/session/rdp_session.o src/session/clip_x11.o \
 	src/channels/cliprdr.o \
 	src/session/fuse_drive.o $(FUSE_BACKEND_OBJ) \
 	src/session/printer.o \
+	src/session/mic.o \
 	$(WAYLAND_OBJ) $(AUDIO_OBJ)
 SESSION_PROG = src/session/rdp-session
 
@@ -107,6 +108,7 @@ REGRESS_PROGS = \
 	regress/wire/sndin_test \
 	regress/wire/drdynvc_test \
 	regress/wire/printer_test \
+	regress/wire/mic_test \
 	$(FUSE_REGRESS) \
 	$(OBSD_FUSE_REGRESS)
 
@@ -271,6 +273,19 @@ regress/wire/printer_test: regress/wire/printer_test.c \
 		src/session/printer.c src/backend/proto.c \
 		src/common/io.c src/common/log.c
 
+# Microphone module unit test.  mic.c is recompiled with the test so the
+# pactl module-index parser is covered directly; $(TEST_SAN) catches any
+# out-of-bounds in the bounded parse.  It links the io/log helpers mic.c
+# calls into, but exercises only the dependency free parser (no pactl, no
+# FIFO).
+regress/wire/mic_test: regress/wire/mic_test.c \
+		src/session/mic.c \
+		src/common/io.c src/common/log.c
+	$(CC) $(CFLAGS) $(TEST_SAN) -Isrc/include \
+		-o $@ regress/wire/mic_test.c \
+		src/session/mic.c \
+		src/common/io.c src/common/log.c
+
 # Drive read-path FUSE protocol test.  The protocol agnostic core
 # (fuse_drive.c) and the Linux raw /dev/fuse backend (fuse_drive_linux.c)
 # are recompiled together with -DRDP_FUSE_TEST so the dispatch is callable
@@ -344,6 +359,22 @@ regress/integ/printer_live: regress/integ/printer_live.c \
 		-o $@ regress/integ/printer_live.c \
 		src/session/printer.c src/backend/proto.c \
 		src/common/io.c src/common/log.c src/common/str.c
+
+# Live end to end test of the session microphone source against a REAL
+# PulseAudio/PipeWire server.  NOT part of `regress` (needs pactl/parecord
+# and a running Pulse server).  Drive it through regress/integ/mic_live.sh:
+#   make regress/integ/mic_live
+#   ./regress/integ/mic_live.sh
+# It links mic.c with a harness that loads the module-pipe-source, records
+# from rdp_microphone with parecord while feeding a known PCM pattern, and
+# verifies the pattern round-trips and the source and FIFO tear down cleanly.
+regress/integ/mic_live: regress/integ/mic_live.c \
+		src/session/mic.c \
+		src/common/io.c src/common/log.c
+	$(CC) $(CFLAGS) -Isrc/include \
+		-o $@ regress/integ/mic_live.c \
+		src/session/mic.c \
+		src/common/io.c src/common/log.c
 
 # Live validation of the X11 clipboard bridge (clip_x11.c) against a REAL X
 # server (Xvfb) using the real xclip as the cooperating X client.  NOT part of
