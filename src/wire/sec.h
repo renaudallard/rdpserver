@@ -86,7 +86,35 @@ struct rdp_client_info {
 	int      have_arc;
 	uint32_t arc_logon_id;
 	uint8_t  arc_security_verifier[16];
+	/* Client time zone, synthesized into a POSIX TZ string (empty when
+	 * the client sent no usable TS_TIME_ZONE_INFORMATION). */
+	char     timezone[64];
 };
+
+/* The recurring-transition fields of a TS_SYSTEMTIME (MS-RDPBCGR
+ * 2.2.1.11.1.1.1.1) used to express a DST rule.  month == 0 means there
+ * is no transition (the zone has no DST). */
+struct rdp_tz_systemtime {
+	uint16_t month;   /* wMonth: 1-12 (0 = no transition) */
+	uint16_t dow;     /* wDayOfWeek: 0 = Sunday .. 6 = Saturday */
+	uint16_t day;     /* wDay: 1-5, where 5 means the last such weekday */
+	uint16_t hour;    /* wHour of the transition */
+	uint16_t minute;  /* wMinute of the transition */
+};
+
+/* Synthesize a POSIX TZ string from a client's TS_TIME_ZONE_INFORMATION.
+ * Biases are in minutes with UTC = local + bias (the Windows convention);
+ * the effective standard offset is bias + std_bias and the daylight
+ * offset is bias + dst_bias.  std_date is when DST ends and dst_date when
+ * it begins.  have_name is non-zero when the client filled StandardName
+ * (used, with the biases and dates, to tell a real UTC zone from an
+ * all-zero unfilled block).  Writes "" and returns 0 when the zone is not
+ * usable, the string length on success, or -1 if it would not fit in cap.
+ * Exposed for unit testing. */
+int rdp_tz_to_posix(int32_t bias, int32_t std_bias, int32_t dst_bias,
+		const struct rdp_tz_systemtime *std_date,
+		const struct rdp_tz_systemtime *dst_date,
+		int have_name, char *out, size_t cap);
 
 /* Parse a single Security Header from p[..len) into *flags_out.
  * Returns the bytes consumed (4) on success, -1 on truncation. */

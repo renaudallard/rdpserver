@@ -3567,7 +3567,8 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 			nla_user, nla_pass, client_ip) == 0) {
 			int be_fd = -1;
 			if (rdp_sessmgr_spawn(&sm, desktop_w, desktop_h,
-			    client_lcid, &be_fd) == 0 && be_fd >= 0) {
+			    client_lcid, client_info.timezone,
+			    &be_fd) == 0 && be_fd >= 0) {
 				/* Write a .tok file with a nonce so the next
 				 * SSL connection can auto-login via NLA_AUTH. */
 				{
@@ -3675,7 +3676,8 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 					int be_fd = -1;
 					if (rdp_sessmgr_spawn(&sm,
 					    desktop_w, desktop_h,
-					    client_lcid, &be_fd) == 0
+					    client_lcid, client_info.timezone,
+					    &be_fd) == 0
 					    && be_fd >= 0) {
 						rdp_sessmgr_close(&sm);
 						rdp_info("conn[%s]: backend fd %d",
@@ -3734,7 +3736,8 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 			pw_utf8[0] ? pw_utf8 : "x", client_ip) == 0) {
 			int be_fd = -1;
 			if (rdp_sessmgr_spawn(&sm, desktop_w, desktop_h,
-				client_lcid, &be_fd) == 0) {
+				client_lcid, client_info.timezone,
+				&be_fd) == 0) {
 				rdp_sessmgr_close(&sm);
 				rdp_info("conn[%s]: backend fd %d",
 					peer, be_fd);
@@ -3792,7 +3795,8 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 		{
 			int be_fd = -1;
 			if (rdp_sessmgr_spawn(&sm, desktop_w, desktop_h,
-				client_lcid, &be_fd) != 0) {
+				client_lcid, client_info.timezone,
+				&be_fd) != 0) {
 				rdp_err("conn[%s]: SPAWN failed: %s",
 					peer, strerror(errno));
 				rdp_sessmgr_close(&sm);

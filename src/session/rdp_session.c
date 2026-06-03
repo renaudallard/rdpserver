@@ -1155,12 +1155,13 @@ static void
 usage(const char *prog)
 {
 	(void)fprintf(stderr,
-"usage: %s [-D] [-W] [-w width] [-H height] [-k lcid]\n"
+"usage: %s [-D] [-W] [-w width] [-H height] [-k lcid] [-z tz]\n"
 "  -D     use native DDX driver instead of Xvfb\n"
 "  -W     use Wayland compositor instead of X11\n"
 "  -w n   desktop width  (default 1024)\n"
 "  -H n   desktop height (default 768)\n"
 "  -k id  client keyboard layout id (LCID; 0 = us)\n"
+"  -z tz  client POSIX TZ string for the session clock\n"
 "\n"
 "File descriptor 3 must be a SOCK_STREAM socket to the rdpd worker;\n"
 "rdp-sessionmgr sets this up on SPAWN.\n",
@@ -1224,6 +1225,7 @@ main(int argc, char *argv[])
 	int opt, use_ddx = 0, use_wayland = 0;
 	int display_num;
 	unsigned long lcid = 0;
+	char client_tz[64] = "";
 	pid_t xvfb_pid, xterm_pid;
 	Display *dpy;
 	struct cap cap;
@@ -1234,15 +1236,28 @@ main(int argc, char *argv[])
 	int damage_event = 0, damage_error = 0, dirty = 1;
 	int cursor_dirty = 1;
 
-	while ((opt = getopt(argc, argv, "DWw:H:k:?")) != -1) {
+	while ((opt = getopt(argc, argv, "DWw:H:k:z:?")) != -1) {
 		switch (opt) {
 		case 'D': use_ddx = 1; break;
 		case 'W': use_wayland = 1; break;
 		case 'w': w = atoi(optarg); break;
 		case 'H': h = atoi(optarg); break;
 		case 'k': lcid = strtoul(optarg, NULL, 10); break;
+		case 'z':
+			(void)snprintf(client_tz, sizeof client_tz,
+				"%s", optarg);
+			break;
 		case '?': default: usage(argv[0]); return 1;
 		}
+	}
+
+	/* Apply the client's time zone to this process before any session
+	 * child is forked, so the spawned shell, X clients, and our own log
+	 * timestamps all run in the client's local time.  Inherited by every
+	 * later fork; an empty string keeps the server's zone. */
+	if (client_tz[0] != '\0') {
+		(void)setenv("TZ", client_tz, 1);
+		tzset();
 	}
 	if (w <= 0 || h <= 0 || w > 4096 || h > 4096) {
 		(void)fprintf(stderr, "rdp-session: bad geometry %dx%d\n", w, h);

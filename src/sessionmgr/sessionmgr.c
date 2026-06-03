@@ -904,7 +904,7 @@ fuse_mount_drain(void)
 
 static int
 spawn_session(const struct passwd *pw, uint16_t w, uint16_t h,
-		uint32_t lcid, int *out_fd)
+		uint32_t lcid, const char *tz, int *out_fd)
 {
 	int sv[2];
 	pid_t pid;
@@ -964,6 +964,7 @@ spawn_session(const struct passwd *pw, uint16_t w, uint16_t h,
 	}
 	if (pid == 0) {
 		char wbuf[8], hbuf[8], kbuf[16];
+		char tzbuf[RDP_SESSMGR_TZ_MAX + 1];
 		int i;
 
 		(void)close(sv[0]);
@@ -1029,8 +1030,11 @@ spawn_session(const struct passwd *pw, uint16_t w, uint16_t h,
 		(void)snprintf(wbuf, sizeof wbuf, "%u", (unsigned)w);
 		(void)snprintf(hbuf, sizeof hbuf, "%u", (unsigned)h);
 		(void)snprintf(kbuf, sizeof kbuf, "%u", (unsigned)lcid);
+		(void)snprintf(tzbuf, sizeof tzbuf, "%s",
+			(tz != NULL) ? tz : "");
 		execl(session_path, "rdp-session",
-			"-w", wbuf, "-H", hbuf, "-k", kbuf, (char *)NULL);
+			"-w", wbuf, "-H", hbuf, "-k", kbuf,
+			"-z", tzbuf, (char *)NULL);
 		(void)dprintf(2, "exec %s: %s\n",
 			session_path, strerror(errno));
 		_exit(127);
@@ -1271,13 +1275,39 @@ handle_auth(int cfd, const uint8_t *req, size_t req_len,
 	return reply(cfd, RDP_SESSMGR_FAIL, -1);
 }
 
+/* The TZ string is forwarded into the session environment, so validate
+ * it against the worker's synthesized grammar before setenv.  A leading
+ * ':' or '/' makes glibc treat TZ as a tzfile pathname; the synthesized
+ * value always starts with a '<...>' numeric label, so reject those
+ * forms outright (defense in depth against a compromised worker) and
+ * otherwise allow only the POSIX TZ alphabet. */
+static int
+tz_is_safe(const char *s)
+{
+	size_t i;
+	if (s[0] == ':' || s[0] == '/')
+		return 0;
+	for (i = 0; s[i] != '\0'; i++) {
+		char c = s[i];
+		if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+		    || (c >= '0' && c <= '9'))
+			continue;
+		if (c == '<' || c == '>' || c == '+' || c == '-'
+		    || c == ':' || c == '.' || c == ',' || c == '/')
+			continue;
+		return 0;
+	}
+	return 1;
+}
+
 static int
 handle_spawn(int cfd, const uint8_t *req, size_t req_len,
 		const char *auth_user, int *retained_fd)
 {
-	uint16_t w, h;
+	uint16_t w, h, tz_len;
 	uint32_t lcid;
 	struct passwd *pw;
+	char tz[RDP_SESSMGR_TZ_MAX + 1];
 	int fd = -1;
 
 	if (req_len < 12) return reply(cfd, RDP_SESSMGR_FAIL, -1);
@@ -1285,9 +1315,22 @@ handle_spawn(int cfd, const uint8_t *req, size_t req_len,
 		return reply(cfd, RDP_SESSMGR_EPERM, -1);
 	w = (uint16_t)req[2] | ((uint16_t)req[3] << 8);
 	h = (uint16_t)req[4] | ((uint16_t)req[5] << 8);
+	tz_len = (uint16_t)req[6] | ((uint16_t)req[7] << 8);
 	lcid = (uint32_t)req[8] | ((uint32_t)req[9] << 8)
 		| ((uint32_t)req[10] << 16) | ((uint32_t)req[11] << 24);
 	if (w == 0 || h == 0) { w = 1024; h = 768; }
+
+	/* Extract and validate the trailing POSIX TZ string. */
+	tz[0] = '\0';
+	if (tz_len > 0 && tz_len <= RDP_SESSMGR_TZ_MAX
+	    && (size_t)12 + tz_len <= req_len) {
+		memcpy(tz, req + 12, tz_len);
+		tz[tz_len] = '\0';
+		if (!tz_is_safe(tz)) {
+			rdp_warn("SPAWN: rejecting unsafe TZ string");
+			tz[0] = '\0';
+		}
+	}
 
 	pw = getpwnam(auth_user);
 	if (pw == NULL) {
@@ -1298,7 +1341,7 @@ handle_spawn(int cfd, const uint8_t *req, size_t req_len,
 		rdp_warn("SPAWN: refusing to launch as root");
 		return reply(cfd, RDP_SESSMGR_EPERM, -1);
 	}
-	if (spawn_session(pw, w, h, lcid, &fd) != 0) {
+	if (spawn_session(pw, w, h, lcid, tz, &fd) != 0) {
 		rdp_err("spawn_session %s: %s", auth_user, strerror(errno));
 		return reply(cfd, RDP_SESSMGR_FAIL, -1);
 	}

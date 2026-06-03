@@ -111,6 +111,7 @@ REGRESS_PROGS = \
 	regress/wire/printer_test \
 	regress/wire/mic_test \
 	regress/wire/avc444_test \
+	regress/wire/tz_test \
 	$(FUSE_REGRESS) \
 	$(OBSD_FUSE_REGRESS)
 
@@ -272,6 +273,15 @@ regress/wire/avc444_test: regress/wire/avc444_test.c src/wire/avc444.c \
 		-o $@ regress/wire/avc444_test.c src/wire/avc444.c \
 		src/wire/h264enc.c src/channels/rdpgfx.c \
 		src/common/buf.c src/common/log.c $(X264_LIBS)
+
+# Client time zone (TS_TIME_ZONE_INFORMATION -> POSIX TZ) synthesis and
+# Client Info parse.  sec.c is recompiled with the test so $(TEST_SAN)
+# covers the 172-byte block decode and the string formatting.
+regress/wire/tz_test: regress/wire/tz_test.c src/wire/sec.c \
+		src/common/utf16.c src/common/log.c
+	$(CC) $(CFLAGS) $(TEST_SAN) -Isrc/include \
+		-o $@ regress/wire/tz_test.c src/wire/sec.c \
+		src/common/utf16.c src/common/log.c
 
 # Printer module unit test.  printer.c is recompiled with the test so the
 # sanitization and the wire header layout are covered directly; $(TEST_SAN)

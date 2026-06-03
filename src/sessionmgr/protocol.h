@@ -76,6 +76,7 @@
 #define RDP_SESSMGR_USER_MAX  256
 #define RDP_SESSMGR_PASS_MAX  1024
 #define RDP_SESSMGR_IP_MAX    64   /* AUTH client-IP field, for rate-limiting */
+#define RDP_SESSMGR_TZ_MAX    63   /* SPAWN client POSIX TZ string */
 #define RDP_SESSMGR_FRAME_MAX (8 + RDP_SESSMGR_USER_MAX + RDP_SESSMGR_PASS_MAX \
 				+ RDP_SESSMGR_IP_MAX)
 
@@ -88,8 +89,9 @@
  *   u8  flags
  *   u16 width
  *   u16 height
- *   u16 reserved
+ *   u16 tzLen        (length of the trailing POSIX TZ string; 0 = none)
  *   u32 keyboardLayout   (client LCID; 0 = unknown, session uses us)
+ *   tz_bytes (tzLen) (client POSIX TZ string, no terminator on the wire)
  *
  * SPAWN reply (in addition to the status byte we already define):
  *   status     OK on success.  Successful replies include the

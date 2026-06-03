@@ -61,6 +61,13 @@ bitmap font.  Unknown layouts fall back to US.  The logged-in session
 follows the client layout in full
 .Pq see Xr rdp-session 8 .
 .Pp
+The client time zone
+.Pq Sy TS_TIME_ZONE_INFORMATION No in the Client Info PDU
+is decoded into a POSIX
+.Ev TZ
+string and forwarded to the session, so the session clock and
+applications run in the client's local time.
+.Pp
 The options are as follows:
 .Bl -tag -width Ds
 .It Fl A

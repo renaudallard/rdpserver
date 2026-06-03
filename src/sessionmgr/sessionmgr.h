@@ -72,11 +72,13 @@ int rdp_sessmgr_nla_store(const char *sock_path,
 		const char *user, const uint8_t nonce[16]);
 
 /* SPAWN: ask sessmgr to fork+setuid+exec rdp-session as the
- * authenticated user.  Returns the backend socket fd (one end of
- * a SOCK_STREAM socketpair) via *fd_out.  Caller closes when
+ * authenticated user.  tz is the client's POSIX TZ string (may be NULL
+ * or empty for the server's zone).  Returns the backend socket fd (one
+ * end of a SOCK_STREAM socketpair) via *fd_out.  Caller closes when
  * done. */
 int rdp_sessmgr_spawn(struct rdp_sessmgr *s,
-		uint16_t w, uint16_t h, uint32_t lcid, int *fd_out);
+		uint16_t w, uint16_t h, uint32_t lcid, const char *tz,
+		int *fd_out);
 
 void rdp_sessmgr_close(struct rdp_sessmgr *s);
 

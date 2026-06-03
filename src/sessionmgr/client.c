@@ -222,9 +222,9 @@ rdp_sessmgr_nla_store(const char *sock_path,
 
 int
 rdp_sessmgr_spawn(struct rdp_sessmgr *s, uint16_t w, uint16_t h,
-		uint32_t lcid, int *fd_out)
+		uint32_t lcid, const char *tz, int *fd_out)
 {
-	uint8_t req[12];
+	uint8_t req[12 + RDP_SESSMGR_TZ_MAX];
 	uint8_t resp[8];
 	struct msghdr msg;
 	struct iovec iov;
@@ -232,26 +232,38 @@ rdp_sessmgr_spawn(struct rdp_sessmgr *s, uint16_t w, uint16_t h,
 	struct cmsghdr *cmsg;
 	ssize_t n;
 	int recvd_fd = -1;
+	size_t tz_len = 0;
+	size_t req_len;
 
 	if (s == NULL || s->fd < 0 || fd_out == NULL) {
 		errno = EINVAL;
 		return -1;
 	}
-	memset(req, 0, sizeof req);
+	if (tz != NULL) {
+		tz_len = strlen(tz);
+		if (tz_len > RDP_SESSMGR_TZ_MAX)
+			tz_len = RDP_SESSMGR_TZ_MAX;
+	}
+	memset(req, 0, 12);
 	req[0] = RDP_SESSMGR_OP_SPAWN;
 	req[2] = (uint8_t)(w & 0xff);
 	req[3] = (uint8_t)((w >> 8) & 0xff);
 	req[4] = (uint8_t)(h & 0xff);
 	req[5] = (uint8_t)((h >> 8) & 0xff);
+	req[6] = (uint8_t)(tz_len & 0xff);
+	req[7] = (uint8_t)((tz_len >> 8) & 0xff);
 	req[8]  = (uint8_t)(lcid & 0xff);
 	req[9]  = (uint8_t)((lcid >> 8) & 0xff);
 	req[10] = (uint8_t)((lcid >> 16) & 0xff);
 	req[11] = (uint8_t)((lcid >> 24) & 0xff);
+	if (tz_len > 0)
+		memcpy(req + 12, tz, tz_len);
+	req_len = 12 + tz_len;
 	{
 		ssize_t sn;
-		do { sn = send(s->fd, req, sizeof req, 0); }
+		do { sn = send(s->fd, req, req_len, 0); }
 		while (sn < 0 && errno == EINTR);
-		if (sn != (ssize_t)sizeof req) return -1;
+		if (sn != (ssize_t)req_len) return -1;
 	}
 
 	memset(&msg, 0, sizeof msg);

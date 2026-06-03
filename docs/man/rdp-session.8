@@ -11,6 +11,7 @@
 .Op Fl w Ar width
 .Op Fl H Ar height
 .Op Fl k Ar lcid
+.Op Fl z Ar tz
 .Sh DESCRIPTION
 .Nm
 is the unprivileged per-user component of the Remote Desktop
@@ -69,6 +70,21 @@ The client's lock-key state
 is applied to the session keyboard with the XKB lock modifiers, so a
 client that connects or regains focus with a lock engaged stays in
 sync with the session.
+.Pp
+The client's time zone, passed by
+.Xr rdp-sessionmgr 8
+via
+.Fl z
+as a POSIX
+.Ev TZ
+string, is exported into the session environment before the user shell
+is started, so the session clock and applications show the client's
+local time.  The string is synthesized by
+.Xr rdpd 8
+from the client's
+.Sy TS_TIME_ZONE_INFORMATION
+and is empty for a client that sends none, in which case the session
+keeps the server's zone.
 .Pp
 Captured frames are sent as raw pixels over the backend socket.
 The
@@ -140,6 +156,13 @@ The default is 768.
 Client keyboard layout identifier (Windows LCID, decimal) used to set
 the Xvfb keyboard layout.
 0 or an unknown value selects the US layout.
+.It Fl z Ar tz
+Client time zone as a POSIX
+.Ev TZ
+string.
+It is exported into the session environment so the session clock matches
+the client.
+An empty value keeps the server's zone.
 .El
 .Sh DRIVE REDIRECTION
 On Linux the drives the client redirects over the RDPDR channel are
