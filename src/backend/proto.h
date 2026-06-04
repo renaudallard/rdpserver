@@ -128,6 +128,16 @@
  *                worker caps count at RDPEI_MAX_CONTACTS (64). */
 #define RDP_BE_INPUT_TOUCH    23u  /* worker -> session */
 
+/* RemoteApp window geometry (MS-RDPERP).
+ *   WINDOW  session -> worker: a RemoteApp window was created/moved/resized
+ *           (op CREATE) or closed (op DELETE).  The worker turns it into a
+ *           Window Information drawing order for the client.  A CREATE
+ *           payload is a struct rdp_be_window followed by title_len bytes
+ *           of UTF-16LE title. */
+#define RDP_BE_WINDOW          24u  /* session -> worker */
+#define RDP_BE_WINDOW_OP_CREATE 0u
+#define RDP_BE_WINDOW_OP_DELETE 1u
+
 /* Upper bound on the PCM bytes the worker forwards in one AUDIO_INPUT
  * message.  A client Data PDU larger than this is split into multiple
  * AUDIO_INPUT messages so a single chunk stays bounded. */
@@ -316,6 +326,15 @@ struct rdp_be_touch_contact {
 
 struct rdp_be_input_touch {
 	uint32_t count;   /* followed by count struct rdp_be_touch_contact */
+};
+
+struct rdp_be_window {
+	uint32_t window_id;
+	int32_t  x, y;       /* window position on the virtual desktop */
+	uint32_t w, h;       /* window size */
+	uint16_t title_len;  /* UTF-16LE byte count, trailing for op CREATE */
+	uint8_t  op;         /* RDP_BE_WINDOW_OP_* */
+	uint8_t  pad;
 };
 
 /* CLIP_OFFER payload: just a u32 format bitmap. */

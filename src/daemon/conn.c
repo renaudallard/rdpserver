@@ -3097,6 +3097,69 @@ run_proxy(struct rdp_tls *t, int be_fd,
 					free(scaled);
 				}
 				free(argb);
+			} else if (type == RDP_BE_WINDOW) {
+				/* RemoteApp window order: turn the geometry into a
+				 * Window Information drawing order and send it as a
+				 * fast-path ORDERS update. */
+				uint8_t wbuf[1024];
+				if (len > 0 && len <= sizeof wbuf
+				    && rdp_read_full(be_fd, wbuf, len)
+					== (ssize_t)len) {
+					if (g_remoteapp && len
+					    >= sizeof(struct rdp_be_window)) {
+						struct rdp_be_window wmsg;
+						uint8_t order[600];
+						ssize_t on;
+						memcpy(&wmsg, wbuf, sizeof wmsg);
+						if (wmsg.op == RDP_BE_WINDOW_OP_DELETE) {
+							on = rdp_rail_build_window_delete(
+								order, sizeof order,
+								wmsg.window_id);
+						} else {
+							struct rdp_rail_window rw;
+							size_t avail = len - sizeof wmsg;
+							uint16_t tl = wmsg.title_len;
+							if (tl > avail) tl = (uint16_t)avail;
+							if (tl > 256) tl = 256;
+							memset(&rw, 0, sizeof rw);
+							rw.window_id = wmsg.window_id;
+							rw.x = wmsg.x; rw.y = wmsg.y;
+							rw.w = wmsg.w; rw.h = wmsg.h;
+							rw.style = RAIL_WS_POPUP
+							    | RAIL_WS_VISIBLE;
+							rw.show_state = RAIL_WINDOW_SHOW;
+							rw.title = wbuf + sizeof wmsg;
+							rw.title_len = tl;
+							on = rdp_rail_build_window_new(
+								order, sizeof order, &rw);
+						}
+						if (on > 0) {
+							uint8_t body[602];
+							uint8_t upd[700];
+							ssize_t un;
+							body[0] = 1; body[1] = 0;
+							memcpy(body + 2, order,
+								(size_t)on);
+							un = rdp_fp_build_update(upd,
+								sizeof upd,
+								RDP_FP_UPDATE_ORDERS,
+								body, 2 + (size_t)on);
+							if (un > 0)
+								(void)rdp_tls_write_full(
+									t, upd, (size_t)un);
+						}
+					}
+				} else if (len > 0) {
+					uint8_t junk[256];
+					size_t left = len;
+					while (left > 0) {
+						size_t c = left > sizeof junk
+						    ? sizeof junk : left;
+						if (rdp_read_full(be_fd, junk, c)
+						    <= 0) break;
+						left -= c;
+					}
+				}
 			} else if (type == RDP_BE_FS_REQ
 			    && dr->enabled
 			    && len >= sizeof(struct rdp_be_fs_req)) {
