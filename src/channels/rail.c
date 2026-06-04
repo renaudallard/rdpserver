@@ -147,3 +147,79 @@ rdp_rail_parse_order(const uint8_t *p, size_t len, struct rdp_rail_order *out)
 		return 0;
 	}
 }
+
+/* Window Information Order FieldsPresentFlags (MS-RDPERP 2.2.1.3.1.2). */
+#define WO_TYPE_WINDOW        0x01000000u
+#define WO_STATE_NEW          0x10000000u
+#define WO_STATE_DELETED      0x20000000u
+#define WO_FIELD_TITLE        0x00000004u
+#define WO_FIELD_STYLE        0x00000008u
+#define WO_FIELD_SHOW         0x00000010u
+#define WO_FIELD_WND_RECTS    0x00000100u
+#define WO_FIELD_VISIBILITY   0x00000200u
+#define WO_FIELD_WND_SIZE     0x00000400u
+#define WO_FIELD_WND_OFFSET   0x00000800u
+#define WO_FIELD_VIS_OFFSET   0x00001000u
+#define WO_FIELD_CLIENT_OFF   0x00004000u
+#define WO_FIELD_WND_DELTA    0x00008000u
+
+ssize_t
+rdp_rail_build_window_new(uint8_t *out, size_t cap,
+		const struct rdp_rail_window *w)
+{
+	uint16_t tl = (w->title != NULL) ? w->title_len : 0;
+	/* Fixed fields total 82 bytes plus the title string. */
+	size_t total = 82 + (size_t)tl;
+	size_t o = 0;
+	uint16_t rw = (w->w > 0xffff) ? 0xffff : (uint16_t)w->w;
+	uint16_t rh = (w->h > 0xffff) ? 0xffff : (uint16_t)w->h;
+	uint32_t fields = WO_TYPE_WINDOW | WO_STATE_NEW
+		| WO_FIELD_STYLE | WO_FIELD_SHOW | WO_FIELD_TITLE
+		| WO_FIELD_CLIENT_OFF | WO_FIELD_WND_OFFSET | WO_FIELD_WND_DELTA
+		| WO_FIELD_WND_SIZE | WO_FIELD_WND_RECTS | WO_FIELD_VIS_OFFSET
+		| WO_FIELD_VISIBILITY;
+
+	if (total > 0xffff || cap < total) return -1;
+	out[o++] = 0x2C;                         /* alt-sec WINDOW order */
+	st16(out + o, (uint16_t)total); o += 2;  /* orderSize incl. this byte */
+	st32(out + o, fields); o += 4;
+	st32(out + o, w->window_id); o += 4;
+	/* Fields are emitted in the wire order, not FieldsPresentFlags order. */
+	st32(out + o, w->style); o += 4;          /* STYLE */
+	st32(out + o, w->ext_style); o += 4;
+	out[o++] = w->show_state;                 /* SHOW */
+	st16(out + o, tl); o += 2;                 /* TITLE */
+	if (tl > 0) { memcpy(out + o, w->title, tl); o += tl; }
+	st32(out + o, (uint32_t)w->x); o += 4;    /* CLIENT_AREA_OFFSET */
+	st32(out + o, (uint32_t)w->y); o += 4;
+	st32(out + o, (uint32_t)w->x); o += 4;    /* WND_OFFSET */
+	st32(out + o, (uint32_t)w->y); o += 4;
+	st32(out + o, 0); o += 4;                 /* WND_CLIENT_DELTA = 0,0 */
+	st32(out + o, 0); o += 4;
+	st32(out + o, w->w); o += 4;              /* WND_SIZE */
+	st32(out + o, w->h); o += 4;
+	st16(out + o, 1); o += 2;                 /* WND_RECTS: one rect */
+	st16(out + o, 0); o += 2;                 /* left */
+	st16(out + o, 0); o += 2;                 /* top */
+	st16(out + o, rw); o += 2;                /* right */
+	st16(out + o, rh); o += 2;                /* bottom */
+	st32(out + o, (uint32_t)w->x); o += 4;    /* VIS_OFFSET */
+	st32(out + o, (uint32_t)w->y); o += 4;
+	st16(out + o, 1); o += 2;                 /* VISIBILITY: one rect */
+	st16(out + o, 0); o += 2;
+	st16(out + o, 0); o += 2;
+	st16(out + o, rw); o += 2;
+	st16(out + o, rh); o += 2;
+	return (ssize_t)o;
+}
+
+ssize_t
+rdp_rail_build_window_delete(uint8_t *out, size_t cap, uint32_t window_id)
+{
+	if (cap < 11) return -1;
+	out[0] = 0x2C;                                 /* alt-sec WINDOW order */
+	st16(out + 1, 11);                             /* orderSize */
+	st32(out + 3, WO_TYPE_WINDOW | WO_STATE_DELETED);
+	st32(out + 7, window_id);
+	return 11;
+}

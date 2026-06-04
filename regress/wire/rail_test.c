@@ -47,6 +47,19 @@
 	exit(1);                                       \
 } while (0)
 
+static uint16_t
+ld16(const uint8_t *p)
+{
+	return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
+}
+
+static uint32_t
+ld32(const uint8_t *p)
+{
+	return (uint32_t)p[0] | ((uint32_t)p[1] << 8)
+		| ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
 static void
 test_build(void)
 {
@@ -145,12 +158,60 @@ test_bad(void)
 	}
 }
 
+static void
+test_window(void)
+{
+	uint8_t out[256];
+	struct rdp_rail_window w;
+	const uint8_t title[] = { 'H', 0x00, 'i', 0x00 };  /* "Hi" UTF-16LE */
+	ssize_t n;
+	uint32_t fields;
+
+	memset(&w, 0, sizeof w);
+	w.window_id = 0x12345678;
+	w.x = 100; w.y = 50;
+	w.w = 640; w.h = 480;
+	w.style = RAIL_WS_POPUP | RAIL_WS_VISIBLE;
+	w.show_state = RAIL_WINDOW_SHOW;
+	w.title = title;
+	w.title_len = sizeof title;
+
+	n = rdp_rail_build_window_new(out, sizeof out, &w);
+	if (n != 82 + (ssize_t)sizeof title)
+		FAIL("window_new len %zd", (ssize_t)n);
+	if (out[0] != 0x2C) FAIL("controlFlags");
+	if (ld16(out + 1) != (uint16_t)n) FAIL("orderSize");
+	fields = ld32(out + 3);
+	if ((fields & 0x01000000) == 0 || (fields & 0x10000000) == 0)
+		FAIL("type/state flags");
+	if ((fields & 0x0400) == 0 || (fields & 0x0800) == 0)
+		FAIL("size/offset flags");
+	if (ld32(out + 7) != 0x12345678) FAIL("windowId");
+	if (ld32(out + 11) != (RAIL_WS_POPUP | RAIL_WS_VISIBLE)) FAIL("style");
+	if (out[19] != RAIL_WINDOW_SHOW) FAIL("showState");
+	if (ld16(out + 20) != sizeof title) FAIL("title cbString");
+	if (memcmp(out + 22, title, sizeof title) != 0) FAIL("title bytes");
+
+	n = rdp_rail_build_window_delete(out, sizeof out, 0xABCD);
+	if (n != 11) FAIL("window_delete len %zd", (ssize_t)n);
+	if (out[0] != 0x2C || ld16(out + 1) != 11) FAIL("delete header");
+	if (ld32(out + 3) != (0x01000000u | 0x20000000u)) FAIL("delete fields");
+	if (ld32(out + 7) != 0xABCD) FAIL("delete windowId");
+
+	/* A buffer too small for either order is rejected. */
+	if (rdp_rail_build_window_new(out, 10, &w) != -1)
+		FAIL("small-cap window_new accepted");
+	if (rdp_rail_build_window_delete(out, 5, 1) != -1)
+		FAIL("small-cap window_delete accepted");
+}
+
 int
 main(void)
 {
 	test_build();
 	test_parse();
 	test_bad();
+	test_window();
 	(void)printf("rail_test: all ok\n");
 	return 0;
 }

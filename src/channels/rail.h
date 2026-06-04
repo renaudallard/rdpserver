@@ -107,4 +107,42 @@ struct rdp_rail_order {
 int rdp_rail_parse_order(const uint8_t *p, size_t len,
 		struct rdp_rail_order *out);
 
+/*
+ * Window Information Orders (MS-RDPERP 2.2.1.3) place each RemoteApp
+ * window on the client.  Unlike the RAIL orders above these are
+ * Alternate Secondary Drawing Orders carried on the I/O channel inside a
+ * graphics update, not on the rail channel.  The functions below emit one
+ * raw order (controlFlags byte 0x2C, orderSize, FieldsPresentFlags,
+ * windowId, then the present fields); the caller wraps it in an update
+ * PDU.
+ */
+
+/* WINDOW_SHOW: the window is shown in its current state. */
+#define RAIL_WINDOW_SHOW 0x05
+
+/* Common window styles (subset). */
+#define RAIL_WS_VISIBLE  0x10000000u
+#define RAIL_WS_POPUP    0x80000000u
+
+struct rdp_rail_window {
+	uint32_t window_id;
+	int32_t  x, y;          /* window position on the virtual desktop */
+	uint32_t w, h;          /* window size */
+	uint32_t style;         /* WS_* window style */
+	uint32_t ext_style;     /* WS_EX_* extended style */
+	uint8_t  show_state;    /* RAIL_WINDOW_SHOW */
+	const uint8_t *title;   /* UTF-16LE, may be NULL */
+	uint16_t title_len;     /* title byte count */
+};
+
+/* Build a Window NEW order (create/update) with the standard field set
+ * for a borderless content window: style, show, title, offsets, size, and
+ * the window + visibility rects.  Returns the byte count or -1. */
+ssize_t rdp_rail_build_window_new(uint8_t *out, size_t cap,
+		const struct rdp_rail_window *w);
+
+/* Build a Window DELETE order (header + windowId, 11 bytes). */
+ssize_t rdp_rail_build_window_delete(uint8_t *out, size_t cap,
+		uint32_t window_id);
+
 #endif /* RDP_RAIL_H */
