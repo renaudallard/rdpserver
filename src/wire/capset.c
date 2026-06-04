@@ -328,9 +328,32 @@ write_cap_frame_acknowledge(struct rdp_buf *b)
 	return write_cap_simple(b, 0x001E, body, sizeof body);
 }
 
+/* Remote Programs (RAIL) capability set: railSupportLevel only. */
+static int
+write_cap_rail(struct rdp_buf *b)
+{
+	uint8_t body[4];
+	body[0] = 0x01;   /* RAIL_LEVEL_SUPPORTED */
+	body[1] = 0; body[2] = 0; body[3] = 0;
+	return write_cap_simple(b, 0x0017, body, sizeof body);
+}
+
+/* Window List capability set: wndSupportLevel + icon-cache counts. */
+static int
+write_cap_window(struct rdp_buf *b)
+{
+	uint8_t body[7];
+	body[0] = 0x02;   /* WINDOW_LEVEL_SUPPORTED_EX */
+	body[1] = 0; body[2] = 0; body[3] = 0;
+	body[4] = 0;      /* numIconCaches */
+	body[5] = 0; body[6] = 0;   /* numIconCacheEntries */
+	return write_cap_simple(b, 0x0018, body, sizeof body);
+}
+
 ssize_t
 rdp_capset_build_demand_active(uint8_t *out, size_t cap,
-		uint32_t share_id, uint16_t desktop_w, uint16_t desktop_h)
+		uint32_t share_id, uint16_t desktop_w, uint16_t desktop_h,
+		int remoteapp)
 {
 	struct rdp_buf b, cb;
 	uint8_t caps[2048];
@@ -355,6 +378,15 @@ rdp_capset_build_demand_active(uint8_t *out, size_t cap,
 	if (write_cap_surface_commands(&cb) != 0) return -1;
 	if (write_cap_frame_acknowledge(&cb) != 0) return -1;
 	cap_count = 11;
+
+	/* RemoteApp (RAIL) sessions also need the Remote Programs and Window
+	 * List capability sets so the client accepts Window Information
+	 * orders. */
+	if (remoteapp) {
+		if (write_cap_rail(&cb) != 0) return -1;
+		if (write_cap_window(&cb) != 0) return -1;
+		cap_count += 2;
+	}
 
 	rdp_buf_init(&b, out, cap);
 	if (rdp_buf_put_u32le(&b, share_id) != 0) return -1;

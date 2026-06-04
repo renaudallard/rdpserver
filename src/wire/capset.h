@@ -92,9 +92,12 @@
 
 /* Build a Demand Active body (after the shareControl header) into
  * out.  share_id is the per-session identifier the server chose;
- * desktop_w/h are the negotiated dimensions.  Returns bytes written. */
+ * desktop_w/h are the negotiated dimensions.  When remoteapp is nonzero
+ * the RAIL and Window List capability sets are added.  Returns bytes
+ * written. */
 ssize_t rdp_capset_build_demand_active(uint8_t *out, size_t cap,
-		uint32_t share_id, uint16_t desktop_w, uint16_t desktop_h);
+		uint32_t share_id, uint16_t desktop_w, uint16_t desktop_h,
+		int remoteapp);
 
 /* Parse a Confirm Active capability blob and extract things we care
  * about: the client's desktop bpp and, when present, the

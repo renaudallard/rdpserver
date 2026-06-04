@@ -80,6 +80,7 @@
 #include "../channels/rdpei.h"
 #include "../channels/rdpgfx.h"
 #include "../channels/autodetect.h"
+#include "../channels/rail.h"
 #include "../wire/h264enc.h"
 #include "../wire/avc444.h"
 #include "../wire/progressive.h"
@@ -1220,6 +1221,12 @@ struct snd_state {
 	struct rdpsnd_state snd;
 };
 
+struct rail_state {
+	int      enabled;
+	uint16_t channel_id;
+	int      handshake_sent;
+};
+
 /* Per-job print state machine.  A PRINT_JOB from the session opens the
  * printer (CREATE), writes the spool in chunks (WRITE) at advancing
  * offsets, then closes it (CLOSE).  Each step is async: its completion
@@ -1445,6 +1452,8 @@ print_job_on_completion(struct rdp_tls *t, uint16_t user_id,
 /* Set from cfg in rdp_conn_run; used during channel dispatch, which
  * runs before the per-connection setup, so declared at file scope. */
 static int g_prefer_wan_audio;
+static int g_remoteapp;   /* client requested RemoteApp (RAIL) via INFO_RAIL */
+static struct rail_state g_rail;   /* RAIL channel, set during channel join */
 /* Offer the AUDIO_INPUT (microphone) dynamic channel; default on, cleared
  * by rdpd -m.  When off the channel is simply never created. */
 static int g_allow_microphone = 1;
@@ -1618,6 +1627,26 @@ maybe_dispatch_clip(struct rdp_tls *t, int be_fd,
 		if (payload_len < 8) return 1;
 		(void)rdp_rdpsnd_handle(&ss->snd, payload + 8,
 			payload_len - 8, g_prefer_wan_audio);
+		return 1;
+	}
+
+	/* RAIL channel (MS-RDPERP): consume the client's HANDSHAKE,
+	 * CLIENTSTATUS and SYSPARAM orders, and acknowledge an EXEC launch
+	 * request with EXEC_RESULT.  The order follows the 8-byte virtual
+	 * channel header. */
+	if (g_remoteapp && g_rail.enabled && cid == g_rail.channel_id) {
+		struct rdp_rail_order o;
+		if (payload_len < 8) return 1;
+		if (rdp_rail_parse_order(payload + 8, payload_len - 8, &o) == 0
+		    && o.order_type == RAIL_ORDER_EXEC) {
+			uint8_t er[560];
+			uint16_t el = o.exe_len > 520 ? 520 : o.exe_len;
+			ssize_t en = rdp_rail_build_exec_result(er, sizeof er,
+				o.exec_flags, RAIL_EXEC_S_OK, 0, o.exe, el);
+			if (en > 0)
+				(void)send_clip_pdu(t, uid, g_rail.channel_id,
+					er, (size_t)en);
+		}
 		return 1;
 	}
 
@@ -1813,7 +1842,7 @@ do_reactivate(struct rdp_tls *t, int be_fd, uint16_t user_id,
 	{
 		uint8_t caps[2048];
 		ssize_t cn = rdp_capset_build_demand_active(caps, sizeof caps,
-			RDP_CONN_SHARE_ID, new_w, new_h);
+			RDP_CONN_SHARE_ID, new_w, new_h, g_remoteapp);
 		if (cn < 0) return -1;
 		{
 			ssize_t hdr_n = rdp_pdu_build_share_control(pdu,
@@ -2195,6 +2224,18 @@ run_proxy(struct rdp_tls *t, int be_fd,
 		if (fn > 0) (void)rdp_tls_write_full(t, fp, (size_t)fn);
 		fn = rdp_fp_build_pointer_default(fp, sizeof fp);
 		if (fn > 0) (void)rdp_tls_write_full(t, fp, (size_t)fn);
+	}
+
+	/* RemoteApp: the server drives the RAIL handshake once the session is
+	 * active; the client then streams its own handshake and orders. */
+	if (g_remoteapp && g_rail.enabled && !g_rail.handshake_sent) {
+		uint8_t hs[16];
+		ssize_t hn = rdp_rail_build_handshake(hs, sizeof hs, 0x00001db0);
+		if (hn > 0 && send_clip_pdu(t, user_id, g_rail.channel_id,
+			hs, (size_t)hn) == 0) {
+			g_rail.handshake_sent = 1;
+			rdp_info("conn[%s]: RAIL handshake sent", peer);
+		}
 	}
 
 	for (;;) {
@@ -3498,6 +3539,10 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 				devr.enabled    = 1;
 				devr.channel_id = (uint16_t)(1004 + i);
 			}
+			if (strncasecmp(name, "rail", 4) == 0) {
+				g_rail.enabled    = 1;
+				g_rail.channel_id = (uint16_t)(1004 + i);
+			}
 		}
 
 		{
@@ -3620,6 +3665,8 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 				rdp_err("conn[%s]: bad Client Info", peer);
 				goto done;
 			}
+			g_remoteapp = (client_info.flags
+				& RDP_INFO_RAIL) != 0;
 			rdp_info("conn[%s]: user=%s domain=%s arc=%s",
 				peer,
 				client_info.username[0] ? client_info.username : "?",
@@ -3674,7 +3721,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 		ssize_t hdr_n;
 
 		cn = rdp_capset_build_demand_active(caps, sizeof caps,
-			RDP_CONN_SHARE_ID, desktop_w, desktop_h);
+			RDP_CONN_SHARE_ID, desktop_w, desktop_h, g_remoteapp);
 		if (cn < 0) goto done;
 		if ((size_t)cn + 6 > sizeof pdu) goto done;
 		hdr_n = rdp_pdu_build_share_control(pdu, sizeof pdu,
