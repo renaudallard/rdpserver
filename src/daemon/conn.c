@@ -63,6 +63,8 @@
 #include "../wire/license.h"
 #include "../wire/capset.h"
 #include "../wire/bmpcache.h"
+#include "../wire/order.h"
+#include "../wire/bitmap_rle.h"
 #include "../wire/rdp_pdu.h"
 #include "../wire/fastpath.h"
 #include "../greeter/greeter.h"
@@ -1099,13 +1101,102 @@ send_bitmap_fragments(struct rdp_tls *t, const uint8_t *body,
 	return 0;
 }
 
-/* Tile a frame and push as fast-path bitmap updates.  chunk_target is
- * the largest fast-path PDU we may emit; a tile that does not fit one
- * PDU is sliced across fragments. */
+/* Send one 64x64-or-smaller tile through the persistent bitmap cache as
+ * drawing orders.  A MemBlt recalls the cached slot for the tile; on a cache
+ * miss it is preceded by a Cache Bitmap Rev2 secondary order carrying the
+ * RLE-compressed pixels, so the client stores the tile before the MemBlt
+ * blits it.  Both orders travel in one fast-path Orders update.  tile_pix is
+ * tw*th packed 24bpp pixels (top-down).  Returns 0 on success, -1 on failure.
+ *
+ * A cache miss reserves a slot, so any failure after the lookup tears the
+ * connection down (the caller breaks on -1); the slot is never left naming a
+ * bitmap the client did not receive. */
+static int
+send_tile_orders(struct rdp_tls *t, struct rdp_bmpcache *cache,
+		uint32_t dx, uint32_t dy, uint16_t tw, uint16_t th,
+		const uint8_t *tile_pix)
+{
+	/* One Cache Bitmap order plus a MemBlt for a 64x64 24bpp tile: the RLE
+	 * stream never expands the raw pixels by more than a few bytes, so this
+	 * is a generous single-PDU bound. */
+	uint8_t body[2 + 64 * 64 * 3 + 512];
+	uint8_t pkt[0x4000];
+	uint64_t key;
+	uint8_t cache_id = 0;
+	uint16_t cache_index = 0;
+	uint16_t norders = 0;
+	size_t blen = 2;            /* leave room for the numberOrders field */
+	struct rdp_memblt m;
+	ssize_t n;
+
+	key = rdp_bmpcache_key(tile_pix, (size_t)tw * th * 3);
+	if (rdp_bmpcache_lookup(cache, key, &cache_id, &cache_index) == 0) {
+		/* Miss: the client does not hold this tile.  Compress it and
+		 * emit a Cache Bitmap order to store it in the reserved slot. */
+		uint8_t rle[64 * 64 * 3 + 512];
+		size_t rlen = 0;
+		struct rdp_cache_bitmap cb;
+		if (rdp_bitmap_rle_compress_24(rle, sizeof rle, &rlen,
+		    tile_pix, tw, th) != 0)
+			return -1;
+		memset(&cb, 0, sizeof cb);
+		cb.cache_id = cache_id;
+		cb.cache_index = cache_index;
+		cb.bpp = 24;
+		cb.width = tw;
+		cb.height = th;
+		cb.key = key;
+		cb.compressed = 1;
+		cb.data = rle;
+		cb.len = rlen;
+		n = rdp_order_build_cache_bitmap_v2(body + blen,
+		    sizeof body - blen, &cb);
+		if (n < 0)
+			return -1;
+		blen += (size_t)n;
+		norders++;
+	}
+
+	memset(&m, 0, sizeof m);
+	m.cache_id = cache_id;
+	m.cache_index = cache_index;
+	/* Absolute screen coordinates; an out-of-range value (a frame whose edge
+	 * exceeds 65535) is rejected by rdp_order_build_memblt rather than
+	 * silently truncated, so a bad coordinate fails loud instead of blitting
+	 * to the wrong place. */
+	m.x = (int32_t)dx;
+	m.y = (int32_t)dy;
+	m.w = tw;
+	m.h = th;
+	m.rop = RDP_ROP_SRCCOPY;
+	n = rdp_order_build_memblt(body + blen, sizeof body - blen, &m);
+	if (n < 0)
+		return -1;
+	blen += (size_t)n;
+	norders++;
+
+	body[0] = (uint8_t)(norders & 0xFF);
+	body[1] = (uint8_t)((norders >> 8) & 0xFF);
+
+	n = rdp_fp_build_update(pkt, sizeof pkt, RDP_FP_UPDATE_ORDERS,
+	    body, blen);
+	if (n < 0)
+		return -1;
+	if (rdp_tls_write_full(t, pkt, (size_t)n) != (ssize_t)n)
+		return -1;
+	return 0;
+}
+
+/* Tile a frame and push it to the client.  When cache is non-NULL the tiles
+ * go out as cached drawing orders (MemBlt, with a Cache Bitmap on a miss);
+ * otherwise as fast-path bitmap updates.  chunk_target is the largest
+ * fast-path PDU we may emit; a bitmap tile that does not fit one PDU is sliced
+ * across fragments. */
 static int
 push_frame_tiled(struct rdp_tls *t,
 		uint16_t fx, uint16_t fy, uint16_t fw, uint16_t fh,
-		const uint8_t *pixels, size_t chunk_target)
+		const uint8_t *pixels, size_t chunk_target,
+		struct rdp_bmpcache *cache)
 {
 	const uint16_t TILE = 64;
 	uint8_t tile_pix[64 * 64 * 3];
@@ -1126,6 +1217,16 @@ push_frame_tiled(struct rdp_tls *t,
 					pixels + ((size_t)(y + row) * fw
 						+ x) * 3,
 					(size_t)tw * 3);
+			}
+			/* Cached path: recall or store the tile as orders.  Pass
+			 * the absolute coordinate untruncated so an edge past
+			 * 65535 is rejected, not wrapped. */
+			if (cache != NULL) {
+				if (send_tile_orders(t, cache,
+					(uint32_t)fx + x, (uint32_t)fy + y,
+					tw, th, tile_pix) != 0)
+					return -1;
+				continue;
 			}
 			/* Common path: the whole tile fits one PDU. */
 			if (body_size + 6 <= chunk_target) {
@@ -2917,7 +3018,9 @@ run_proxy(struct rdp_tls *t, int be_fd,
 				} else {
 					if (push_frame_tiled(t, fhdr.x,
 						fhdr.y, fhdr.w, fhdr.h,
-						frame_buf, chunk_target) != 0)
+						frame_buf, chunk_target,
+						g_allow_bitmap_cache
+						? g_bmpcache : NULL) != 0)
 						break;
 				}
 			} else if (type == RDP_BE_H264_FRAME) {
