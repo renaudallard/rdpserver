@@ -72,6 +72,7 @@
 #include "clip_x11.h"
 #include "audio.h"
 #include "mic.h"
+#include "camera.h"
 #include "kbdmap.h"
 #include "fuse_drive.h"
 #include "printer.h"
@@ -1577,6 +1578,11 @@ main(int argc, char *argv[])
 	 * a failure here leaves the module inert and never breaks the session. */
 	struct rdp_mic *mic = rdp_mic_open();
 
+	/* Camera redirection: present the client's camera (arriving as
+	 * RDP_BE_CAMERA) as a v4l2loopback video device.  Best effort: with no
+	 * loopback device present the module stays inert. */
+	struct rdp_camera *cam = rdp_camera_open();
+
 	/* Probe the inherited fd 4 for an RDPDR drive FUSE mount.  Returns
 	 * NULL on non-Linux builds, old kernels, or when sessionmgr did not
 	 * set up a mount, in which case the session runs without drives. */
@@ -1725,6 +1731,14 @@ main(int argc, char *argv[])
 				    (size_t)n);
 			} else if (type == RDP_BE_AUDIO_INPUT) {
 				rdp_mic_write(mic, buf, (size_t)n);
+			} else if (type == RDP_BE_CAMERA
+			    && n >= (ssize_t)sizeof(struct rdp_be_camera)) {
+				struct rdp_be_camera ch;
+				memcpy(&ch, buf, sizeof ch);
+				if (ch.size <= (uint32_t)n - sizeof ch)
+					rdp_camera_write(cam, ch.format,
+					    ch.width, ch.height,
+					    buf + sizeof ch, ch.size);
 			} else if (type == RDP_BE_RAIL
 			    && n >= (ssize_t)sizeof(struct rdp_be_rail)) {
 				/* Single-window RAIL fallback: Xvfb has no real
@@ -1836,6 +1850,7 @@ main(int argc, char *argv[])
 	rdp_h264_close(h264);
 	rdp_audio_close(audio);
 	rdp_mic_close(mic);
+	rdp_camera_close(cam);
 	free(audio_buf);
 	if (clip_ok) rdp_clip_close(&clip);
 	free(frame_buf);

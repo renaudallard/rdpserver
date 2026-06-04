@@ -55,6 +55,11 @@ Multitouch and pen input is received over the MS-RDPEI
 .Sy Microsoft::Windows::RDS::Input
 dynamic channel and forwarded to the session
 .Pq see Xr rdp-session 8 .
+With
+.Fl C
+the client's camera is redirected over the MS-RDPECAM channels and presented
+to the session as a video device
+.Pq see Xr rdp-session 8 .
 .Pp
 When a client connects in RemoteApp mode
 .Pq MS-RDPERP , Sy RAIL ,
@@ -191,6 +196,20 @@ A client that does not redirect a microphone simply produces no audio, with
 no effect on the session;
 .Fl m
 stops the channel from being offered at all.
+.It Fl C
+Offer client camera
+.Pq MS-RDPECAM
+redirection; off by default, since a camera is privacy-sensitive.
+When set, the server opens the
+.Sy RDCamera_Device_Enumerator
+channel and, when the client announces a camera, drives it (activate, list
+streams and media types, select an uncompressed format, start the stream) and
+pulls frames, forwarding each to the session, which presents the camera as a
+.Xr v4l2loopback 4
+device
+.Pq see Xr rdp-session 8 .
+A client that does not redirect a camera produces no frames, with no effect on
+the session.
 .El
 .Sh FILES
 .Bl -tag -width Ds

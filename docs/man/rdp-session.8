@@ -156,6 +156,23 @@ so applications can select the client's microphone as their input.
 This is best effort: with no PulseAudio or no redirected microphone the
 session simply runs without the source.
 .Pp
+If the client redirects a camera over the MS-RDPECAM channels
+.Pq enabled with Xr rdpd 8 Fl C ,
+the worker negotiates an uncompressed format and forwards each frame as an
+.Sy RDP_BE_CAMERA
+message; the session writes the raw frame to a
+.Xr v4l2loopback 4
+output device
+.Pq Pa /dev/video Ns Ar N
+so applications see the client's webcam as an ordinary V4L2 camera.
+No decoding is done in the session.
+This is best effort: the
+.Sy v4l2loopback
+module must be provisioned on the host
+.Pq the session is pledged and cannot load it ,
+and with no loopback device present the session simply runs without a
+virtual camera.
+.Pp
 The options are as follows:
 .Bl -tag -width Ds
 .It Fl D

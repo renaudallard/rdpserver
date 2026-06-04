@@ -81,6 +81,7 @@ SESSION_OBJS = src/session/rdp_session.o src/session/clip_x11.o \
 	src/session/fuse_drive.o $(FUSE_BACKEND_OBJ) \
 	src/session/printer.o \
 	src/session/mic.o \
+	src/session/camera.o \
 	$(WAYLAND_OBJ) $(AUDIO_OBJ)
 SESSION_PROG = src/session/rdp-session
 
