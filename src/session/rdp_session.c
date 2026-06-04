@@ -56,6 +56,7 @@
 #include "../common/io.h"
 #include "../backend/proto.h"
 #include "../backend/proto_api.h"
+#include "../common/utf16.h"	/* rdp_utf8_to_utf16le for RAIL window titles */
 #include "../channels/rdpei.h"	/* RDPEI_CONTACT_*, RDPEI_MAX_CONTACTS */
 #include "../wire/h264enc.h"
 
@@ -1061,6 +1062,41 @@ out:
 	return 0;
 }
 
+/* Send one RemoteApp (RAIL) window geometry event to the worker.  op 0
+ * (create/update) carries a UTF-16LE title built from the UTF-8 title; op 1
+ * (delete) carries no title.  title may be NULL.  The title is capped at
+ * RDP_BE_WINDOW_TITLE_MAX UTF-16LE bytes so one message stays bounded. */
+#define RDP_BE_WINDOW_TITLE_MAX 256u
+static void
+send_window_event(int op, uint32_t window_id, int32_t x, int32_t y,
+    uint32_t w, uint32_t h, const char *title)
+{
+	struct rdp_be_window wmsg;
+	uint8_t body[sizeof(struct rdp_be_window) + RDP_BE_WINDOW_TITLE_MAX];
+	size_t tlen = 0;
+
+	memset(&wmsg, 0, sizeof wmsg);
+	wmsg.window_id = window_id;
+	wmsg.x = x;
+	wmsg.y = y;
+	wmsg.w = w;
+	wmsg.h = h;
+	wmsg.op = (uint8_t)op;
+
+	if (op == RDP_BE_WINDOW_OP_CREATE && title != NULL && *title != '\0') {
+		size_t need = rdp_utf8_to_utf16le(
+		    body + sizeof wmsg, RDP_BE_WINDOW_TITLE_MAX,
+		    title, strlen(title));
+		/* On malformed UTF-8 or truncation, fall back to an empty
+		 * title rather than send a partial code unit. */
+		if (need != (size_t)-1 && need <= RDP_BE_WINDOW_TITLE_MAX)
+			tlen = need;
+	}
+	wmsg.title_len = (uint16_t)tlen;
+	memcpy(body, &wmsg, sizeof wmsg);
+	(void)rdp_be_send(BE_FD, RDP_BE_WINDOW, body, sizeof wmsg + tlen);
+}
+
 #if HAVE_WLROOTS
 static int
 run_wayland_mode(int w, int h)
@@ -1164,6 +1200,11 @@ run_wayland_mode(int w, int h)
 				}
 				if (any)
 					rdp_wl_comp_touch_frame(wl);
+			} else if (type == RDP_BE_RAIL) {
+				/* RemoteApp: switch the compositor to
+				 * per-window RAIL mode so it emits WINDOW
+				 * geometry events we forward below. */
+				rdp_wl_comp_set_rail(wl, 1);
 			} else if (type == RDP_BE_RESIZE
 			    && n >= (ssize_t)sizeof(struct rdp_be_resize)) {
 				struct rdp_be_resize rs;
@@ -1177,6 +1218,18 @@ run_wayland_mode(int w, int h)
 				}
 			} else if (type == RDP_BE_BYE) {
 				break;
+			}
+		}
+
+		/* Drain RAIL window geometry events the compositor queued
+		 * while dispatching, and forward each to the worker. */
+		{
+			struct rdp_wl_window_event ev;
+			while (rdp_wl_comp_poll_window_event(wl, &ev)) {
+				int op = ev.op == 1 ? RDP_BE_WINDOW_OP_DELETE
+				    : RDP_BE_WINDOW_OP_CREATE;
+				send_window_event(op, ev.window_id,
+				    ev.x, ev.y, ev.w, ev.h, ev.title);
 			}
 		}
 
@@ -1313,6 +1366,11 @@ main(int argc, char *argv[])
 	Damage dmg = None;
 	int damage_event = 0, damage_error = 0, dirty = 1;
 	int cursor_dirty = 1;
+	/* RAIL single-window fallback: Xvfb cannot do real per-window RAIL,
+	 * so a RemoteApp client is shown the whole desktop as one seamless
+	 * window.  Set once a create was sent so we send the matching delete
+	 * on teardown. */
+	int rail_window_sent = 0;
 
 	while ((opt = getopt(argc, argv, "DWw:H:k:z:?")) != -1) {
 		switch (opt) {
@@ -1667,6 +1725,20 @@ main(int argc, char *argv[])
 				    (size_t)n);
 			} else if (type == RDP_BE_AUDIO_INPUT) {
 				rdp_mic_write(mic, buf, (size_t)n);
+			} else if (type == RDP_BE_RAIL
+			    && n >= (ssize_t)sizeof(struct rdp_be_rail)) {
+				/* Single-window RAIL fallback: Xvfb has no real
+				 * per-window geometry, so report the whole
+				 * desktop as one window so a RemoteApp client
+				 * still shows the session seamlessly. */
+				struct rdp_be_rail rl;
+				memcpy(&rl, buf, sizeof rl);
+				if (!rail_window_sent) {
+					send_window_event(RDP_BE_WINDOW_OP_CREATE,
+					    1, 0, 0, rl.width, rl.height,
+					    "RemoteApp");
+					rail_window_sent = 1;
+				}
 			} else if (type == RDP_BE_BYE) {
 				break;
 			}
@@ -1755,6 +1827,10 @@ main(int argc, char *argv[])
 	}
 
 	rdp_info("rdp-session shutting down");
+	/* Tear down the single-window RAIL fallback so the client removes the
+	 * seamless window cleanly. */
+	if (rail_window_sent)
+		send_window_event(RDP_BE_WINDOW_OP_DELETE, 1, 0, 0, 0, 0, NULL);
 	rdp_printer_close(&printer);
 	fuse_drive_free(drive);
 	rdp_h264_close(h264);

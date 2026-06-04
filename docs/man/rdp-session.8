@@ -81,6 +81,22 @@ applications.
 On Xvfb there is no virtual multitouch device, so the primary contact is
 emulated as a single left pointer via the XTEST extension.
 .Pp
+When the client requested RemoteApp mode
+.Pq MS-RDPERP , Sy RAIL , see Xr rdpd 8 ,
+.Xr rdpd 8
+tells the session to present its windows as seamless RemoteApp windows
+rather than a flat desktop.
+On the Wayland backend each
+.Sy xdg_shell
+toplevel keeps its natural size and a cascade position, and its
+geometry is forwarded to
+.Xr rdpd 8
+so the client paints it as its own borderless window; opening, resizing,
+and closing a window are reported as RAIL window create, update, and
+delete events.
+On the Xvfb backend the whole session desktop is reported as a single
+RemoteApp window.
+.Pp
 The client's time zone, passed by
 .Xr rdp-sessionmgr 8
 via
@@ -156,6 +172,8 @@ Requires
 .Sy libwlroots
 0.18 or later.
 Wayland-native clients connect to the embedded compositor directly.
+In RemoteApp mode this backend reports each toplevel as its own seamless
+window, where Xvfb reports the whole desktop as one window.
 .It Fl w Ar width
 Desktop width in pixels.
 The default is 1024.

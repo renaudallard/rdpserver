@@ -2233,8 +2233,16 @@ run_proxy(struct rdp_tls *t, int be_fd,
 		ssize_t hn = rdp_rail_build_handshake(hs, sizeof hs, 0x00001db0);
 		if (hn > 0 && send_clip_pdu(t, user_id, g_rail.channel_id,
 			hs, (size_t)hn) == 0) {
+			struct rdp_be_rail rl;
 			g_rail.handshake_sent = 1;
 			rdp_info("conn[%s]: RAIL handshake sent", peer);
+			/* Tell the session it is a RemoteApp session so it
+			 * switches to per-window RAIL mode and emits WINDOW
+			 * geometry events.  Carry the desktop size for the
+			 * X11/Xvfb single-window fallback. */
+			rl.width = desktop_w;
+			rl.height = desktop_h;
+			(void)rdp_be_send(be_fd, RDP_BE_RAIL, &rl, sizeof rl);
 		}
 	}
 

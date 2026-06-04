@@ -56,6 +56,31 @@ Multitouch and pen input is received over the MS-RDPEI
 dynamic channel and forwarded to the session
 .Pq see Xr rdp-session 8 .
 .Pp
+When a client connects in RemoteApp mode
+.Pq MS-RDPERP , Sy RAIL ,
+signalled by the
+.Sy INFO_RAIL
+flag in the Client Info PDU
+.Po
+xfreerdp
+.Sy /app ,
+mstsc
+.Sy remoteapplicationmode:i:1
+.Pc ,
+the server advertises the RAIL and WINDOW capability sets, opens the
+.Sy rail
+static virtual channel, completes the
+.Sy TS_RAIL_ORDER
+handshake, answers the client status, and acknowledges Execute requests.
+Each session window is then reported to the client as a Window
+Information Order so it is painted as a borderless seamless window
+instead of a full remote desktop.
+On the Wayland backend each application window is tracked separately;
+on the Xvfb backend the session is presented as a single whole-desktop
+seamless window
+.Pq see Xr rdp-session 8 .
+This is driven entirely by the client; there is no server option for it.
+.Pp
 The greeter follows the client's reported keyboard layout (LCID) for
 US, UK, French, Belgian, German, and Swiss keyboards, so the username
 and password are typed with the right keys.  Only ASCII letters and

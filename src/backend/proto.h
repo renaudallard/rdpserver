@@ -138,6 +138,13 @@
 #define RDP_BE_WINDOW_OP_CREATE 0u
 #define RDP_BE_WINDOW_OP_DELETE 1u
 
+/* RemoteApp session signal (MS-RDPERP).
+ *   RAIL  worker -> session: the client negotiated RemoteApp, so the session
+ *         runs in per-window RAIL mode and emits WINDOW geometry events.  The
+ *         payload carries the desktop size, used by the X11/Xvfb fallback to
+ *         report the whole desktop as one seamless window. */
+#define RDP_BE_RAIL            25u  /* worker -> session */
+
 /* Upper bound on the PCM bytes the worker forwards in one AUDIO_INPUT
  * message.  A client Data PDU larger than this is split into multiple
  * AUDIO_INPUT messages so a single chunk stays bounded. */
@@ -335,6 +342,13 @@ struct rdp_be_window {
 	uint16_t title_len;  /* UTF-16LE byte count, trailing for op CREATE */
 	uint8_t  op;         /* RDP_BE_WINDOW_OP_* */
 	uint8_t  pad;
+};
+
+/* RAIL payload (worker -> session): the desktop size, for the X11/Xvfb
+ * single-window fallback. */
+struct rdp_be_rail {
+	uint32_t width;
+	uint32_t height;
 };
 
 /* CLIP_OFFER payload: just a u32 format bitmap. */

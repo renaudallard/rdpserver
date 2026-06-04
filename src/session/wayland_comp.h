@@ -33,6 +33,17 @@
 
 struct rdp_wl_comp;
 
+/* A RemoteApp (RAIL) window geometry event drained from the compositor.
+ * op 0 = create/update (geometry and title valid), op 1 = delete.  title is
+ * UTF-8, NUL terminated. */
+struct rdp_wl_window_event {
+	int      op;
+	uint32_t window_id;
+	int32_t  x, y;
+	uint32_t w, h;
+	char     title[256];
+};
+
 struct rdp_wl_comp *rdp_wl_comp_create(int width, int height);
 const char *rdp_wl_comp_get_socket(struct rdp_wl_comp *c);
 int rdp_wl_comp_dispatch(struct rdp_wl_comp *c, int timeout_ms);
@@ -50,6 +61,14 @@ void rdp_wl_comp_touch_frame(struct rdp_wl_comp *c);
 int rdp_wl_comp_is_dirty(struct rdp_wl_comp *c);
 void rdp_wl_comp_clear_dirty(struct rdp_wl_comp *c);
 void rdp_wl_comp_resize(struct rdp_wl_comp *c, int w, int h);
+/* RemoteApp (RAIL) per-window mode: when on, the compositor lets each
+ * toplevel keep its natural size, renders it at its own position, and queues
+ * window geometry events for the session to forward. */
+void rdp_wl_comp_set_rail(struct rdp_wl_comp *c, int on);
+/* Dequeue one pending RAIL window event into ev.  Returns 1 if an event was
+ * dequeued, 0 if the queue is empty. */
+int rdp_wl_comp_poll_window_event(struct rdp_wl_comp *c,
+    struct rdp_wl_window_event *ev);
 void rdp_wl_comp_destroy(struct rdp_wl_comp *c);
 
 #endif
