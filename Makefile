@@ -65,7 +65,8 @@ SESSMGR_DAEMON_OBJ = src/sessionmgr/sessionmgr.o $(SESSMGR_AUTH_OBJ)
 # Static virtual channels.
 CHANNELS_OBJS = src/channels/cliprdr.o src/channels/drdynvc.o src/channels/rdpsnd.o \
 	src/channels/sndin.o src/channels/rdpgfx.o src/channels/rdpdr.o \
-	src/channels/autodetect.o src/channels/rdpei.o src/channels/rail.o
+	src/channels/autodetect.o src/channels/rdpei.o src/channels/rail.o \
+	src/channels/cam.o
 CHANNELS_LIB  = src/channels/libchannels.a
 
 # Backend RPC: shared between rdpd worker and rdp-session.
@@ -116,6 +117,7 @@ REGRESS_PROGS = \
 	regress/wire/autodetect_test \
 	regress/wire/rdpei_test \
 	regress/wire/rail_test \
+	regress/wire/cam_test \
 	$(FUSE_REGRESS) \
 	$(OBSD_FUSE_REGRESS)
 
@@ -307,6 +309,15 @@ regress/wire/rdpei_test: regress/wire/rdpei_test.c src/channels/rdpei.c
 regress/wire/rail_test: regress/wire/rail_test.c src/channels/rail.c
 	$(CC) $(CFLAGS) $(TEST_SAN) -Isrc/include \
 		-o $@ regress/wire/rail_test.c src/channels/rail.c
+
+# MS-RDPECAM camera PDU build/parse.  cam.c is recompiled with the test so
+# $(TEST_SAN) covers the device-notification string scans and the fixed-size
+# record-array bounds.
+regress/wire/cam_test: regress/wire/cam_test.c src/channels/cam.c \
+		src/common/buf.c
+	$(CC) $(CFLAGS) $(TEST_SAN) -Isrc/include \
+		-o $@ regress/wire/cam_test.c src/channels/cam.c \
+		src/common/buf.c
 
 # Printer module unit test.  printer.c is recompiled with the test so the
 # sanitization and the wire header layout are covered directly; $(TEST_SAN)
