@@ -33,6 +33,7 @@
 #include "drdynvc.h"
 
 #include "rdpei.h"
+#include "cam.h"
 
 #include "../include/rdp_log.h"
 
@@ -199,6 +200,44 @@ rdp_drdynvc_handle(struct drdynvc_state *st,
 			rdp_info("drdynvc: RDPEI not opened by client (%d)",
 				(int)status);
 			st->rdpei_channel_id = -1;
+			return 0;
+		}
+		/* Create Response for the camera enumerator channel.  A
+		 * nonzero status (no client camera support) is not an error:
+		 * the channel is simply marked unavailable. */
+		if (st->camenum_create_pending
+		    && (int)chan_id == st->camenum_channel_id) {
+			size_t remain = len - 1 - id_len;
+			int32_t status = 0;
+			if (remain >= 4)
+				status = (int32_t)ld32(pdu + 1 + id_len);
+			st->camenum_create_pending = 0;
+			if (status == 0) {
+				rdp_info("drdynvc: camera enumerator "
+					"channel created ok");
+				return 13;
+			}
+			rdp_info("drdynvc: camera enumerator not "
+				"opened by client (%d)", (int)status);
+			st->camenum_channel_id = -1;
+			return 0;
+		}
+		/* Create Response for a per-device camera channel. */
+		if (st->camdev_create_pending
+		    && (int)chan_id == st->camdev_channel_id) {
+			size_t remain = len - 1 - id_len;
+			int32_t status = 0;
+			if (remain >= 4)
+				status = (int32_t)ld32(pdu + 1 + id_len);
+			st->camdev_create_pending = 0;
+			if (status == 0) {
+				rdp_info("drdynvc: camera device "
+					"channel created ok");
+				return 14;
+			}
+			rdp_info("drdynvc: camera device not "
+				"opened by client (%d)", (int)status);
+			st->camdev_channel_id = -1;
 			return 0;
 		}
 		/* Client-initiated Create Request. */
@@ -431,6 +470,118 @@ rdp_drdynvc_handle(struct drdynvc_state *st,
 			*gfx_len = data_len;
 			return 12;
 		}
+		/* camenum channel (MS-RDPECAM): one PDU per Data PDU in the
+		 * common case; reassemble a fragmented one with its own buffer so
+		 * an interleaved fragment sequence on another channel cannot
+		 * clobber it.  A channel id of 0 means the channel was never
+		 * created (ids are assigned >= 5). */
+		if ((int)chan_id == st->camenum_channel_id
+		    && st->camenum_channel_id > 0
+		    && gfx_data != NULL && gfx_len != NULL) {
+			if (cmd == DRDYNVC_CMD_DATA_FIRST) {
+				if (total_len == 0 || total_len > 0x400000)
+					return -1;
+				if (total_len > st->ce_reasm_cap) {
+					free(st->ce_reasm_buf);
+					st->ce_reasm_buf = malloc(total_len);
+					if (st->ce_reasm_buf == NULL) {
+						st->ce_reasm_cap = 0;
+						return -1;
+					}
+					st->ce_reasm_cap = total_len;
+				}
+				st->ce_reasm_total = total_len;
+				st->ce_reasm_len = 0;
+				if (data_len > total_len)
+					data_len = total_len;
+				memcpy(st->ce_reasm_buf, data, data_len);
+				st->ce_reasm_len = data_len;
+				if (st->ce_reasm_len >= st->ce_reasm_total) {
+					*gfx_data = st->ce_reasm_buf;
+					*gfx_len = st->ce_reasm_len;
+					st->ce_reasm_len = 0;
+					st->ce_reasm_total = 0;
+					return 15;
+				}
+				return 0;
+			}
+			if (st->ce_reasm_len > 0) {
+				size_t remain = st->ce_reasm_total
+					- st->ce_reasm_len;
+				if (data_len > remain)
+					data_len = remain;
+				memcpy(st->ce_reasm_buf + st->ce_reasm_len,
+					data, data_len);
+				st->ce_reasm_len += data_len;
+				if (st->ce_reasm_len >= st->ce_reasm_total) {
+					*gfx_data = st->ce_reasm_buf;
+					*gfx_len = st->ce_reasm_len;
+					st->ce_reasm_len = 0;
+					st->ce_reasm_total = 0;
+					return 15;
+				}
+				return 0;
+			}
+			*gfx_data = data;
+			*gfx_len = data_len;
+			return 15;
+		}
+		/* camdev channel (MS-RDPECAM): one PDU per Data PDU in the
+		 * common case; reassemble a fragmented one with its own buffer so
+		 * an interleaved fragment sequence on another channel cannot
+		 * clobber it.  A channel id of 0 means the channel was never
+		 * created (ids are assigned >= 5). */
+		if ((int)chan_id == st->camdev_channel_id
+		    && st->camdev_channel_id > 0
+		    && gfx_data != NULL && gfx_len != NULL) {
+			if (cmd == DRDYNVC_CMD_DATA_FIRST) {
+				if (total_len == 0 || total_len > 0x400000)
+					return -1;
+				if (total_len > st->cd_reasm_cap) {
+					free(st->cd_reasm_buf);
+					st->cd_reasm_buf = malloc(total_len);
+					if (st->cd_reasm_buf == NULL) {
+						st->cd_reasm_cap = 0;
+						return -1;
+					}
+					st->cd_reasm_cap = total_len;
+				}
+				st->cd_reasm_total = total_len;
+				st->cd_reasm_len = 0;
+				if (data_len > total_len)
+					data_len = total_len;
+				memcpy(st->cd_reasm_buf, data, data_len);
+				st->cd_reasm_len = data_len;
+				if (st->cd_reasm_len >= st->cd_reasm_total) {
+					*gfx_data = st->cd_reasm_buf;
+					*gfx_len = st->cd_reasm_len;
+					st->cd_reasm_len = 0;
+					st->cd_reasm_total = 0;
+					return 16;
+				}
+				return 0;
+			}
+			if (st->cd_reasm_len > 0) {
+				size_t remain = st->cd_reasm_total
+					- st->cd_reasm_len;
+				if (data_len > remain)
+					data_len = remain;
+				memcpy(st->cd_reasm_buf + st->cd_reasm_len,
+					data, data_len);
+				st->cd_reasm_len += data_len;
+				if (st->cd_reasm_len >= st->cd_reasm_total) {
+					*gfx_data = st->cd_reasm_buf;
+					*gfx_len = st->cd_reasm_len;
+					st->cd_reasm_len = 0;
+					st->cd_reasm_total = 0;
+					return 16;
+				}
+				return 0;
+			}
+			*gfx_data = data;
+			*gfx_len = data_len;
+			return 16;
+		}
 		if ((int)chan_id != st->disp_channel_id)
 			return 0;
 
@@ -506,6 +657,13 @@ rdp_drdynvc_handle(struct drdynvc_state *st,
 #define AUDIOIN_CHANNEL_NAME "AUDIO_INPUT"
 #define AUDIOIN_SERVER_CHAN_ID 3
 #define RDPEI_SERVER_CHAN_ID 4
+/* MS-RDPECAM: the enumerator channel name comes from cam.h. */
+#define CAMENUM_SERVER_CHAN_ID 5
+#define CAMDEV_SERVER_CHAN_ID 6
+/* Upper bound on a client-supplied per-device channel name, so an
+ * attacker-controlled DeviceAddedNotification cannot drive an oversized
+ * Create Request. */
+#define CAMDEV_NAME_MAX 250
 
 ssize_t
 rdp_drdynvc_build_create_gfx(struct drdynvc_state *st,
@@ -571,6 +729,45 @@ rdp_drdynvc_build_create_rdpei(struct drdynvc_state *st,
 	return (ssize_t)total;
 }
 
+ssize_t
+rdp_drdynvc_build_create_cam_enum(struct drdynvc_state *st,
+		uint8_t *out, size_t cap)
+{
+	size_t name_len = sizeof(CAM_ENUM_CHANNEL_NAME);
+	size_t total = 1 + 1 + name_len;
+
+	if (cap < total) return -1;
+	out[0] = (uint8_t)((DRDYNVC_CMD_CREATE << 4) | (2 << 2) | 0);
+	out[1] = CAMENUM_SERVER_CHAN_ID;
+	memcpy(out + 2, CAM_ENUM_CHANNEL_NAME, name_len);
+	st->camenum_channel_id = CAMENUM_SERVER_CHAN_ID;
+	st->camenum_create_pending = 1;
+	return (ssize_t)total;
+}
+
+ssize_t
+rdp_drdynvc_build_create_cam_device(struct drdynvc_state *st,
+		const char *name, size_t name_len, uint8_t *out, size_t cap)
+{
+	size_t total;
+
+	/* The name is attacker-controlled: it must be non-empty, bounded, and
+	 * free of an embedded NUL (the wire name is NUL terminated). */
+	if (name == NULL || name_len == 0 || name_len > CAMDEV_NAME_MAX)
+		return -1;
+	if (memchr(name, 0, name_len) != NULL)
+		return -1;
+	total = 1 + 1 + name_len + 1;            /* hdr + id + name + NUL */
+	if (cap < total) return -1;
+	out[0] = (uint8_t)((DRDYNVC_CMD_CREATE << 4) | (2 << 2) | 0);
+	out[1] = CAMDEV_SERVER_CHAN_ID;
+	memcpy(out + 2, name, name_len);
+	out[2 + name_len] = 0;
+	st->camdev_channel_id = CAMDEV_SERVER_CHAN_ID;
+	st->camdev_create_pending = 1;
+	return (ssize_t)total;
+}
+
 /* MS-RDPEDISP 2.2.2.1 DISPLAYCONTROL_CAPS_PDU: the server's monitor
  * limits, sent once the DisplayControl channel is created so the
  * client knows it may request a dynamic resize. */
@@ -605,4 +802,14 @@ rdp_drdynvc_cleanup(struct drdynvc_state *st)
 	st->rei_reasm_cap = 0;
 	st->rei_reasm_len = 0;
 	st->rei_reasm_total = 0;
+	free(st->ce_reasm_buf);
+	st->ce_reasm_buf = NULL;
+	st->ce_reasm_cap = 0;
+	st->ce_reasm_len = 0;
+	st->ce_reasm_total = 0;
+	free(st->cd_reasm_buf);
+	st->cd_reasm_buf = NULL;
+	st->cd_reasm_cap = 0;
+	st->cd_reasm_len = 0;
+	st->cd_reasm_total = 0;
 }

@@ -88,6 +88,23 @@ struct drdynvc_state {
 	size_t   rei_reasm_cap;
 	size_t   rei_reasm_len;
 	uint32_t rei_reasm_total;
+
+	/* MS-RDPECAM camera: the enumerator control channel and one per-device
+	 * channel.  Each keeps its own reassembly buffer, like the channels
+	 * above, so an interleaved fragment sequence on another channel cannot
+	 * clobber an in-progress camera frame. */
+	int      camenum_channel_id;   /* enumerator; -1 if not created */
+	int      camenum_create_pending;
+	int      camdev_channel_id;    /* per-device channel; -1 if not created */
+	int      camdev_create_pending;
+	uint8_t *ce_reasm_buf;
+	size_t   ce_reasm_cap;
+	size_t   ce_reasm_len;
+	uint32_t ce_reasm_total;
+	uint8_t *cd_reasm_buf;
+	size_t   cd_reasm_cap;
+	size_t   cd_reasm_len;
+	uint32_t cd_reasm_total;
 };
 
 /* Build DRDYNVC Capabilities Request (version 1). */
@@ -109,6 +126,16 @@ ssize_t rdp_drdynvc_build_create_audio_input(struct drdynvc_state *st,
 ssize_t rdp_drdynvc_build_create_rdpei(struct drdynvc_state *st,
 		uint8_t *out, size_t cap);
 
+/* Build DRDYNVC Create Request for the MS-RDPECAM enumerator channel. */
+ssize_t rdp_drdynvc_build_create_cam_enum(struct drdynvc_state *st,
+		uint8_t *out, size_t cap);
+
+/* Build DRDYNVC Create Request for a per-device camera channel.  name is the
+ * VirtualChannelName the client sent in its DeviceAddedNotification (name_len
+ * bytes, not NUL terminated); a NUL terminator is appended on the wire. */
+ssize_t rdp_drdynvc_build_create_cam_device(struct drdynvc_state *st,
+		const char *name, size_t name_len, uint8_t *out, size_t cap);
+
 /* Build a DISPLAYCONTROL_CAPS_PDU (MS-RDPEDISP) inner payload. */
 ssize_t rdp_drdynvc_build_disp_caps(uint8_t *out, size_t cap);
 
@@ -126,6 +153,10 @@ ssize_t rdp_drdynvc_build_disp_caps(uint8_t *out, size_t cap);
  *   9 = AUDIO_INPUT data arrived (gfx_data/gfx_len carry the SNDIN PDU)
  *  11 = RDPEI created (caller sends SC_READY)
  *  12 = RDPEI data arrived (gfx_data/gfx_len carry the RDPEI PDU)
+ *  13 = camera enumerator channel created
+ *  14 = camera device channel created (caller starts the Activate flow)
+ *  15 = camera enumerator data arrived (gfx_data/gfx_len carry the PDU)
+ *  16 = camera device data arrived (gfx_data/gfx_len carry the PDU)
  *  <0 = error */
 int rdp_drdynvc_handle(struct drdynvc_state *st,
 		const uint8_t *pdu, size_t len,
