@@ -333,3 +333,188 @@ rdp_cam_parse(const uint8_t *p, size_t len, struct rdp_cam_msg *out)
 		return 0;
 	}
 }
+
+/* ---- server-side negotiation state machine --------------------------- */
+
+void
+rdp_cam_state_init(struct rdp_cam_state *st)
+{
+	memset(st, 0, sizeof *st);
+	st->phase = CAM_PHASE_INIT;
+	st->version = CAM_PROTO_VERSION;
+}
+
+static void
+action_reset(struct rdp_cam_action *act)
+{
+	memset(act, 0, sizeof *act);
+	act->send_chan = -1;
+}
+
+/* Bytes in one raw frame of the given media type, or 0 for an unknown or
+ * non-raw format. */
+static uint64_t
+frame_size(const struct rdp_cam_media_type *mt)
+{
+	uint64_t px = (uint64_t)mt->width * (uint64_t)mt->height;
+
+	switch (mt->format) {
+	case CAM_FORMAT_NV12:
+	case CAM_FORMAT_I420:  return px * 3 / 2;
+	case CAM_FORMAT_YUY2:  return px * 2;
+	case CAM_FORMAT_RGB24: return px * 3;
+	case CAM_FORMAT_RGB32: return px * 4;
+	default:               return 0;
+	}
+}
+
+/* Pick a raw, directly-usable media type from the client's offered list,
+ * preferring the most compact planar formats.  Skips any that need decoding
+ * or whose raw frame would not fit the reassembly bound. */
+static int
+pick_media_type(const struct rdp_cam_msg *m, struct rdp_cam_media_type *out)
+{
+	static const uint8_t pref[] = {
+		CAM_FORMAT_NV12, CAM_FORMAT_I420, CAM_FORMAT_YUY2,
+		CAM_FORMAT_RGB24, CAM_FORMAT_RGB32
+	};
+	size_t p, i;
+
+	for (p = 0; p < sizeof pref; p++) {
+		for (i = 0; i < m->n_media_types; i++) {
+			const struct rdp_cam_media_type *mt = &m->media_types[i];
+			uint64_t sz;
+			if (mt->format != pref[p]) continue;
+			if (mt->flags & CAM_MT_FLAG_DECODING_REQUIRED) continue;
+			if (mt->width == 0 || mt->height == 0) continue;
+			sz = frame_size(mt);
+			if (sz == 0 || sz > CAM_FRAME_MAX) continue;
+			*out = *mt;
+			return 0;
+		}
+	}
+	return -1;
+}
+
+/* Build a small PDU into act->send and target it at channel `chan`. */
+static int
+action_send(struct rdp_cam_action *act, int chan, ssize_t n)
+{
+	if (n < 0) return -1;
+	act->send_len = (size_t)n;
+	act->send_chan = chan;
+	return 0;
+}
+
+int
+rdp_cam_device_opened(struct rdp_cam_state *st, struct rdp_cam_action *act)
+{
+	action_reset(act);
+	if (!st->have_device) return -1;
+	if (action_send(act, 1, rdp_cam_build_activate(act->send,
+	    sizeof act->send, st->version)) != 0)
+		return -1;
+	st->phase = CAM_PHASE_ACTIVATING;
+	return 0;
+}
+
+int
+rdp_cam_negotiate(struct rdp_cam_state *st, int chan,
+    const uint8_t *in, size_t in_len, struct rdp_cam_action *act)
+{
+	struct rdp_cam_msg m;
+
+	action_reset(act);
+	if (rdp_cam_parse(in, in_len, &m) != 0) return -1;
+
+	if (chan == 0) {
+		/* Enumerator channel: version handshake and hot-plug. */
+		switch (m.msg_id) {
+		case CAM_MSG_SELECT_VERSION_REQUEST:
+			st->version = (m.version < CAM_PROTO_VERSION)
+			    ? m.version : CAM_PROTO_VERSION;
+			return action_send(act, 0,
+			    rdp_cam_build_select_version_response(act->send,
+				sizeof act->send, st->version));
+		case CAM_MSG_DEVICE_ADDED:
+			if (st->have_device) return 0;  /* one camera only */
+			/* Reject a name we could not open, so have_device is not
+			 * latched on a device that never gets a channel. */
+			if (m.channel_name_len == 0 ||
+			    m.channel_name_len > CAM_DEV_NAME_MAX)
+				return 0;
+			act->open_device = 1;
+			act->dev_name = m.channel_name;
+			act->dev_name_len = m.channel_name_len;
+			st->have_device = 1;
+			return 0;
+		case CAM_MSG_DEVICE_REMOVED:
+			/* Tear the device channel down so a later add re-opens. */
+			st->have_device = 0;
+			st->sel_valid = 0;
+			st->phase = CAM_PHASE_INIT;
+			act->close_device = 1;
+			return 0;
+		default:
+			return 0;
+		}
+	}
+
+	/* Device channel: the activate/list/start/stream pull sequence. */
+	switch (m.msg_id) {
+	case CAM_MSG_SUCCESS_RESPONSE:
+		if (st->phase == CAM_PHASE_ACTIVATING) {
+			st->phase = CAM_PHASE_STREAM_LIST;
+			return action_send(act, 1,
+			    rdp_cam_build_stream_list_request(act->send,
+				sizeof act->send, st->version));
+		}
+		if (st->phase == CAM_PHASE_STARTING) {
+			st->phase = CAM_PHASE_STREAMING;
+			return action_send(act, 1,
+			    rdp_cam_build_sample_request(act->send,
+				sizeof act->send, st->version, 0));
+		}
+		return 0;
+	case CAM_MSG_ERROR_RESPONSE:
+		st->phase = CAM_PHASE_STOPPED;
+		return 0;
+	case CAM_MSG_STREAM_LIST_RESPONSE:
+		if (st->phase != CAM_PHASE_STREAM_LIST) return 0;
+		st->phase = CAM_PHASE_MEDIA_LIST;
+		return action_send(act, 1,
+		    rdp_cam_build_media_type_list_request(act->send,
+			sizeof act->send, st->version, 0));
+	case CAM_MSG_MEDIA_TYPE_LIST_RESPONSE:
+		if (st->phase != CAM_PHASE_MEDIA_LIST) return 0;
+		if (pick_media_type(&m, &st->sel) != 0) {
+			st->phase = CAM_PHASE_STOPPED;  /* no usable format */
+			return 0;
+		}
+		st->sel_valid = 1;
+		st->phase = CAM_PHASE_STARTING;
+		return action_send(act, 1,
+		    rdp_cam_build_start_streams_request(act->send,
+			sizeof act->send, st->version, 0, &st->sel));
+	case CAM_MSG_SAMPLE_RESPONSE:
+		if (st->phase != CAM_PHASE_STREAMING || !st->sel_valid)
+			return 0;
+		if (m.sample != NULL && m.sample_len > 0) {
+			act->have_frame = 1;
+			act->frame = m.sample;
+			act->frame_len = m.sample_len;
+			act->frame_fmt = st->sel;
+		}
+		/* Re-grant one credit so the next frame flows. */
+		return action_send(act, 1,
+		    rdp_cam_build_sample_request(act->send,
+			sizeof act->send, st->version, 0));
+	case CAM_MSG_SAMPLE_ERROR_RESPONSE:
+		if (st->phase != CAM_PHASE_STREAMING) return 0;
+		return action_send(act, 1,
+		    rdp_cam_build_sample_request(act->send,
+			sizeof act->send, st->version, 0));
+	default:
+		return 0;
+	}
+}

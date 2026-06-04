@@ -78,6 +78,7 @@
 #include "../channels/rdpsnd.h"
 #include "../channels/sndin.h"
 #include "../channels/rdpei.h"
+#include "../channels/cam.h"
 #include "../channels/rdpgfx.h"
 #include "../channels/autodetect.h"
 #include "../channels/rail.h"
@@ -1213,6 +1214,9 @@ struct dynvc_state {
 	uint16_t channel_id;
 	struct drdynvc_state dv;
 	struct sndin_state   sndin;  /* AUDIO_INPUT (microphone) negotiation */
+	struct rdp_cam_state cam;    /* MS-RDPECAM camera negotiation */
+	uint8_t *cam_frame;          /* reusable header+frame forward buffer */
+	size_t   cam_frame_cap;
 };
 
 struct snd_state {
@@ -1457,6 +1461,10 @@ static struct rail_state g_rail;   /* RAIL channel, set during channel join */
 /* Offer the AUDIO_INPUT (microphone) dynamic channel; default on, cleared
  * by rdpd -m.  When off the channel is simply never created. */
 static int g_allow_microphone = 1;
+/* Offer MS-RDPECAM client camera redirection; default off (camera is
+ * privacy-sensitive), set by rdpd -C.  When off the channel is never
+ * created. */
+static int g_allow_camera;
 
 /* Try to recognise a channel-bearing TPKT/MCS SDR and dispatch.
  * Returns 1 if handled, 0 if not, -1 on disconnect, 2 if a resize
@@ -1579,6 +1587,19 @@ maybe_dispatch_clip(struct rdp_tls *t, int be_fd,
 						dv->channel_id, rc_buf,
 						(size_t)rn);
 			}
+			/* Camera redirection (MS-RDPECAM) is opt-in via -C: offer
+			 * only the enumerator channel here; the per-device channel
+			 * is opened later, when the client announces a camera. */
+			if (rc == 5 && g_allow_camera
+			    && !dv->dv.camenum_create_pending
+			    && dv->dv.camenum_channel_id < 0) {
+				uint8_t cc[64];
+				ssize_t cn = rdp_drdynvc_build_create_cam_enum(
+					&dv->dv, cc, sizeof cc);
+				if (cn > 0)
+					(void)send_clip_pdu(t, cs->user_id,
+						dv->channel_id, cc, (size_t)cn);
+			}
 			if (rc == 7) return 7;
 			if (rc == 8) return 11;   /* DisplayControl up */
 			if (rc == 10) return 14;  /* AUDIO_INPUT up: send Version */
@@ -1617,6 +1638,20 @@ maybe_dispatch_clip(struct rdp_tls *t, int be_fd,
 				if (out_gfx) *out_gfx = gfx_data;
 				if (out_gfx_len) *out_gfx_len = gfx_len;
 				return 16;
+			}
+			if (rc == 13) return 17;  /* camera enumerator up */
+			if (rc == 14) return 18;  /* camera device up: Activate */
+			/* Camera enumerator/device PDU: surface it for the proxy
+			 * loop, which drives the negotiation and forwards frames. */
+			if (rc == 15 && gfx_data != NULL && gfx_len > 0) {
+				if (out_gfx) *out_gfx = gfx_data;
+				if (out_gfx_len) *out_gfx_len = gfx_len;
+				return 19;
+			}
+			if (rc == 16 && gfx_data != NULL && gfx_len > 0) {
+				if (out_gfx) *out_gfx = gfx_data;
+				if (out_gfx_len) *out_gfx_len = gfx_len;
+				return 20;
 			}
 		}
 		return 1;
@@ -2082,6 +2117,64 @@ static int g_allow_v10_avc;
 static int g_allow_progressive;
 static int g_allow_avc444;
 static int g_allow_autodetect;
+
+/* Apply one camera negotiation action: send the request/response on the right
+ * camera channel, open the per-device channel when a camera is announced, and
+ * forward one raw frame to the session as an RDP_BE_CAMERA message. */
+static void
+cam_forward_action(struct rdp_tls *t, uint32_t user_id, int be_fd,
+		struct dynvc_state *dv, const struct rdp_cam_action *act)
+{
+	if (act->send_chan == 0 && act->send_len > 0
+	    && dv->dv.camenum_channel_id >= 0)
+		(void)send_drdynvc_data(t, user_id, dv->channel_id,
+			dv->dv.camenum_channel_id, act->send, act->send_len);
+	else if (act->send_chan == 1 && act->send_len > 0
+	    && dv->dv.camdev_channel_id >= 0)
+		(void)send_drdynvc_data(t, user_id, dv->channel_id,
+			dv->dv.camdev_channel_id, act->send, act->send_len);
+
+	if (act->open_device && !dv->dv.camdev_create_pending
+	    && dv->dv.camdev_channel_id < 0) {
+		uint8_t cc[300];
+		ssize_t cn = rdp_drdynvc_build_create_cam_device(&dv->dv,
+			act->dev_name, act->dev_name_len, cc, sizeof cc);
+		if (cn > 0)
+			(void)send_clip_pdu(t, user_id, dv->channel_id,
+				cc, (size_t)cn);
+	}
+
+	/* Camera unplugged: close the device channel and reset its id so a
+	 * later DeviceAdded re-opens it. */
+	if (act->close_device && dv->dv.camdev_channel_id > 0) {
+		uint8_t cl[8];
+		ssize_t cn = rdp_drdynvc_build_close_cam_device(&dv->dv,
+			cl, sizeof cl);
+		if (cn > 0)
+			(void)send_clip_pdu(t, user_id, dv->channel_id,
+				cl, (size_t)cn);
+	}
+
+	if (act->have_frame && act->frame != NULL && act->frame_len > 0
+	    && act->frame_len <= RDP_BE_CAMERA_MAX) {
+		size_t need = sizeof(struct rdp_be_camera) + act->frame_len;
+		struct rdp_be_camera ch;
+		if (need > dv->cam_frame_cap) {
+			uint8_t *nb = realloc(dv->cam_frame, need);
+			if (nb == NULL) return;        /* drop this frame */
+			dv->cam_frame = nb;
+			dv->cam_frame_cap = need;
+		}
+		memset(&ch, 0, sizeof ch);
+		ch.format = act->frame_fmt.format;
+		ch.width = act->frame_fmt.width;
+		ch.height = act->frame_fmt.height;
+		ch.size = (uint32_t)act->frame_len;
+		memcpy(dv->cam_frame, &ch, sizeof ch);
+		memcpy(dv->cam_frame + sizeof ch, act->frame, act->frame_len);
+		(void)rdp_be_send(be_fd, RDP_BE_CAMERA, dv->cam_frame, need);
+	}
+}
 
 static void
 run_proxy(struct rdp_tls *t, int be_fd,
@@ -2576,6 +2669,28 @@ run_proxy(struct rdp_tls *t, int be_fd,
 						}
 					}
 				}
+				if (r == 18) {
+					/* Camera device channel open: send the
+					 * Activate to start the device negotiation. */
+					struct rdp_cam_action act;
+					if (rdp_cam_device_opened(&dv->cam,
+						&act) == 0)
+						cam_forward_action(t, user_id,
+							be_fd, dv, &act);
+				}
+				if ((r == 19 || r == 20) && gfx_pdu != NULL) {
+					/* Camera PDU on the enumerator (19) or
+					 * device (20) channel: drive the
+					 * negotiation and forward frames. */
+					struct rdp_cam_action act;
+					int ch = (r == 19) ? 0 : 1;
+					if (rdp_cam_negotiate(&dv->cam, ch,
+						gfx_pdu, gfx_pdu_len, &act) == 0)
+						cam_forward_action(t, user_id,
+							be_fd, dv, &act);
+				}
+				/* r == 17 (camera enumerator up): nothing to
+				 * send; the client now sends SelectVersionRequest. */
 				/* Untouched TPKTs (Shutdown, etc.) silently
 				 * ignored.  MCS Disconnect already handled. */
 			} else {
@@ -3388,6 +3503,9 @@ out:
 	if (prog != NULL) rdp_progressive_close(prog);
 	free(frame_buf);
 	rdp_drdynvc_cleanup(&dv->dv);
+	free(dv->cam_frame);
+	dv->cam_frame = NULL;
+	dv->cam_frame_cap = 0;
 	/* Free any in-flight print job spool copies. */
 	{
 		int pj;
@@ -3464,6 +3582,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 	g_allow_autodetect = cfg->allow_autodetect;
 	g_prefer_wan_audio = cfg->prefer_wan_audio;
 	g_allow_microphone = cfg->allow_microphone;
+	g_allow_camera = cfg->allow_camera;
 	struct dynvc_state dynvc = {0};
 	struct snd_state snd = {0};
 	struct dr_state devr = {0};
@@ -3476,7 +3595,10 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 	dynvc.dv.gfx_channel_id = -1;
 	dynvc.dv.audioin_channel_id = -1;
 	dynvc.dv.rdpei_channel_id = -1;
+	dynvc.dv.camenum_channel_id = -1;
+	dynvc.dv.camdev_channel_id = -1;
 	rdp_sndin_init(&dynvc.sndin);
+	rdp_cam_state_init(&dynvc.cam);
 	memset(&client_info, 0, sizeof client_info);
 	peer_to_ip(peer, client_ip, sizeof client_ip);
 

@@ -356,6 +356,34 @@ test_cam_create_response(void)
 		&w, &h, &od, &ol);
 	if (r != 0) FAIL("cam_dev decline r=%d (want 0)", r);
 	if (st.camdev_channel_id != -1) FAIL("cam_dev id not cleared");
+
+	/* The device-channel Close builder resets the id for a replug. */
+	memset(&st, 0, sizeof st);
+	(void)rdp_drdynvc_build_create_cam_device(&st, "cam0", 4, out, sizeof out);
+	{
+		ssize_t cn = rdp_drdynvc_build_close_cam_device(&st, out,
+			sizeof out);
+		if (cn != 2) FAIL("cam close len %zd", (ssize_t)cn);
+		if (out[0] != ((DRDYNVC_CMD_CLOSE << 4) | 0) ||
+		    out[1] != CAMDEV_CHAN) FAIL("cam close bytes");
+		if (st.camdev_channel_id != -1 || st.camdev_create_pending)
+			FAIL("cam close not reset");
+		if (rdp_drdynvc_build_close_cam_device(&st, out, sizeof out)
+		    != -1) FAIL("cam close with no device accepted");
+	}
+
+	/* A client-initiated Close of the device channel resets the id. */
+	memset(&st, 0, sizeof st);
+	st.camdev_channel_id = CAMDEV_CHAN;
+	{
+		uint8_t cl[2];
+		cl[0] = (uint8_t)((DRDYNVC_CMD_CLOSE << 4) | 0);
+		cl[1] = CAMDEV_CHAN;
+		(void)rdp_drdynvc_handle(&st, cl, sizeof cl, resp, sizeof resp,
+			&resp_len, &w, &h, &od, &ol);
+		if (st.camdev_channel_id != -1)
+			FAIL("client close did not reset id");
+	}
 }
 
 /* Camera DATA passthrough, reassembly, and the per-channel-buffer guarantee. */

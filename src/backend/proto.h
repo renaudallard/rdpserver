@@ -145,10 +145,25 @@
  *         report the whole desktop as one seamless window. */
 #define RDP_BE_RAIL            25u  /* worker -> session */
 
+/* Camera redirection (MS-RDPECAM).
+ *   CAMERA  worker -> session: one raw video frame the client sent over the
+ *           per-device camera dynamic virtual channel.  The payload is a
+ *           struct rdp_be_camera header (format + width/height + size)
+ *           followed by `size` bytes of the frame in the negotiated
+ *           uncompressed format (NV12, I420, YUY2, or RGB).  The worker only
+ *           selects raw formats, so the session writes the frame straight to a
+ *           V4L2 loopback device without decoding. */
+#define RDP_BE_CAMERA          26u  /* worker -> session */
+
 /* Upper bound on the PCM bytes the worker forwards in one AUDIO_INPUT
  * message.  A client Data PDU larger than this is split into multiple
  * AUDIO_INPUT messages so a single chunk stays bounded. */
 #define RDP_BE_AUDIO_INPUT_MAX (64u * 1024u)
+
+/* Upper bound on a forwarded camera frame, matched to the 4 MiB DVC
+ * reassembly ceiling.  The worker only selects media types whose raw frame
+ * fits this, so one CAMERA message stays bounded. */
+#define RDP_BE_CAMERA_MAX  (4u * 1024u * 1024u)
 
 #define RDP_FS_OPEN        1u
 #define RDP_FS_READ        2u
@@ -349,6 +364,16 @@ struct rdp_be_window {
 struct rdp_be_rail {
 	uint32_t width;
 	uint32_t height;
+};
+
+/* CAMERA payload header (worker -> session): the raw frame format and
+ * geometry; `size` bytes of frame data follow immediately. */
+struct rdp_be_camera {
+	uint8_t  format;     /* CAM_FORMAT_* (see channels/cam.h) */
+	uint8_t  pad[3];
+	uint32_t width;
+	uint32_t height;
+	uint32_t size;       /* frame bytes following this header */
 };
 
 /* CLIP_OFFER payload: just a u32 format bitmap. */

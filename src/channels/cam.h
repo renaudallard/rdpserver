@@ -112,6 +112,16 @@
 #define CAM_MAX_STREAMS      8
 #define CAM_MAX_MEDIA_TYPES  64
 
+/* Upper bound on a selected raw frame.  It must fit the 4 MiB DVC reassembly
+ * ceiling (a SampleResponse PDU carrying a larger frame would be rejected), so
+ * media types whose raw frame exceeds this are not selected. */
+#define CAM_FRAME_MAX  (0x3F0000u)   /* ~3.9 MiB, headroom under 4 MiB */
+
+/* Upper bound on a client-supplied per-device channel name (its
+ * DeviceAddedNotification VirtualChannelName).  A longer name is rejected
+ * before any state is committed. */
+#define CAM_DEV_NAME_MAX  250
+
 /* CAM_MEDIA_TYPE_DESCRIPTION (26 bytes on the wire). */
 struct rdp_cam_media_type {
 	uint8_t  format;
@@ -199,5 +209,57 @@ ssize_t rdp_cam_build_sample_request(uint8_t *out, size_t cap,
     uint8_t version, uint8_t stream_index);
 ssize_t rdp_cam_build_property_list_request(uint8_t *out, size_t cap,
     uint8_t version);
+
+/* ---- server-side negotiation state machine ---------------------------- */
+
+/* The server drives one camera device: it agrees a version on the enumerator
+ * channel, then activates the device, lists its streams and media types,
+ * selects a raw format, and pulls frames one credit at a time (a SampleRequest
+ * per frame). */
+enum rdp_cam_phase {
+	CAM_PHASE_INIT = 0,    /* waiting for SelectVersion / DeviceAdded */
+	CAM_PHASE_ACTIVATING,  /* device channel open, Activate sent */
+	CAM_PHASE_STREAM_LIST, /* waiting for StreamListResponse */
+	CAM_PHASE_MEDIA_LIST,  /* waiting for MediaTypeListResponse */
+	CAM_PHASE_STARTING,    /* StartStreams sent, waiting for Success */
+	CAM_PHASE_STREAMING,   /* pulling SampleResponse frames */
+	CAM_PHASE_STOPPED      /* an error or no usable format stopped it */
+};
+
+struct rdp_cam_state {
+	int      phase;
+	uint8_t  version;           /* negotiated protocol version */
+	int      have_device;       /* a per-device channel is in use */
+	int      sel_valid;
+	struct rdp_cam_media_type sel;  /* the selected media type */
+};
+
+/* What the caller should do after one rdp_cam_negotiate() / device-opened
+ * call.  Pointer fields alias the input PDU and are valid only while it is. */
+struct rdp_cam_action {
+	int      send_chan;         /* -1 none, 0 enumerator, 1 device */
+	uint8_t  send[64];          /* a small request/response PDU to send */
+	size_t   send_len;
+	int      open_device;       /* open the device channel named below */
+	const char *dev_name;       /* not NUL terminated */
+	size_t   dev_name_len;
+	int      close_device;      /* tear down the device channel (replug) */
+	int      have_frame;        /* forward a video frame */
+	const uint8_t *frame;
+	size_t   frame_len;
+	struct rdp_cam_media_type frame_fmt;  /* format/geometry of the frame */
+};
+
+void rdp_cam_state_init(struct rdp_cam_state *st);
+
+/* The device channel was just opened: the caller should send the returned
+ * Activate request (act->send on channel 1).  Returns 0, or -1 on error. */
+int rdp_cam_device_opened(struct rdp_cam_state *st, struct rdp_cam_action *act);
+
+/* Drive the negotiation from one inbound PDU.  chan is 0 for the enumerator
+ * channel or 1 for the device channel.  Fills *act with the next action.
+ * Returns 0 on success, -1 on a protocol error (the caller may tear down). */
+int rdp_cam_negotiate(struct rdp_cam_state *st, int chan,
+    const uint8_t *in, size_t in_len, struct rdp_cam_action *act);
 
 #endif /* RDP_CAM_H */

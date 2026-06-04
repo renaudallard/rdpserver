@@ -323,12 +323,165 @@ test_bad(void)
 	}
 }
 
+static void
+put32le(uint8_t *p, uint32_t v)
+{
+	p[0] = (uint8_t)(v & 0xff);
+	p[1] = (uint8_t)((v >> 8) & 0xff);
+	p[2] = (uint8_t)((v >> 16) & 0xff);
+	p[3] = (uint8_t)((v >> 24) & 0xff);
+}
+
+/* Drive the full server negotiation through one camera, checking every
+ * request the server emits and that a frame is forwarded with a credit
+ * re-grant. */
+static void
+test_negotiate(void)
+{
+	struct rdp_cam_state st;
+	struct rdp_cam_action act;
+
+	rdp_cam_state_init(&st);
+
+	/* Enumerator: SelectVersionRequest -> SelectVersionResponse. */
+	{
+		const uint8_t s[] = { 0x02, 0x03 };
+		if (rdp_cam_negotiate(&st, 0, s, sizeof s, &act) != 0)
+			FAIL("neg select");
+		if (act.send_chan != 0 || act.send_len != 2 ||
+		    act.send[1] != CAM_MSG_SELECT_VERSION_RESPONSE)
+			FAIL("neg select resp");
+	}
+	/* Enumerator: DeviceAdded -> open the device channel. */
+	{
+		const uint8_t d[] = {
+			0x02, 0x05, 'H', 0x00, 'i', 0x00, 0x00, 0x00,
+			'c', 'a', 'm', '0', 0x00
+		};
+		if (rdp_cam_negotiate(&st, 0, d, sizeof d, &act) != 0)
+			FAIL("neg add");
+		if (!act.open_device || act.dev_name_len != 4 ||
+		    memcmp(act.dev_name, "cam0", 4) != 0)
+			FAIL("neg add open");
+		if (!st.have_device) FAIL("neg add state");
+	}
+	/* Device opened -> Activate. */
+	if (rdp_cam_device_opened(&st, &act) != 0) FAIL("neg opened");
+	if (act.send_chan != 1 || act.send[1] != CAM_MSG_ACTIVATE_DEVICE_REQUEST)
+		FAIL("neg activate");
+	if (st.phase != CAM_PHASE_ACTIVATING) FAIL("neg activate phase");
+	/* Success -> StreamListRequest. */
+	{
+		const uint8_t ok[] = { 0x02, 0x01 };
+		if (rdp_cam_negotiate(&st, 1, ok, sizeof ok, &act) != 0)
+			FAIL("neg ok1");
+		if (act.send_chan != 1 ||
+		    act.send[1] != CAM_MSG_STREAM_LIST_REQUEST)
+			FAIL("neg streamlist req");
+	}
+	/* StreamListResponse -> MediaTypeListRequest. */
+	{
+		const uint8_t s[] = { 0x02, 0x0A, 0x01, 0x00, 0x01, 0x01, 0x00 };
+		if (rdp_cam_negotiate(&st, 1, s, sizeof s, &act) != 0)
+			FAIL("neg streamlist resp");
+		if (act.send[1] != CAM_MSG_MEDIA_TYPE_LIST_REQUEST ||
+		    act.send[2] != 0)
+			FAIL("neg mediatype req");
+	}
+	/* MediaTypeListResponse (NV12 640x480, raw) -> StartStreamsRequest. */
+	{
+		uint8_t s[2 + 26];
+		memset(s, 0, sizeof s);
+		s[0] = 0x02; s[1] = 0x0C;
+		s[2] = CAM_FORMAT_NV12;
+		put32le(s + 3, 640);
+		put32le(s + 7, 480);
+		put32le(s + 11, 30);
+		put32le(s + 15, 1);
+		if (rdp_cam_negotiate(&st, 1, s, sizeof s, &act) != 0)
+			FAIL("neg mediatype resp");
+		if (act.send[1] != CAM_MSG_START_STREAMS_REQUEST)
+			FAIL("neg startstreams");
+		if (!st.sel_valid || st.sel.format != CAM_FORMAT_NV12 ||
+		    st.sel.width != 640 || st.sel.height != 480)
+			FAIL("neg selected media");
+		if (st.phase != CAM_PHASE_STARTING) FAIL("neg starting phase");
+	}
+	/* Success -> first SampleRequest. */
+	{
+		const uint8_t ok[] = { 0x02, 0x01 };
+		if (rdp_cam_negotiate(&st, 1, ok, sizeof ok, &act) != 0)
+			FAIL("neg ok2");
+		if (act.send[1] != CAM_MSG_SAMPLE_REQUEST)
+			FAIL("neg sample req");
+		if (st.phase != CAM_PHASE_STREAMING) FAIL("neg streaming phase");
+	}
+	/* SampleResponse -> forward the frame AND re-grant a credit. */
+	{
+		const uint8_t s[] = { 0x02, 0x12, 0x00, 'F', 'R', 'A', 'M', 'E' };
+		if (rdp_cam_negotiate(&st, 1, s, sizeof s, &act) != 0)
+			FAIL("neg sample resp");
+		if (!act.have_frame || act.frame_len != 5 ||
+		    memcmp(act.frame, "FRAME", 5) != 0)
+			FAIL("neg frame");
+		if (act.frame_fmt.format != CAM_FORMAT_NV12)
+			FAIL("neg frame fmt");
+		if (act.send_chan != 1 || act.send[1] != CAM_MSG_SAMPLE_REQUEST)
+			FAIL("neg credit re-grant");
+	}
+
+	/* A device offering only a decoding-required format yields no stream. */
+	{
+		struct rdp_cam_state st2;
+		uint8_t s[2 + 26];
+		rdp_cam_state_init(&st2);
+		st2.phase = CAM_PHASE_MEDIA_LIST;
+		memset(s, 0, sizeof s);
+		s[0] = 0x02; s[1] = 0x0C;
+		s[2] = CAM_FORMAT_MJPG;
+		put32le(s + 3, 1280); put32le(s + 7, 720);
+		s[27] = CAM_MT_FLAG_DECODING_REQUIRED;
+		if (rdp_cam_negotiate(&st2, 1, s, sizeof s, &act) != 0)
+			FAIL("neg mjpg resp");
+		if (act.send_chan != -1 || st2.phase != CAM_PHASE_STOPPED)
+			FAIL("neg mjpg not stopped");
+	}
+
+	/* An oversized device name is rejected without latching have_device. */
+	{
+		struct rdp_cam_state st3;
+		uint8_t big[2 + 2 + 300 + 1];
+		size_t i;
+		rdp_cam_state_init(&st3);
+		big[0] = 0x02; big[1] = 0x05;
+		big[2] = 0x00; big[3] = 0x00;          /* empty device name */
+		for (i = 0; i < 300; i++) big[4 + i] = 'x';
+		big[4 + 300] = 0x00;
+		if (rdp_cam_negotiate(&st3, 0, big, sizeof big, &act) != 0)
+			FAIL("neg oversize add");
+		if (act.open_device || st3.have_device)
+			FAIL("neg oversize latched");
+	}
+
+	/* DeviceRemoved clears the device and asks the caller to close it. */
+	{
+		const uint8_t rm[] = { 0x02, 0x06, 'c', 'a', 'm', '0', 0x00 };
+		/* st still has have_device set from the flow above. */
+		if (rdp_cam_negotiate(&st, 0, rm, sizeof rm, &act) != 0)
+			FAIL("neg removed");
+		if (!act.close_device || st.have_device ||
+		    st.phase != CAM_PHASE_INIT)
+			FAIL("neg removed state");
+	}
+}
+
 int
 main(void)
 {
 	test_build();
 	test_parse();
 	test_bad();
+	test_negotiate();
 	(void)printf("cam_test: all ok\n");
 	return 0;
 }

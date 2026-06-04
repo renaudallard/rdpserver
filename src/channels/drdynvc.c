@@ -637,12 +637,27 @@ rdp_drdynvc_handle(struct drdynvc_state *st,
 		uint32_t chan_id;
 		size_t id_len;
 		if (read_channel_id(pdu + 1, len - 1, cbId,
-			&chan_id, &id_len) == 0
-		    && (int)chan_id == st->gfx_channel_id) {
+			&chan_id, &id_len) != 0)
+			return 0;
+		if ((int)chan_id == st->gfx_channel_id) {
 			rdp_info("drdynvc: GFX channel %u closed by client",
 				(unsigned)chan_id);
 			st->gfx_channel_id = -1;
 			return 7;
+		}
+		/* Reset a camera channel the client closed so it can be
+		 * re-created (e.g. a camera unplug/replug). */
+		if (st->camdev_channel_id > 0
+		    && (int)chan_id == st->camdev_channel_id) {
+			st->camdev_channel_id = -1;
+			st->camdev_create_pending = 0;
+			return 0;
+		}
+		if (st->camenum_channel_id > 0
+		    && (int)chan_id == st->camenum_channel_id) {
+			st->camenum_channel_id = -1;
+			st->camenum_create_pending = 0;
+			return 0;
 		}
 		return 0;
 	}
@@ -662,8 +677,8 @@ rdp_drdynvc_handle(struct drdynvc_state *st,
 #define CAMDEV_SERVER_CHAN_ID 6
 /* Upper bound on a client-supplied per-device channel name, so an
  * attacker-controlled DeviceAddedNotification cannot drive an oversized
- * Create Request. */
-#define CAMDEV_NAME_MAX 250
+ * Create Request.  Shared with the cam negotiation (cam.h). */
+#define CAMDEV_NAME_MAX CAM_DEV_NAME_MAX
 
 ssize_t
 rdp_drdynvc_build_create_gfx(struct drdynvc_state *st,
@@ -766,6 +781,19 @@ rdp_drdynvc_build_create_cam_device(struct drdynvc_state *st,
 	st->camdev_channel_id = CAMDEV_SERVER_CHAN_ID;
 	st->camdev_create_pending = 1;
 	return (ssize_t)total;
+}
+
+ssize_t
+rdp_drdynvc_build_close_cam_device(struct drdynvc_state *st,
+		uint8_t *out, size_t cap)
+{
+	if (st->camdev_channel_id <= 0) return -1;  /* nothing to close */
+	if (cap < 2) return -1;
+	out[0] = (uint8_t)((DRDYNVC_CMD_CLOSE << 4) | 0);  /* cbId 0: 1-byte id */
+	out[1] = (uint8_t)st->camdev_channel_id;
+	st->camdev_channel_id = -1;
+	st->camdev_create_pending = 0;
+	return 2;
 }
 
 /* MS-RDPEDISP 2.2.2.1 DISPLAYCONTROL_CAPS_PDU: the server's monitor

@@ -136,6 +136,12 @@ ssize_t rdp_drdynvc_build_create_cam_enum(struct drdynvc_state *st,
 ssize_t rdp_drdynvc_build_create_cam_device(struct drdynvc_state *st,
 		const char *name, size_t name_len, uint8_t *out, size_t cap);
 
+/* Build a DRDYNVC Close for the per-device camera channel and reset its id so
+ * a later DeviceAdded can re-open it (camera replug).  Returns -1 if no device
+ * channel is open. */
+ssize_t rdp_drdynvc_build_close_cam_device(struct drdynvc_state *st,
+		uint8_t *out, size_t cap);
+
 /* Build a DISPLAYCONTROL_CAPS_PDU (MS-RDPEDISP) inner payload. */
 ssize_t rdp_drdynvc_build_disp_caps(uint8_t *out, size_t cap);
 
