@@ -50,7 +50,7 @@ test_demand_active(void)
 	uint16_t cap_count;
 
 	n = rdp_capset_build_demand_active(buf, sizeof buf, 0x103EAu,
-		1280, 720, 0);
+		1280, 720, 0, 0);
 	if (n < 32) FAIL("demand active too short: %lld", (long long)n);
 	/* shareId = 0x103EA at offset 0 (LE). */
 	if (buf[0] != 0xea || buf[1] != 0x03 || buf[2] != 0x01 || buf[3] != 0)
@@ -66,10 +66,17 @@ test_demand_active(void)
 
 	/* RemoteApp mode adds the RAIL and Window List capability sets. */
 	n = rdp_capset_build_demand_active(buf, sizeof buf, 0x103EAu,
-		1280, 720, 1);
+		1280, 720, 1, 0);
 	if (n < 32) FAIL("remoteapp demand active too short");
 	cap_count = (uint16_t)buf[12] | ((uint16_t)buf[13] << 8);
 	if (cap_count != 13) FAIL("remoteapp cap_count = %u", cap_count);
+
+	/* Bitmap cache adds the Rev2 and host-support capability sets. */
+	n = rdp_capset_build_demand_active(buf, sizeof buf, 0x103EAu,
+		1280, 720, 0, 1);
+	if (n < 32) FAIL("bitmap-cache demand active too short");
+	cap_count = (uint16_t)buf[12] | ((uint16_t)buf[13] << 8);
+	if (cap_count != 13) FAIL("bitmap-cache cap_count = %u", cap_count);
 }
 
 int

@@ -34,7 +34,8 @@ WIRE_OBJS = \
 	src/wire/h264enc.o \
 	src/wire/avc444.o \
 	src/wire/progressive.o \
-	src/wire/order.o
+	src/wire/order.o \
+	src/wire/bmpcache.o
 
 WIRE_LIB = src/wire/libwire.a
 
@@ -121,6 +122,7 @@ REGRESS_PROGS = \
 	regress/wire/rail_test \
 	regress/wire/cam_test \
 	regress/wire/order_test \
+	regress/wire/bmpcache_test \
 	$(FUSE_REGRESS) \
 	$(OBSD_FUSE_REGRESS)
 
@@ -329,6 +331,12 @@ regress/wire/order_test: regress/wire/order_test.c src/wire/order.c \
 	$(CC) $(CFLAGS) $(TEST_SAN) -Isrc/include \
 		-o $@ regress/wire/order_test.c src/wire/order.c \
 		src/common/buf.c
+
+# Persistent bitmap cache key-list parser.  bmpcache.c is recompiled with the
+# test so $(TEST_SAN) covers the attacker-controlled key-count bounds.
+regress/wire/bmpcache_test: regress/wire/bmpcache_test.c src/wire/bmpcache.c
+	$(CC) $(CFLAGS) $(TEST_SAN) -Isrc/include \
+		-o $@ regress/wire/bmpcache_test.c src/wire/bmpcache.c
 
 # Printer module unit test.  printer.c is recompiled with the test so the
 # sanitization and the wire header layout are covered directly; $(TEST_SAN)

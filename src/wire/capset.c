@@ -120,10 +120,11 @@ write_cap_bitmap(struct rdp_buf *b, uint16_t w, uint16_t h)
 }
 
 static int
-write_cap_order(struct rdp_buf *b)
+write_cap_order(struct rdp_buf *b, int memblt)
 {
 	uint8_t *hdr; size_t *p; size_t start;
 	uint8_t zero32[32] = {0};
+	uint8_t order_support[32] = {0};
 	if (cap_open(b, RDP_CAP_ORDER, &p, &hdr) != 0) return -1;
 	start = rdp_buf_used(b);
 	/* terminalDescriptor: 16 ANSI bytes (unused). */
@@ -135,8 +136,11 @@ write_cap_order(struct rdp_buf *b)
 	if (rdp_buf_put_u16le(b, 1) != 0) return -1;    /* maximumOrderLevel */
 	if (rdp_buf_put_u16le(b, 0) != 0) return -1;    /* numberFonts */
 	if (rdp_buf_put_u16le(b, 0x0002) != 0) return -1; /* NEGOTIATE_ORDER_SUPPORT */
-	/* orderSupport[32]: all zero -- we negotiate no drawing orders. */
-	if (rdp_buf_put(b, zero32, 32) != 0) return -1;
+	/* orderSupport[32]: advertise MemBlt only when the bitmap cache is on,
+	 * otherwise no drawing orders. */
+	if (memblt)
+		order_support[RDP_ORDER_NEG_MEMBLT_INDEX] = 1;
+	if (rdp_buf_put(b, order_support, 32) != 0) return -1;
 	if (rdp_buf_put_u16le(b, 0) != 0) return -1;    /* textFlags */
 	if (rdp_buf_put_u16le(b, 0) != 0) return -1;    /* orderSupportExFlags */
 	if (rdp_buf_put_u32le(b, 0) != 0) return -1;    /* pad4B */
@@ -149,16 +153,46 @@ write_cap_order(struct rdp_buf *b)
 	return 0;
 }
 
-__attribute__((unused)) static int
-write_cap_bitmapcache(struct rdp_buf *b)
+/* Bitmap Cache Rev2 (MS-RDPBCGR 2.2.7.1.4.2): three persistent cells.  Only the
+ * slot counts are sent; the cell sizes are fixed by the cell index. */
+static int
+write_cap_bitmapcache_rev2(struct rdp_buf *b)
 {
 	uint8_t *hdr; size_t *p; size_t start;
-	uint8_t zero[36] = {0};
-	if (cap_open(b, RDP_CAP_BITMAPCACHE, &p, &hdr) != 0) return -1;
+	uint8_t pad3[12] = {0};
+	/* Cell slot counts; bit 31 of each marks the cell persistent. */
+	static const uint32_t cell[5] = { 120, 120, 336, 0, 0 };
+	int i;
+	if (cap_open(b, RDP_CAP_BITMAPCACHE_REV2, &p, &hdr) != 0) return -1;
 	start = rdp_buf_used(b);
-	/* 24 bytes of pad4 followed by three (entries16, size16) pairs
-	 * we leave at 0 -- effectively "no bitmap caching." */
-	if (rdp_buf_put(b, zero, 36) != 0) return -1;
+	if (rdp_buf_put_u16le(b,
+		CBR2_PERSISTENT_KEYS_EXPECTED | CBR2_ALLOW_CACHE_WAITING_LIST)
+		!= 0) return -1;                         /* cacheFlags */
+	if (rdp_buf_put_u8(b, 0) != 0) return -1;        /* pad2 */
+	if (rdp_buf_put_u8(b, 3) != 0) return -1;        /* numCellCaches */
+	for (i = 0; i < 5; i++) {
+		uint32_t info = cell[i];
+		if (i < 3)
+			info |= 0x80000000u;             /* persistent */
+		if (rdp_buf_put_u32le(b, info) != 0) return -1;
+	}
+	if (rdp_buf_put(b, pad3, 12) != 0) return -1;
+	cap_close(b, hdr, start);
+	return 0;
+}
+
+/* Bitmap Cache Host Support (MS-RDPBCGR 2.2.7.2.1): the server keeps a
+ * persistent host cache (cacheVersion = BITMAP_CACHE_V2). */
+static int
+write_cap_bitmapcache_hostsupport(struct rdp_buf *b)
+{
+	uint8_t *hdr; size_t *p; size_t start;
+	if (cap_open(b, RDP_CAP_BITMAPCACHE_HOSTSUPPORT, &p, &hdr) != 0)
+		return -1;
+	start = rdp_buf_used(b);
+	if (rdp_buf_put_u8(b, 0x01) != 0) return -1;     /* cacheVersion = V2 */
+	if (rdp_buf_put_u8(b, 0) != 0) return -1;        /* pad1 */
+	if (rdp_buf_put_u16le(b, 0) != 0) return -1;     /* pad2 */
 	cap_close(b, hdr, start);
 	return 0;
 }
@@ -353,7 +387,7 @@ write_cap_window(struct rdp_buf *b)
 ssize_t
 rdp_capset_build_demand_active(uint8_t *out, size_t cap,
 		uint32_t share_id, uint16_t desktop_w, uint16_t desktop_h,
-		int remoteapp)
+		int remoteapp, int bitmap_cache)
 {
 	struct rdp_buf b, cb;
 	uint8_t caps[2048];
@@ -368,7 +402,7 @@ rdp_capset_build_demand_active(uint8_t *out, size_t cap,
 	rdp_buf_init(&cb, caps, sizeof caps);
 	if (write_cap_general(&cb)   != 0) return -1;
 	if (write_cap_bitmap(&cb, desktop_w, desktop_h) != 0) return -1;
-	if (write_cap_order(&cb)     != 0) return -1;
+	if (write_cap_order(&cb, bitmap_cache) != 0) return -1;
 	if (write_cap_pointer(&cb)   != 0) return -1;
 	if (write_cap_input(&cb)     != 0) return -1;
 	if (write_cap_share(&cb)     != 0) return -1;
@@ -385,6 +419,14 @@ rdp_capset_build_demand_active(uint8_t *out, size_t cap,
 	if (remoteapp) {
 		if (write_cap_rail(&cb) != 0) return -1;
 		if (write_cap_window(&cb) != 0) return -1;
+		cap_count += 2;
+	}
+
+	/* Bitmap cache: advertise the Rev2 cache and that the server keeps a
+	 * persistent host cache, so the client sends its persistent key list. */
+	if (bitmap_cache) {
+		if (write_cap_bitmapcache_rev2(&cb) != 0) return -1;
+		if (write_cap_bitmapcache_hostsupport(&cb) != 0) return -1;
 		cap_count += 2;
 	}
 

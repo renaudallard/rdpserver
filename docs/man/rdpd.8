@@ -7,7 +7,7 @@
 .Nd Remote Desktop Protocol server
 .Sh SYNOPSIS
 .Nm
-.Op Fl 4AdfmNPVW
+.Op Fl 4ABCdfmNPVW
 .Op Fl h Ar host
 .Op Fl p Ar port
 .Op Fl S Ar socket
@@ -210,6 +210,14 @@ device
 .Pq see Xr rdp-session 8 .
 A client that does not redirect a camera produces no frames, with no effect on
 the session.
+.It Fl B
+Offer the persistent bitmap cache
+.Pq MS-RDPBCGR, Sy MemBlt No drawing orders
+on the fast-path bitmap path; off by default.
+When set, the server advertises the Bitmap Cache Rev2 and host-support
+capability sets so the client caches repeated tiles and recalls them with
+MemBlt orders, saving bandwidth on the legacy bitmap path
+.Pq it has no effect on a GFX or AVC session .
 .El
 .Sh FILES
 .Bl -tag -width Ds

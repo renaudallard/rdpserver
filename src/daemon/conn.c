@@ -62,6 +62,7 @@
 #include "../wire/sec.h"
 #include "../wire/license.h"
 #include "../wire/capset.h"
+#include "../wire/bmpcache.h"
 #include "../wire/rdp_pdu.h"
 #include "../wire/fastpath.h"
 #include "../greeter/greeter.h"
@@ -1465,6 +1466,10 @@ static int g_allow_microphone = 1;
  * privacy-sensitive), set by rdpd -C.  When off the channel is never
  * created. */
 static int g_allow_camera;
+/* Offer the persistent bitmap cache (drawing orders) on the fast-path bitmap
+ * path; default off, set by rdpd -B.  When off the demand-active is unchanged
+ * and no orders are sent. */
+static int g_allow_bitmap_cache;
 
 /* Try to recognise a channel-bearing TPKT/MCS SDR and dispatch.
  * Returns 1 if handled, 0 if not, -1 on disconnect, 2 if a resize
@@ -1816,6 +1821,22 @@ maybe_dispatch_clip(struct rdp_tls *t, int be_fd,
 						fm, (size_t)fn);
 				return 1;
 			}
+			if (pdu_type2 ==
+			    RDP_PDU2_BITMAPCACHE_PERSISTENT_LIST
+			    && payload_len > 18) {
+				/* The client lists the cached tiles it already
+				 * holds on disk from a prior session.  Parse the
+				 * keys; the cache manager consumes them. */
+				size_t nk = 0;
+				int pf = 0, pl = 0;
+				if (rdp_bmpcache_parse_persistent_list(
+					payload + 18, payload_len - 18,
+					NULL, 0, &nk, &pf, &pl) == 0)
+					rdp_debug("conn[%s]: persistent key "
+						"list: %zu keys (first=%d "
+						"last=%d)", peer, nk, pf, pl);
+				return 1;
+			}
 			if (pdu_type2 == RDP_PDU2_SUPPRESS_OUTPUT) {
 				/* allowDisplayUpdates is the first body
 				 * byte (payload[18]): 0 = suppress output,
@@ -1877,7 +1898,7 @@ do_reactivate(struct rdp_tls *t, int be_fd, uint16_t user_id,
 	{
 		uint8_t caps[2048];
 		ssize_t cn = rdp_capset_build_demand_active(caps, sizeof caps,
-			RDP_CONN_SHARE_ID, new_w, new_h, g_remoteapp);
+			RDP_CONN_SHARE_ID, new_w, new_h, g_remoteapp, g_allow_bitmap_cache);
 		if (cn < 0) return -1;
 		{
 			ssize_t hdr_n = rdp_pdu_build_share_control(pdu,
@@ -3583,6 +3604,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 	g_prefer_wan_audio = cfg->prefer_wan_audio;
 	g_allow_microphone = cfg->allow_microphone;
 	g_allow_camera = cfg->allow_camera;
+	g_allow_bitmap_cache = cfg->allow_bitmap_cache;
 	struct dynvc_state dynvc = {0};
 	struct snd_state snd = {0};
 	struct dr_state devr = {0};
@@ -3914,7 +3936,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 		ssize_t hdr_n;
 
 		cn = rdp_capset_build_demand_active(caps, sizeof caps,
-			RDP_CONN_SHARE_ID, desktop_w, desktop_h, g_remoteapp);
+			RDP_CONN_SHARE_ID, desktop_w, desktop_h, g_remoteapp, g_allow_bitmap_cache);
 		if (cn < 0) goto done;
 		if ((size_t)cn + 6 > sizeof pdu) goto done;
 		hdr_n = rdp_pdu_build_share_control(pdu, sizeof pdu,

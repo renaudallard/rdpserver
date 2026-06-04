@@ -70,11 +70,20 @@
 #define RDP_CAP_BRUSH            0x000F
 #define RDP_CAP_GLYPHCACHE       0x0010
 #define RDP_CAP_OFFSCREENCACHE   0x0011
+#define RDP_CAP_BITMAPCACHE_HOSTSUPPORT 0x0012
+#define RDP_CAP_BITMAPCACHE_REV2 0x0013
 #define RDP_CAP_VIRTUALCHANNEL   0x0014
 #define RDP_CAP_MULTIFRAGMENT    0x001A
 #define RDP_CAP_LARGEPOINTER     0x001B
 #define RDP_CAP_SURFACECOMMANDS  0x001C
 #define RDP_CAP_BITMAPCODECS     0x001D
+
+/* Order capability orderSupport[] index for MemBlt (MS-RDPBCGR 2.2.7.1.3). */
+#define RDP_ORDER_NEG_MEMBLT_INDEX 3
+
+/* Bitmap Cache Rev2 cacheFlags (MS-RDPBCGR 2.2.7.1.4.2). */
+#define CBR2_PERSISTENT_KEYS_EXPECTED 0x0001
+#define CBR2_ALLOW_CACHE_WAITING_LIST 0x0002
 
 /* General capability flags / extra flags. */
 #define RDP_GEN_EXTRA_NO_BITMAP_COMPRESSION_HDR 0x0400
@@ -93,11 +102,13 @@
 /* Build a Demand Active body (after the shareControl header) into
  * out.  share_id is the per-session identifier the server chose;
  * desktop_w/h are the negotiated dimensions.  When remoteapp is nonzero
- * the RAIL and Window List capability sets are added.  Returns bytes
- * written. */
+ * the RAIL and Window List capability sets are added.  When bitmap_cache is
+ * nonzero the Bitmap Cache Rev2 and host-support capability sets are added and
+ * the MemBlt order is advertised, so the server may use the persistent bitmap
+ * cache.  Returns bytes written. */
 ssize_t rdp_capset_build_demand_active(uint8_t *out, size_t cap,
 		uint32_t share_id, uint16_t desktop_w, uint16_t desktop_h,
-		int remoteapp);
+		int remoteapp, int bitmap_cache);
 
 /* Parse a Confirm Active capability blob and extract things we care
  * about: the client's desktop bpp and, when present, the

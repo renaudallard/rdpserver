@@ -150,6 +150,8 @@ usage(const char *prog)
 "            supports it; off by default (PCM, best quality on a LAN)\n"
 "  -m        suppress microphone (AUDIO_INPUT) redirection; on by default\n"
 "  -C        offer client camera (MS-RDPECAM) redirection; off by default\n"
+"  -B        offer the persistent bitmap cache (MemBlt drawing orders) on the\n"
+"            fast-path bitmap path; off by default\n"
 "  -N        run connect-time network auto-detection (RTT and bandwidth)\n"
 "            and cap the H.264 bitrate to the measured link; off by default\n"
 "  -p port   listen port (default %s)\n"
@@ -169,10 +171,11 @@ main(int argc, char *argv[])
 	int debug = 0, foreground = 0, auto_login = 0, allow_v10_avc = 0;
 	int allow_progressive = 0, prefer_wan_audio = 0, allow_microphone = 1;
 	int allow_avc444 = 0, allow_autodetect = 0, allow_camera = 0;
+	int allow_bitmap_cache = 0;
 	int opt, listen_fd;
 	struct rdp_log_cfg lc;
 
-	while ((opt = getopt(argc, argv, "AV4NPWmCdfp:h:S:H?")) != -1) {
+	while ((opt = getopt(argc, argv, "AV4NPWmCBdfp:h:S:H?")) != -1) {
 		switch (opt) {
 		case 'A': auto_login = 1; break;
 		case 'V': allow_v10_avc = 1; break;
@@ -182,6 +185,7 @@ main(int argc, char *argv[])
 		case 'W': prefer_wan_audio = 1; break;
 		case 'm': allow_microphone = 0; break;
 		case 'C': allow_camera = 1; break;
+		case 'B': allow_bitmap_cache = 1; break;
 		case 'd': debug = 1; break;
 		case 'f': foreground = 1; break;
 		case 'p': port = optarg; break;
@@ -268,7 +272,8 @@ main(int argc, char *argv[])
 			struct rdp_conn_cfg ccfg = { tls, sessmgr_sock,
 				auto_login, allow_v10_avc, allow_progressive,
 				prefer_wan_audio, allow_microphone,
-				allow_avc444, allow_autodetect, allow_camera };
+				allow_avc444, allow_autodetect, allow_camera,
+				allow_bitmap_cache };
 			(void)close(listen_fd);
 			/* Worker only needs: TLS read/write on the TCP fd,
 			 * the AF_UNIX socket to sessmgr, and writing tmp/

@@ -56,6 +56,7 @@ struct rdp_conn_cfg {
 	int                 allow_avc444;      /* offer AVC444 (4:4:4 chroma) to v10.x AVC clients */
 	int                 allow_autodetect;  /* connect-time RTT/bandwidth probe, adapts bitrate */
 	int                 allow_camera;      /* offer MS-RDPECAM client camera redirection */
+	int                 allow_bitmap_cache; /* offer the persistent bitmap cache (orders) */
 };
 
 void rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer);
