@@ -1470,6 +1470,9 @@ static int g_allow_camera;
  * path; default off, set by rdpd -B.  When off the demand-active is unchanged
  * and no orders are sent. */
 static int g_allow_bitmap_cache;
+/* Per-connection bitmap cache slot manager (one worker == one connection),
+ * created when g_allow_bitmap_cache is set. */
+static struct rdp_bmpcache *g_bmpcache;
 
 /* Try to recognise a channel-bearing TPKT/MCS SDR and dispatch.
  * Returns 1 if handled, 0 if not, -1 on disconnect, 2 if a resize
@@ -1825,16 +1828,21 @@ maybe_dispatch_clip(struct rdp_tls *t, int be_fd,
 			    RDP_PDU2_BITMAPCACHE_PERSISTENT_LIST
 			    && payload_len > 18) {
 				/* The client lists the cached tiles it already
-				 * holds on disk from a prior session.  Parse the
-				 * keys; the cache manager consumes them. */
+				 * holds on disk from a prior session; load them
+				 * into the cache so they are recalled with
+				 * MemBlt instead of being re-sent. */
 				size_t nk = 0;
 				int pf = 0, pl = 0;
-				if (rdp_bmpcache_parse_persistent_list(
+				(void)rdp_bmpcache_parse_persistent_list(
 					payload + 18, payload_len - 18,
-					NULL, 0, &nk, &pf, &pl) == 0)
-					rdp_debug("conn[%s]: persistent key "
-						"list: %zu keys (first=%d "
-						"last=%d)", peer, nk, pf, pl);
+					NULL, 0, &nk, &pf, &pl);
+				if (g_bmpcache != NULL)
+					(void)rdp_bmpcache_ingest_persistent(
+						g_bmpcache, payload + 18,
+						payload_len - 18);
+				rdp_debug("conn[%s]: persistent key list: "
+					"%zu keys (first=%d last=%d)",
+					peer, nk, pf, pl);
 				return 1;
 			}
 			if (pdu_type2 == RDP_PDU2_SUPPRESS_OUTPUT) {
@@ -3605,6 +3613,8 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 	g_allow_microphone = cfg->allow_microphone;
 	g_allow_camera = cfg->allow_camera;
 	g_allow_bitmap_cache = cfg->allow_bitmap_cache;
+	if (g_allow_bitmap_cache && g_bmpcache == NULL)
+		g_bmpcache = rdp_bmpcache_create();
 	struct dynvc_state dynvc = {0};
 	struct snd_state snd = {0};
 	struct dr_state devr = {0};
@@ -4404,6 +4414,8 @@ send_disconnect:
 done:
 	rdp_cliprdr_reasm_reset(&clip.reasm);
 	explicit_bzero(nla_pass, sizeof nla_pass);
+	rdp_bmpcache_destroy(g_bmpcache);
+	g_bmpcache = NULL;
 	if (t != NULL) rdp_tls_close(t);
 	(void)close(fd);
 	rdp_debug("conn[%s]: done", peer);

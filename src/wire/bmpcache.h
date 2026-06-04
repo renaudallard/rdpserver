@@ -51,4 +51,33 @@
 int rdp_bmpcache_parse_persistent_list(const uint8_t *p, size_t len,
     uint64_t *keys, size_t max, size_t *n_keys, int *first, int *last);
 
+/* ---- per-connection cache manager ------------------------------------- */
+
+/* Three persistent cells whose slot counts match the advertised Rev2 cap.
+ * A tile is identified to the client by (cacheId, cacheIndex) and across
+ * sessions by a 64-bit key. */
+#define RDP_BMPCACHE_NUM_CELLS 3
+
+struct rdp_bmpcache;
+
+struct rdp_bmpcache *rdp_bmpcache_create(void);
+void rdp_bmpcache_destroy(struct rdp_bmpcache *c);
+
+/* The deterministic 64-bit cache key of a tile's raw pixel bytes. */
+uint64_t rdp_bmpcache_key(const uint8_t *pixels, size_t len);
+
+/* Ingest one Bitmap Cache Persistent List PDU body (the bytes after the
+ * share-data header): pre-load the slots the client already holds so a matching
+ * tile is recalled with MemBlt and never re-sent.  Accumulates across the
+ * multi-PDU sequence (reset on the PERSIST_FIRST PDU).  Returns 0 / -1. */
+int rdp_bmpcache_ingest_persistent(struct rdp_bmpcache *c,
+    const uint8_t *p, size_t len);
+
+/* Look up a tile by key.  On a hit (the client already holds it) *cache_id and
+ * *cache_index name its slot and the caller emits only a MemBlt; returns 1.  On
+ * a miss a slot is allocated (evicting the oldest) and returned, and the caller
+ * emits a Cache Bitmap then a MemBlt; returns 0. */
+int rdp_bmpcache_lookup(struct rdp_bmpcache *c, uint64_t key,
+    uint8_t *cache_id, uint16_t *cache_index);
+
 #endif /* RDP_BMPCACHE_H */
