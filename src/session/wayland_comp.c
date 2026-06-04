@@ -95,6 +95,7 @@ struct rdp_wl_toplevel {
 	struct wl_listener          map;
 	struct wl_listener          unmap;
 	struct wl_listener          destroy;
+	struct wl_listener          commit;
 	struct wl_list              link;
 
 	/* RAIL per-window state.  window_id is the stable RAIL id; x,y is the
@@ -288,8 +289,37 @@ on_toplevel_destroy(struct wl_listener *listener, void *data)
 	wl_list_remove(&tl->map.link);
 	wl_list_remove(&tl->unmap.link);
 	wl_list_remove(&tl->destroy.link);
+	wl_list_remove(&tl->commit.link);
 	wl_list_remove(&tl->link);
 	free(tl);
+}
+
+/* wlroots asserts if a configure is scheduled before the xdg surface is
+ * initialized, and 0.19 fires new_toplevel before the first commit.  Defer the
+ * initial size and activation to the initial commit, the first point the
+ * surface is ready for a configure. */
+static void
+on_toplevel_commit(struct wl_listener *listener, void *data)
+{
+	struct rdp_wl_toplevel *tl = wl_container_of(listener, tl, commit);
+	struct rdp_wl_comp *c = tl->comp;
+
+	(void)data;
+	if (tl->xdg == NULL || !tl->xdg->base->initial_commit)
+		return;
+	if (c->rail_mode) {
+		/* RAIL: a stable id, a cascade position on the virtual desktop,
+		 * and the client's natural size (set_size 0,0). */
+		if (tl->window_id == 0) {
+			tl->window_id = ++c->next_window_id;
+			tl->x = 40 + (int32_t)((tl->window_id * 30) % 400);
+			tl->y = 40 + (int32_t)((tl->window_id * 30) % 300);
+		}
+		wlr_xdg_toplevel_set_size(tl->xdg, 0, 0);
+	} else {
+		wlr_xdg_toplevel_set_size(tl->xdg, c->fb_w, c->fb_h);
+	}
+	wlr_xdg_toplevel_set_activated(tl->xdg, true);
 }
 
 static void
@@ -310,20 +340,13 @@ on_new_xdg_toplevel(struct wl_listener *listener, void *data)
 	wl_signal_add(&xdg->base->surface->events.unmap, &tl->unmap);
 	tl->destroy.notify = on_toplevel_destroy;
 	wl_signal_add(&xdg->events.destroy, &tl->destroy);
+	tl->commit.notify = on_toplevel_commit;
+	wl_signal_add(&xdg->base->surface->events.commit, &tl->commit);
 
 	wl_list_insert(&c->toplevels, &tl->link);
-	if (c->rail_mode) {
-		/* RAIL: give the window a stable id and a cascade position on
-		 * the virtual desktop, and let the client pick its natural
-		 * size (set_size 0,0) instead of fullscreen. */
-		tl->window_id = ++c->next_window_id;
-		tl->x = 40 + (int32_t)((tl->window_id * 30) % 400);
-		tl->y = 40 + (int32_t)((tl->window_id * 30) % 300);
-		wlr_xdg_toplevel_set_size(xdg, 0, 0);
-	} else {
-		wlr_xdg_toplevel_set_size(xdg, c->fb_w, c->fb_h);
-	}
-	wlr_xdg_toplevel_set_activated(xdg, true);
+	/* The initial size and activation are sent from on_toplevel_commit on
+	 * the surface's initial commit; configuring here would assert because
+	 * the surface is not yet initialized. */
 }
 
 struct rdp_wl_comp *
@@ -522,7 +545,9 @@ rdp_wl_comp_set_rail(struct rdp_wl_comp *c, int on)
 		tl->window_id = ++c->next_window_id;
 		tl->x = 40 + (int32_t)((tl->window_id * 30) % 400);
 		tl->y = 40 + (int32_t)((tl->window_id * 30) % 300);
-		if (tl->xdg != NULL)
+		/* Only resize an already-initialized surface; one still waiting
+		 * for its initial commit is configured by on_toplevel_commit. */
+		if (tl->xdg != NULL && tl->xdg->base->initialized)
 			wlr_xdg_toplevel_set_size(tl->xdg, 0, 0);
 	}
 }
@@ -560,7 +585,8 @@ rdp_wl_comp_resize(struct rdp_wl_comp *c, int w, int h)
 	if (!c->rail_mode) {
 		struct rdp_wl_toplevel *tl;
 		wl_list_for_each(tl, &c->toplevels, link)
-			wlr_xdg_toplevel_set_size(tl->xdg, w, h);
+			if (tl->xdg != NULL && tl->xdg->base->initialized)
+				wlr_xdg_toplevel_set_size(tl->xdg, w, h);
 	}
 }
 
