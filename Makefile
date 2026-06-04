@@ -33,7 +33,8 @@ WIRE_OBJS = \
 	src/wire/input.o \
 	src/wire/h264enc.o \
 	src/wire/avc444.o \
-	src/wire/progressive.o
+	src/wire/progressive.o \
+	src/wire/order.o
 
 WIRE_LIB = src/wire/libwire.a
 
@@ -119,6 +120,7 @@ REGRESS_PROGS = \
 	regress/wire/rdpei_test \
 	regress/wire/rail_test \
 	regress/wire/cam_test \
+	regress/wire/order_test \
 	$(FUSE_REGRESS) \
 	$(OBSD_FUSE_REGRESS)
 
@@ -318,6 +320,14 @@ regress/wire/cam_test: regress/wire/cam_test.c src/channels/cam.c \
 		src/common/buf.c
 	$(CC) $(CFLAGS) $(TEST_SAN) -Isrc/include \
 		-o $@ regress/wire/cam_test.c src/channels/cam.c \
+		src/common/buf.c
+
+# MS-RDPEGDI drawing-order encoders.  order.c is recompiled with the test so
+# $(TEST_SAN) covers the two-pass secondary header and the varint encoders.
+regress/wire/order_test: regress/wire/order_test.c src/wire/order.c \
+		src/common/buf.c
+	$(CC) $(CFLAGS) $(TEST_SAN) -Isrc/include \
+		-o $@ regress/wire/order_test.c src/wire/order.c \
 		src/common/buf.c
 
 # Printer module unit test.  printer.c is recompiled with the test so the
