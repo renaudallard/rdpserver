@@ -23,7 +23,7 @@
  *
  * Pipeline: BGR -> YCbCr (11.5 fixed-point) -> 64x64 tile
  *           -> CDF 9/7 forward DWT (3 levels) -> quantization
- *           -> linearization -> RLGR2 -> RFX_TILE_SIMPLE
+ *           -> linearization -> RLGR1 -> RFX_TILE_SIMPLE
  *           -> RFX_PROGRESSIVE wrapper.
  *
  * Wire structure (MS-RDPRFX 3.1.8):
