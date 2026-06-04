@@ -184,4 +184,31 @@ test_manager(void)
 	if (rdp_bmpcache_lookup(c, keys[1], &id, &idx) != 1
 	    || id != 0 || idx != 1) FAIL("persistent slot 1");
 	rdp_bmpcache_destroy(c);
+
+	/* Persistent keys must not be evicted while the cache still has empty
+	 * slots: a miss prefers a free slot, so the client keeps recalling its
+	 * disk-cached tiles instead of being made to re-receive them. */
+	c = rdp_bmpcache_create();
+	keys[0] = 0xBEEF000000000001ULL;
+	keys[1] = 0xBEEF000000000002ULL;
+	blen = build(buf, keys, 2,
+	    RDP_PERSIST_FIRST_PDU | RDP_PERSIST_LAST_PDU);
+	if (rdp_bmpcache_ingest_persistent(c, buf, blen) != 0) FAIL("ingest2");
+	/* Fill every remaining slot (576 total, 2 already persistent). */
+	for (i = 0; i < 576 - 2; i++) {
+		uint8_t xid; uint16_t xidx;
+		if (rdp_bmpcache_lookup(c, 0x2000000ULL + i, &xid, &xidx) != 0)
+			FAIL("fill miss");
+	}
+	if (rdp_bmpcache_lookup(c, keys[0], &id, &idx) != 1)
+		FAIL("persistent evicted while slots free 0");
+	if (rdp_bmpcache_lookup(c, keys[1], &id, &idx) != 1)
+		FAIL("persistent evicted while slots free 1");
+	/* One more distinct tile now that the cache is full does evict. */
+	{
+		uint8_t xid; uint16_t xidx;
+		if (rdp_bmpcache_lookup(c, 0x3000000ULL, &xid, &xidx) != 0)
+			FAIL("full miss");
+	}
+	rdp_bmpcache_destroy(c);
 }

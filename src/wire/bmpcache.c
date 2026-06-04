@@ -109,6 +109,7 @@ struct rdp_bmpcache {
 	size_t   total;
 	size_t   offset[RDP_BMPCACHE_NUM_CELLS];    /* first slot of each cell */
 	size_t   next;                              /* round-robin allocator */
+	size_t   used;                              /* occupied slot count */
 	size_t   ingest[RDP_BMPCACHE_NUM_CELLS];    /* persistent fill cursor */
 };
 
@@ -190,6 +191,8 @@ rdp_bmpcache_ingest_persistent(struct rdp_bmpcache *c, const uint8_t *p,
 				continue;          /* more keys than slots */
 			{
 				size_t pool = c->offset[cell] + c->ingest[cell];
+				if (!c->slot[pool].occupied)
+					c->used++;
 				c->slot[pool].key = key;
 				c->slot[pool].occupied = 1;
 				c->ingest[cell]++;
@@ -212,9 +215,19 @@ rdp_bmpcache_lookup(struct rdp_bmpcache *c, uint64_t key, uint8_t *cache_id,
 			return 1;                  /* hit: MemBlt only */
 		}
 	}
-	/* Miss: take the next slot round-robin, evicting whatever it held. */
-	pool = c->next;
-	c->next = (c->next + 1) % c->total;
+	/* Miss.  Prefer a still-empty slot so a persistent key the client already
+	 * holds is not evicted while the cache has room; only once every slot is
+	 * occupied does the round-robin allocator start evicting the oldest. */
+	if (c->used < c->total) {
+		while (c->slot[c->next].occupied)
+			c->next = (c->next + 1) % c->total;
+		pool = c->next;
+		c->next = (c->next + 1) % c->total;
+		c->used++;
+	} else {
+		pool = c->next;
+		c->next = (c->next + 1) % c->total;
+	}
 	c->slot[pool].key = key;
 	c->slot[pool].occupied = 1;
 	slot_to_cell(c, pool, cache_id, cache_index);
