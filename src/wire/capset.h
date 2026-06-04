@@ -71,7 +71,6 @@
 #define RDP_CAP_GLYPHCACHE       0x0010
 #define RDP_CAP_OFFSCREENCACHE   0x0011
 #define RDP_CAP_BITMAPCACHE_HOSTSUPPORT 0x0012
-#define RDP_CAP_BITMAPCACHE_REV2 0x0013
 #define RDP_CAP_VIRTUALCHANNEL   0x0014
 #define RDP_CAP_MULTIFRAGMENT    0x001A
 #define RDP_CAP_LARGEPOINTER     0x001B
@@ -80,10 +79,6 @@
 
 /* Order capability orderSupport[] index for MemBlt (MS-RDPBCGR 2.2.7.1.3). */
 #define RDP_ORDER_NEG_MEMBLT_INDEX 3
-
-/* Bitmap Cache Rev2 cacheFlags (MS-RDPBCGR 2.2.7.1.4.2). */
-#define CBR2_PERSISTENT_KEYS_EXPECTED 0x0001
-#define CBR2_ALLOW_CACHE_WAITING_LIST 0x0002
 
 /* General capability flags / extra flags. */
 #define RDP_GEN_EXTRA_NO_BITMAP_COMPRESSION_HDR 0x0400

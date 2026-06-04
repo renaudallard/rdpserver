@@ -71,12 +71,13 @@ test_demand_active(void)
 	cap_count = (uint16_t)buf[12] | ((uint16_t)buf[13] << 8);
 	if (cap_count != 13) FAIL("remoteapp cap_count = %u", cap_count);
 
-	/* Bitmap cache adds the Rev2 and host-support capability sets. */
+	/* Bitmap cache adds only the host-support capability set; the Rev2 cap
+	 * is client-to-server and must not appear in a server demand-active. */
 	n = rdp_capset_build_demand_active(buf, sizeof buf, 0x103EAu,
 		1280, 720, 0, 1);
 	if (n < 32) FAIL("bitmap-cache demand active too short");
 	cap_count = (uint16_t)buf[12] | ((uint16_t)buf[13] << 8);
-	if (cap_count != 13) FAIL("bitmap-cache cap_count = %u", cap_count);
+	if (cap_count != 12) FAIL("bitmap-cache cap_count = %u", cap_count);
 }
 
 int

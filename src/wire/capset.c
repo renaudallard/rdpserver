@@ -153,34 +153,6 @@ write_cap_order(struct rdp_buf *b, int memblt)
 	return 0;
 }
 
-/* Bitmap Cache Rev2 (MS-RDPBCGR 2.2.7.1.4.2): three persistent cells.  Only the
- * slot counts are sent; the cell sizes are fixed by the cell index. */
-static int
-write_cap_bitmapcache_rev2(struct rdp_buf *b)
-{
-	uint8_t *hdr; size_t *p; size_t start;
-	uint8_t pad3[12] = {0};
-	/* Cell slot counts; bit 31 of each marks the cell persistent. */
-	static const uint32_t cell[5] = { 120, 120, 336, 0, 0 };
-	int i;
-	if (cap_open(b, RDP_CAP_BITMAPCACHE_REV2, &p, &hdr) != 0) return -1;
-	start = rdp_buf_used(b);
-	if (rdp_buf_put_u16le(b,
-		CBR2_PERSISTENT_KEYS_EXPECTED | CBR2_ALLOW_CACHE_WAITING_LIST)
-		!= 0) return -1;                         /* cacheFlags */
-	if (rdp_buf_put_u8(b, 0) != 0) return -1;        /* pad2 */
-	if (rdp_buf_put_u8(b, 3) != 0) return -1;        /* numCellCaches */
-	for (i = 0; i < 5; i++) {
-		uint32_t info = cell[i];
-		if (i < 3)
-			info |= 0x80000000u;             /* persistent */
-		if (rdp_buf_put_u32le(b, info) != 0) return -1;
-	}
-	if (rdp_buf_put(b, pad3, 12) != 0) return -1;
-	cap_close(b, hdr, start);
-	return 0;
-}
-
 /* Bitmap Cache Host Support (MS-RDPBCGR 2.2.7.2.1): the server keeps a
  * persistent host cache (cacheVersion = BITMAP_CACHE_V2). */
 static int
@@ -422,12 +394,15 @@ rdp_capset_build_demand_active(uint8_t *out, size_t cap,
 		cap_count += 2;
 	}
 
-	/* Bitmap cache: advertise the Rev2 cache and that the server keeps a
-	 * persistent host cache, so the client sends its persistent key list. */
+	/* Bitmap cache: advertise only that the server keeps a persistent host
+	 * cache, so the client enables its bitmap cache and sends its persistent
+	 * key list.  The Bitmap Cache Rev2 cap itself is a client-to-server
+	 * capability (it describes the client's own cache cells) and is rejected
+	 * by clients when sent in a server demand-active, so it is not emitted
+	 * here; the client supplies its cells in the Confirm Active. */
 	if (bitmap_cache) {
-		if (write_cap_bitmapcache_rev2(&cb) != 0) return -1;
 		if (write_cap_bitmapcache_hostsupport(&cb) != 0) return -1;
-		cap_count += 2;
+		cap_count += 1;
 	}
 
 	rdp_buf_init(&b, out, cap);
