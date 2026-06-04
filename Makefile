@@ -35,7 +35,8 @@ WIRE_OBJS = \
 	src/wire/avc444.o \
 	src/wire/progressive.o \
 	src/wire/order.o \
-	src/wire/bmpcache.o
+	src/wire/bmpcache.o \
+	src/wire/bitmap_rle.o
 
 WIRE_LIB = src/wire/libwire.a
 
@@ -123,6 +124,7 @@ REGRESS_PROGS = \
 	regress/wire/cam_test \
 	regress/wire/order_test \
 	regress/wire/bmpcache_test \
+	regress/wire/bitmap_rle_test \
 	$(FUSE_REGRESS) \
 	$(OBSD_FUSE_REGRESS)
 
@@ -337,6 +339,13 @@ regress/wire/order_test: regress/wire/order_test.c src/wire/order.c \
 regress/wire/bmpcache_test: regress/wire/bmpcache_test.c src/wire/bmpcache.c
 	$(CC) $(CFLAGS) $(TEST_SAN) -Isrc/include \
 		-o $@ regress/wire/bmpcache_test.c src/wire/bmpcache.c
+
+# Interleaved RLE bitmap codec.  bitmap_rle.c is recompiled with the test so
+# $(TEST_SAN) covers the encoder run state machine and the decoder bounds; the
+# round-trip validates the encoder output.
+regress/wire/bitmap_rle_test: regress/wire/bitmap_rle_test.c src/wire/bitmap_rle.c
+	$(CC) $(CFLAGS) $(TEST_SAN) -Isrc/include \
+		-o $@ regress/wire/bitmap_rle_test.c src/wire/bitmap_rle.c
 
 # Printer module unit test.  printer.c is recompiled with the test so the
 # sanitization and the wire header layout are covered directly; $(TEST_SAN)
