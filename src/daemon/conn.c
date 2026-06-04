@@ -77,6 +77,7 @@
 #include "../channels/rdpdr.h"
 #include "../channels/rdpsnd.h"
 #include "../channels/sndin.h"
+#include "../channels/rdpei.h"
 #include "../channels/rdpgfx.h"
 #include "../channels/autodetect.h"
 #include "../wire/h264enc.h"
@@ -1555,6 +1556,20 @@ maybe_dispatch_clip(struct rdp_tls *t, int be_fd,
 						dv->channel_id, ac,
 						(size_t)an);
 			}
+			/* RDPEI is harmless to offer (a client without touch
+			 * just declines the Create), so open it unconditionally
+			 * like gfx and DisplayControl, not behind a config flag. */
+			if (rc == 5 && !dv->dv.rdpei_create_pending
+			    && dv->dv.rdpei_channel_id < 0) {
+				uint8_t rc_buf[64];
+				ssize_t rn =
+				    rdp_drdynvc_build_create_rdpei(
+					&dv->dv, rc_buf, sizeof rc_buf);
+				if (rn > 0)
+					(void)send_clip_pdu(t, cs->user_id,
+						dv->channel_id, rc_buf,
+						(size_t)rn);
+			}
 			if (rc == 7) return 7;
 			if (rc == 8) return 11;   /* DisplayControl up */
 			if (rc == 10) return 14;  /* AUDIO_INPUT up: send Version */
@@ -1584,6 +1599,15 @@ maybe_dispatch_clip(struct rdp_tls *t, int be_fd,
 				if (out_gfx) *out_gfx = gfx_data;
 				if (out_gfx_len) *out_gfx_len = gfx_len;
 				return 13;
+			}
+			if (rc == 11) return 15;  /* RDPEI up: send SC_READY */
+			/* RDPEI (MS-RDPEI) PDU: surface it for the proxy loop,
+			 * which parses the contacts and forwards them to the
+			 * session. */
+			if (rc == 12 && gfx_data != NULL && gfx_len > 0) {
+				if (out_gfx) *out_gfx = gfx_data;
+				if (out_gfx_len) *out_gfx_len = gfx_len;
+				return 16;
 			}
 		}
 		return 1;
@@ -2422,6 +2446,87 @@ run_proxy(struct rdp_tls *t, int be_fd,
 						aud_len -= chunk;
 					}
 				}
+				if (r == 15 && dv->dv.rdpei_channel_id >= 0) {
+					/* RDPEI channel is open: send the
+					 * SC_READY PDU advertising our protocol
+					 * version; the client's CS_READY reply
+					 * starts the touch frame stream. */
+					uint8_t scr[32];
+					ssize_t scn = rdp_rdpei_build_sc_ready(
+						scr, sizeof scr,
+						RDPEI_PROTOCOL_V1);
+					if (scn > 0)
+						(void)send_drdynvc_data(t,
+							user_id,
+							dv->channel_id,
+							dv->dv.rdpei_channel_id,
+							scr, (size_t)scn);
+				}
+				if (r == 16 && gfx_pdu != NULL
+				    && dv->dv.rdpei_channel_id >= 0) {
+					/* MS-RDPEI PDU: parse the contacts and,
+					 * for a TOUCH or PEN frame, forward them
+					 * to the session as an INPUT_TOUCH
+					 * backend message.  CS_READY just gets a
+					 * debug log; the stream flows from there. */
+					struct rdp_rdpei_event ev;
+					memset(&ev, 0, sizeof ev);
+					if (rdp_rdpei_parse_event(gfx_pdu,
+						gfx_pdu_len, &ev) == 0) {
+						if (ev.event_id
+						    == RDPEI_EVENTID_CS_READY) {
+							rdp_debug("conn[%s]: RDPEI "
+								"CS_READY ver=0x%08x "
+								"maxContacts=%u",
+								peer,
+								ev.cs_version,
+								ev.cs_max_contacts);
+						} else if ((ev.event_id
+						    == RDPEI_EVENTID_TOUCH
+						    || ev.event_id
+						    == RDPEI_EVENTID_PEN)
+						    && ev.contact_count > 0) {
+							uint8_t tbuf[sizeof(
+							    struct rdp_be_input_touch)
+							    + RDPEI_MAX_CONTACTS
+							    * sizeof(struct
+							    rdp_be_touch_contact)];
+							struct rdp_be_input_touch th;
+							size_t off = 0, ci;
+							uint32_t n_ct =
+								ev.contact_count;
+							if (n_ct > RDPEI_MAX_CONTACTS)
+								n_ct =
+								    RDPEI_MAX_CONTACTS;
+							th.count = n_ct;
+							memcpy(tbuf, &th,
+								sizeof th);
+							off = sizeof th;
+							for (ci = 0; ci < n_ct;
+							    ci++) {
+								struct
+								rdp_be_touch_contact tc;
+								tc.id = ev.contacts[ci].id;
+								tc.is_pen = (uint8_t)
+								    (ev.contacts[ci].is_pen
+								    ? 1 : 0);
+								tc.flags = (uint16_t)
+								    ev.contacts[ci].flags;
+								tc.x = ev.contacts[ci].x;
+								tc.y = ev.contacts[ci].y;
+								tc.pressure =
+								    ev.contacts[ci].pressure;
+								memcpy(tbuf + off,
+									&tc,
+									sizeof tc);
+								off += sizeof tc;
+							}
+							(void)rdp_be_send(be_fd,
+								RDP_BE_INPUT_TOUCH,
+								tbuf, off);
+						}
+					}
+				}
 				/* Untouched TPKTs (Shutdown, etc.) silently
 				 * ignored.  MCS Disconnect already handled. */
 			} else {
@@ -3258,6 +3363,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 	dynvc.dv.disp_channel_id = -1;
 	dynvc.dv.gfx_channel_id = -1;
 	dynvc.dv.audioin_channel_id = -1;
+	dynvc.dv.rdpei_channel_id = -1;
 	rdp_sndin_init(&dynvc.sndin);
 	memset(&client_info, 0, sizeof client_info);
 	peer_to_ip(peer, client_ip, sizeof client_ip);

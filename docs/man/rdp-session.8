@@ -71,6 +71,16 @@ is applied to the session keyboard with the XKB lock modifiers, so a
 client that connects or regains focus with a lock engaged stays in
 sync with the session.
 .Pp
+Touch and pen input from the client
+.Pq MS-RDPEI, forwarded by Xr rdpd 8 as RDP_BE_INPUT_TOUCH
+is injected into the session.
+On the Wayland backend each contact drives a real
+.Sy wl_touch
+device, so multi-finger gestures and pen input reach the session
+applications.
+On Xvfb there is no virtual multitouch device, so the primary contact is
+emulated as a single left pointer via the XTEST extension.
+.Pp
 The client's time zone, passed by
 .Xr rdp-sessionmgr 8
 via

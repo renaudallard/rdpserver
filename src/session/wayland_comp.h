@@ -42,6 +42,11 @@ void rdp_wl_comp_inject_key(struct rdp_wl_comp *c,
     uint32_t keycode, int pressed);
 void rdp_wl_comp_inject_pointer(struct rdp_wl_comp *c,
     int x, int y, uint32_t buttons, int motion);
+/* Inject one touch contact.  phase: 0 = down, 1 = motion, 2 = up.
+ * Call rdp_wl_comp_touch_frame once after a batch of contacts. */
+void rdp_wl_comp_inject_touch(struct rdp_wl_comp *c, int32_t id,
+    int x, int y, int phase);
+void rdp_wl_comp_touch_frame(struct rdp_wl_comp *c);
 int rdp_wl_comp_is_dirty(struct rdp_wl_comp *c);
 void rdp_wl_comp_clear_dirty(struct rdp_wl_comp *c);
 void rdp_wl_comp_resize(struct rdp_wl_comp *c, int w, int h);

@@ -51,6 +51,10 @@ channel.
 Multi-monitor layouts are parsed from the GCC CS_MONITOR block, and
 dynamic resize is supported over the RDPEDISP Display Control channel,
 which the server opens and on which it advertises its monitor limits.
+Multitouch and pen input is received over the MS-RDPEI
+.Sy Microsoft::Windows::RDS::Input
+dynamic channel and forwarded to the session
+.Pq see Xr rdp-session 8 .
 .Pp
 The greeter follows the client's reported keyboard layout (LCID) for
 US, UK, French, Belgian, German, and Swiss keyboards, so the username

@@ -241,7 +241,8 @@ rdp_wl_comp_create(int width, int height)
 
 	c->seat = wlr_seat_create(c->display, "seat0");
 	wlr_seat_set_capabilities(c->seat,
-	    WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD);
+	    WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD
+	    | WL_SEAT_CAPABILITY_TOUCH);
 
 	c->output = wlr_headless_add_output(c->backend, width, height);
 	if (c->output == NULL) goto fail;
@@ -332,6 +333,38 @@ rdp_wl_comp_inject_pointer(struct rdp_wl_comp *c,
 	if (buttons & 2)
 		wlr_seat_pointer_notify_button(c->seat, now_ms(),
 		    BTN_RIGHT, WL_POINTER_BUTTON_STATE_PRESSED);
+}
+
+void
+rdp_wl_comp_inject_touch(struct rdp_wl_comp *c, int32_t id, int x, int y,
+    int phase)
+{
+	/* phase: 0 = down, 1 = motion, 2 = up.  Targets the keyboard-focused
+	 * surface, as the pointer path does; the flattened compositor renders
+	 * its toplevels at the origin, so a contact's desktop coordinates
+	 * serve as surface-local coordinates. */
+	struct wlr_surface *surf;
+
+	if (c == NULL || c->seat == NULL) return;
+	if (phase == 2) {
+		wlr_seat_touch_notify_up(c->seat, now_ms(), id);
+		return;
+	}
+	surf = c->seat->keyboard_state.focused_surface;
+	if (surf == NULL) return;
+	if (phase == 0)
+		wlr_seat_touch_notify_down(c->seat, surf, now_ms(), id,
+		    (double)x, (double)y);
+	else
+		wlr_seat_touch_notify_motion(c->seat, now_ms(), id,
+		    (double)x, (double)y);
+}
+
+void
+rdp_wl_comp_touch_frame(struct rdp_wl_comp *c)
+{
+	if (c != NULL && c->seat != NULL)
+		wlr_seat_touch_notify_frame(c->seat);
 }
 
 int

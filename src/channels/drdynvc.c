@@ -32,6 +32,8 @@
 
 #include "drdynvc.h"
 
+#include "rdpei.h"
+
 #include "../include/rdp_log.h"
 
 #include <stdlib.h>
@@ -176,6 +178,27 @@ rdp_drdynvc_handle(struct drdynvc_state *st,
 			rdp_info("drdynvc: AUDIO_INPUT not opened by "
 				"client (%d)", (int)status);
 			st->audioin_channel_id = -1;
+			return 0;
+		}
+		/* Create Response for the RDPEI channel.  A nonzero status
+		 * (client has no touch input) is not an error: we just mark
+		 * the channel unavailable and no touch frames ever arrive. */
+		if (st->rdpei_create_pending
+		    && (int)chan_id == st->rdpei_channel_id) {
+			size_t remain = len - 1 - id_len;
+			int32_t status = 0;
+			if (remain >= 4)
+				status = (int32_t)ld32(pdu + 1 + id_len);
+			st->rdpei_create_pending = 0;
+			if (status == 0) {
+				rdp_info("drdynvc: RDPEI channel created ok");
+				/* The caller now sends the SC_READY PDU to
+				 * start the negotiation. */
+				return 11;
+			}
+			rdp_info("drdynvc: RDPEI not opened by client (%d)",
+				(int)status);
+			st->rdpei_channel_id = -1;
 			return 0;
 		}
 		/* Client-initiated Create Request. */
@@ -352,6 +375,62 @@ rdp_drdynvc_handle(struct drdynvc_state *st,
 			*gfx_len = data_len;
 			return 9;
 		}
+
+		/* RDPEI channel (MS-RDPEI): one RDPINPUT PDU per Data PDU in
+		 * the common case; reassemble a fragmented one with its own
+		 * buffer so an interleaved GFX or AUDIO_INPUT fragment sequence
+		 * cannot clobber it (and vice versa). */
+		if ((int)chan_id == st->rdpei_channel_id
+		    && st->rdpei_channel_id >= 0
+		    && gfx_data != NULL && gfx_len != NULL) {
+			if (cmd == DRDYNVC_CMD_DATA_FIRST) {
+				if (total_len == 0 || total_len > 0x400000)
+					return -1;
+				if (total_len > st->rei_reasm_cap) {
+					free(st->rei_reasm_buf);
+					st->rei_reasm_buf = malloc(total_len);
+					if (st->rei_reasm_buf == NULL) {
+						st->rei_reasm_cap = 0;
+						return -1;
+					}
+					st->rei_reasm_cap = total_len;
+				}
+				st->rei_reasm_total = total_len;
+				st->rei_reasm_len = 0;
+				if (data_len > total_len)
+					data_len = total_len;
+				memcpy(st->rei_reasm_buf, data, data_len);
+				st->rei_reasm_len = data_len;
+				if (st->rei_reasm_len >= st->rei_reasm_total) {
+					*gfx_data = st->rei_reasm_buf;
+					*gfx_len = st->rei_reasm_len;
+					st->rei_reasm_len = 0;
+					st->rei_reasm_total = 0;
+					return 12;
+				}
+				return 0;
+			}
+			if (st->rei_reasm_len > 0) {
+				size_t remain = st->rei_reasm_total
+					- st->rei_reasm_len;
+				if (data_len > remain)
+					data_len = remain;
+				memcpy(st->rei_reasm_buf + st->rei_reasm_len,
+					data, data_len);
+				st->rei_reasm_len += data_len;
+				if (st->rei_reasm_len >= st->rei_reasm_total) {
+					*gfx_data = st->rei_reasm_buf;
+					*gfx_len = st->rei_reasm_len;
+					st->rei_reasm_len = 0;
+					st->rei_reasm_total = 0;
+					return 12;
+				}
+				return 0;
+			}
+			*gfx_data = data;
+			*gfx_len = data_len;
+			return 12;
+		}
 		if ((int)chan_id != st->disp_channel_id)
 			return 0;
 
@@ -426,6 +505,7 @@ rdp_drdynvc_handle(struct drdynvc_state *st,
 #define DISP_SERVER_CHAN_ID 2
 #define AUDIOIN_CHANNEL_NAME "AUDIO_INPUT"
 #define AUDIOIN_SERVER_CHAN_ID 3
+#define RDPEI_SERVER_CHAN_ID 4
 
 ssize_t
 rdp_drdynvc_build_create_gfx(struct drdynvc_state *st,
@@ -475,6 +555,22 @@ rdp_drdynvc_build_create_audio_input(struct drdynvc_state *st,
 	return (ssize_t)total;
 }
 
+ssize_t
+rdp_drdynvc_build_create_rdpei(struct drdynvc_state *st,
+		uint8_t *out, size_t cap)
+{
+	size_t name_len = sizeof(RDPEI_CHANNEL_NAME);
+	size_t total = 1 + 1 + name_len;
+
+	if (cap < total) return -1;
+	out[0] = (uint8_t)((DRDYNVC_CMD_CREATE << 4) | (2 << 2) | 0);
+	out[1] = RDPEI_SERVER_CHAN_ID;
+	memcpy(out + 2, RDPEI_CHANNEL_NAME, name_len);
+	st->rdpei_channel_id = RDPEI_SERVER_CHAN_ID;
+	st->rdpei_create_pending = 1;
+	return (ssize_t)total;
+}
+
 /* MS-RDPEDISP 2.2.2.1 DISPLAYCONTROL_CAPS_PDU: the server's monitor
  * limits, sent once the DisplayControl channel is created so the
  * client knows it may request a dynamic resize. */
@@ -504,4 +600,9 @@ rdp_drdynvc_cleanup(struct drdynvc_state *st)
 	st->ai_reasm_cap = 0;
 	st->ai_reasm_len = 0;
 	st->ai_reasm_total = 0;
+	free(st->rei_reasm_buf);
+	st->rei_reasm_buf = NULL;
+	st->rei_reasm_cap = 0;
+	st->rei_reasm_len = 0;
+	st->rei_reasm_total = 0;
 }

@@ -56,6 +56,7 @@
 #include "../common/io.h"
 #include "../backend/proto.h"
 #include "../backend/proto_api.h"
+#include "../channels/rdpei.h"	/* RDPEI_CONTACT_*, RDPEI_MAX_CONTACTS */
 #include "../wire/h264enc.h"
 
 #include <X11/Xlib.h>
@@ -494,6 +495,52 @@ inject_mouse(Display *dpy, const struct rdp_be_input_mouse *m)
 		(void)XTestFakeButtonEvent(dpy, btn,
 			(m->buttons & 0x08) ? True : False, 0);
 	}
+	XFlush(dpy);
+	return 0;
+}
+
+/* Inject one INPUT_TOUCH message (MS-RDPEI contacts) into the X session.
+ *
+ * TODO Stage 2b: the Wayland backend should inject real wl_touch multitouch
+ * (one touch point per contact id).  X11 / Xvfb has no multitouch device, so
+ * here we emulate only the PRIMARY contact (the one with the lowest contact
+ * id) as a single left pointer: move to its (x,y), press button 1 on
+ * RDPEI_CONTACT_DOWN, release on RDPEI_CONTACT_UP, and just move on UPDATE.
+ * Pen contacts are treated the same way.  Returns 0 always; a malformed
+ * buffer is ignored. */
+static int
+inject_touch(Display *dpy, const uint8_t *buf, size_t len)
+{
+	struct rdp_be_input_touch th;
+	struct rdp_be_touch_contact tc, primary;
+	int have_primary = 0;
+	size_t off, i;
+	uint32_t count;
+
+	if (dpy == NULL || len < sizeof th) return 0;
+	memcpy(&th, buf, sizeof th);
+	count = th.count;
+	if (count > RDPEI_MAX_CONTACTS) count = RDPEI_MAX_CONTACTS;
+	off = sizeof th;
+	memset(&primary, 0, sizeof primary);
+	for (i = 0; i < count; i++) {
+		if (len - off < sizeof tc) break;
+		memcpy(&tc, buf + off, sizeof tc);
+		off += sizeof tc;
+		/* Pick the lowest contact id as the primary pointer. */
+		if (!have_primary || tc.id < primary.id) {
+			primary = tc;
+			have_primary = 1;
+		}
+	}
+	if (!have_primary) return 0;
+
+	(void)XTestFakeMotionEvent(dpy, 0, primary.x, primary.y, 0);
+	if (primary.flags & RDPEI_CONTACT_DOWN)
+		(void)XTestFakeButtonEvent(dpy, 1, True, 0);
+	else if (primary.flags & RDPEI_CONTACT_UP)
+		(void)XTestFakeButtonEvent(dpy, 1, False, 0);
+	/* RDPEI_CONTACT_UPDATE moves only; no button change. */
 	XFlush(dpy);
 	return 0;
 }
@@ -1086,6 +1133,37 @@ run_wayland_mode(int w, int h)
 				memcpy(&m, buf, sizeof m);
 				rdp_wl_comp_inject_pointer(wl,
 				    m.x, m.y, m.buttons, m.flags & 1);
+			} else if (type == RDP_BE_INPUT_TOUCH
+			    && n >= (ssize_t)sizeof(struct rdp_be_input_touch)) {
+				/* Real multitouch: one wl_touch point per RDPEI
+				 * contact, mapped by phase (down/motion/up). */
+				struct rdp_be_input_touch th;
+				struct rdp_be_touch_contact tc;
+				size_t off, i;
+				uint32_t count;
+				int any = 0;
+				memcpy(&th, buf, sizeof th);
+				count = th.count;
+				if (count > RDPEI_MAX_CONTACTS)
+					count = RDPEI_MAX_CONTACTS;
+				off = sizeof th;
+				for (i = 0; i < count; i++) {
+					int phase;
+					if ((size_t)n - off < sizeof tc) break;
+					memcpy(&tc, buf + off, sizeof tc);
+					off += sizeof tc;
+					if (tc.flags & RDPEI_CONTACT_DOWN)
+						phase = 0;
+					else if (tc.flags & RDPEI_CONTACT_UP)
+						phase = 2;
+					else
+						phase = 1;
+					rdp_wl_comp_inject_touch(wl, tc.id,
+					    tc.x, tc.y, phase);
+					any = 1;
+				}
+				if (any)
+					rdp_wl_comp_touch_frame(wl);
 			} else if (type == RDP_BE_RESIZE
 			    && n >= (ssize_t)sizeof(struct rdp_be_resize)) {
 				struct rdp_be_resize rs;
@@ -1511,6 +1589,9 @@ main(int argc, char *argv[])
 				struct rdp_be_input_mouse m;
 				memcpy(&m, buf, sizeof m);
 				(void)inject_mouse(dpy, &m);
+			} else if (type == RDP_BE_INPUT_TOUCH
+			    && n >= (ssize_t)sizeof(struct rdp_be_input_touch)) {
+				(void)inject_touch(dpy, buf, (size_t)n);
 			} else if (type == RDP_BE_INPUT_UNICODE
 			    && n >= (ssize_t)sizeof(struct rdp_be_input_unicode)) {
 				struct rdp_be_input_unicode u;

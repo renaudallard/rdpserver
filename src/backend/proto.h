@@ -120,6 +120,14 @@
  *                The worker caps one chunk at RDP_BE_AUDIO_INPUT_MAX. */
 #define RDP_BE_AUDIO_INPUT    22u  /* worker -> session */
 
+/* Multitouch / pen input redirection (MS-RDPEI).
+ *   INPUT_TOUCH  worker -> session: one or more touch/pen contacts the client
+ *                sent over the "Microsoft::Windows::RDS::Input" dynamic virtual
+ *                channel.  The payload is a struct rdp_be_input_touch header
+ *                followed by `count` struct rdp_be_touch_contact records.  The
+ *                worker caps count at RDPEI_MAX_CONTACTS (64). */
+#define RDP_BE_INPUT_TOUCH    23u  /* worker -> session */
+
 /* Upper bound on the PCM bytes the worker forwards in one AUDIO_INPUT
  * message.  A client Data PDU larger than this is split into multiple
  * AUDIO_INPUT messages so a single chunk stays bounded. */
@@ -291,6 +299,23 @@ struct rdp_be_input_mouse {
 	int32_t  y;
 	uint16_t buttons;    /* bit 0 = left, 1 = right, 2 = middle */
 	uint16_t flags;      /* bit 0 = motion, 1 = down/up */
+};
+
+/* INPUT_TOUCH payload (worker -> session): a count header followed by that
+ * many fixed contact records.  X11 sessions emulate the primary contact as a
+ * single pointer; a Wayland session injects real wl_touch multitouch.  flags
+ * carries the MS-RDPEI RDPEI_CONTACT_* bits; is_pen is 1 for a pen contact. */
+struct rdp_be_touch_contact {
+	uint8_t  id;
+	uint8_t  is_pen;
+	uint16_t flags;
+	int32_t  x;
+	int32_t  y;
+	uint32_t pressure;
+};
+
+struct rdp_be_input_touch {
+	uint32_t count;   /* followed by count struct rdp_be_touch_contact */
 };
 
 /* CLIP_OFFER payload: just a u32 format bitmap. */
