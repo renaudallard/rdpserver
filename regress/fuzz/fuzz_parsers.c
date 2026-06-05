@@ -251,12 +251,12 @@ fuzz_cliprdr(size_t iters)
 					| ((uint32_t)buf[off + 3] << 16)
 					| ((uint32_t)buf[off + 4] << 24);
 				size_t avail = len - (off + 5);
-				size_t fl = avail ? (buf[off] % (avail + 1)) : 0;
+				size_t frag_len = avail ? (buf[off] % (avail + 1)) : 0;
 				off += 5;
-				if (rdp_cliprdr_reasm_feed(&r, buf + off, fl,
+				if (rdp_cliprdr_reasm_feed(&r, buf + off, frag_len,
 					total, flags, &pdu, &pdu_len) == 1)
 					rdp_cliprdr_reasm_reset(&r);
-				off += fl;
+				off += frag_len;
 			}
 			rdp_cliprdr_reasm_reset(&r);
 		}
