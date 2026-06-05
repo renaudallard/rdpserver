@@ -38,8 +38,8 @@
  *
  * Usage:
  *   fuzz_parsers <parser> <iterations> [seed]
- * where <parser> is one of: tpkt, x224, ber, per, mcs, cliprdr, fp_input
- * or "all" to run a short pass over each.
+ * where <parser> is one of: tpkt, x224, ber, per, mcs, cliprdr, fp_input,
+ * cssp, ntlm, rdpgfx, or "all" to run a short pass over each.
  */
 
 #include "../../src/wire/tpkt.h"
@@ -49,6 +49,7 @@
 #include "../../src/common/ber.h"
 #include "../../src/common/per.h"
 #include "../../src/channels/cliprdr.h"
+#include "../../src/channels/rdpgfx.h"
 #include "../../src/sec/cssp.h"
 #include "../../src/sec/ntlm.h"
 
@@ -312,6 +313,27 @@ fuzz_ntlm(size_t iters)
 	}
 }
 
+static void
+fuzz_rdpgfx(size_t iters)
+{
+	uint8_t buf[BUF_MAX];
+	size_t i;
+	for (i = 0; i < iters; i++) {
+		size_t len = pick_len(2048);
+		struct rdpgfx_caps_advertise adv;
+		fill_random(buf, len);
+		/* Force the CAPSADVERTISE cmdId on roughly half the runs so the
+		 * bounds-sensitive cap-set walk is exercised, not just rejected
+		 * at the cmdId check.  pduLength, count and the per-capset
+		 * lengths stay random. */
+		if (len >= 2 && (buf[0] & 1)) {
+			buf[0] = (uint8_t)(RDPGFX_CMDID_CAPSADVERTISE & 0xff);
+			buf[1] = (uint8_t)(RDPGFX_CMDID_CAPSADVERTISE >> 8);
+		}
+		(void)rdp_rdpgfx_parse_caps_advertise(buf, len, &adv);
+	}
+}
+
 struct fuzzer { const char *name; void (*fn)(size_t); };
 
 static const struct fuzzer fuzzers[] = {
@@ -324,6 +346,7 @@ static const struct fuzzer fuzzers[] = {
 	{ "fp_input", fuzz_fp_input },
 	{ "cssp",     fuzz_cssp     },
 	{ "ntlm",     fuzz_ntlm     },
+	{ "rdpgfx",   fuzz_rdpgfx   },
 };
 
 static const size_t nfuzzers = sizeof fuzzers / sizeof fuzzers[0];
