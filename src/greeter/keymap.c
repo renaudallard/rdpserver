@@ -176,6 +176,91 @@ static const char de_shifted[0x80] = {
 	[0x39] = ' ', [0x56] = '>',
 };
 
+/* UK English (LCID 0x0809 en-GB, 0x1809 en-IE).  QWERTY like US; only the
+ * punctuation around the number row and the right-hand keys differ, plus the
+ * extra ISO key (0x56).  The pound, not, and broken-bar glyphs are non-ASCII
+ * and stay 0. */
+static const char uk_base[0x80] = {
+	[0x01] = RDP_KEY_ESC,
+	[0x02] = '1', [0x03] = '2', [0x04] = '3', [0x05] = '4',
+	[0x06] = '5', [0x07] = '6', [0x08] = '7', [0x09] = '8',
+	[0x0a] = '9', [0x0b] = '0', [0x0c] = '-', [0x0d] = '=',
+	[0x0e] = RDP_KEY_BACKSPACE, [0x0f] = RDP_KEY_TAB,
+	[0x10] = 'q', [0x11] = 'w', [0x12] = 'e', [0x13] = 'r',
+	[0x14] = 't', [0x15] = 'y', [0x16] = 'u', [0x17] = 'i',
+	[0x18] = 'o', [0x19] = 'p', [0x1a] = '[', [0x1b] = ']',
+	[0x1c] = RDP_KEY_ENTER,
+	[0x1e] = 'a', [0x1f] = 's', [0x20] = 'd', [0x21] = 'f',
+	[0x22] = 'g', [0x23] = 'h', [0x24] = 'j', [0x25] = 'k',
+	[0x26] = 'l', [0x27] = ';', [0x28] = '\'', [0x29] = '`',
+	[0x2b] = '#',
+	[0x2c] = 'z', [0x2d] = 'x', [0x2e] = 'c', [0x2f] = 'v',
+	[0x30] = 'b', [0x31] = 'n', [0x32] = 'm',
+	[0x33] = ',', [0x34] = '.', [0x35] = '/',
+	[0x39] = ' ', [0x56] = '\\',
+};
+
+static const char uk_shifted[0x80] = {
+	[0x01] = RDP_KEY_ESC,
+	[0x02] = '!', [0x03] = '"', [0x05] = '$',
+	[0x06] = '%', [0x07] = '^', [0x08] = '&', [0x09] = '*',
+	[0x0a] = '(', [0x0b] = ')', [0x0c] = '_', [0x0d] = '+',
+	[0x0e] = RDP_KEY_BACKSPACE, [0x0f] = RDP_KEY_TAB,
+	[0x10] = 'Q', [0x11] = 'W', [0x12] = 'E', [0x13] = 'R',
+	[0x14] = 'T', [0x15] = 'Y', [0x16] = 'U', [0x17] = 'I',
+	[0x18] = 'O', [0x19] = 'P', [0x1a] = '{', [0x1b] = '}',
+	[0x1c] = RDP_KEY_ENTER,
+	[0x1e] = 'A', [0x1f] = 'S', [0x20] = 'D', [0x21] = 'F',
+	[0x22] = 'G', [0x23] = 'H', [0x24] = 'J', [0x25] = 'K',
+	[0x26] = 'L', [0x27] = ':', [0x28] = '@', [0x2b] = '~',
+	[0x2c] = 'Z', [0x2d] = 'X', [0x2e] = 'C', [0x2f] = 'V',
+	[0x30] = 'B', [0x31] = 'N', [0x32] = 'M',
+	[0x33] = '<', [0x34] = '>', [0x35] = '?',
+	[0x39] = ' ', [0x56] = '|',
+};
+
+/* Spanish (LCID 0x040A es-ES).  QWERTY; the many accented and dead keys (n
+ * with tilde, acute, grave, inverted marks, c-cedilla) are non-ASCII and stay
+ * 0, so only the letters, digits and the punctuation that is unambiguously
+ * ASCII are mapped. */
+static const char es_base[0x80] = {
+	[0x01] = RDP_KEY_ESC,
+	[0x02] = '1', [0x03] = '2', [0x04] = '3', [0x05] = '4',
+	[0x06] = '5', [0x07] = '6', [0x08] = '7', [0x09] = '8',
+	[0x0a] = '9', [0x0b] = '0', [0x0c] = '\'',
+	[0x0e] = RDP_KEY_BACKSPACE, [0x0f] = RDP_KEY_TAB,
+	[0x10] = 'q', [0x11] = 'w', [0x12] = 'e', [0x13] = 'r',
+	[0x14] = 't', [0x15] = 'y', [0x16] = 'u', [0x17] = 'i',
+	[0x18] = 'o', [0x19] = 'p', [0x1b] = '+',
+	[0x1c] = RDP_KEY_ENTER,
+	[0x1e] = 'a', [0x1f] = 's', [0x20] = 'd', [0x21] = 'f',
+	[0x22] = 'g', [0x23] = 'h', [0x24] = 'j', [0x25] = 'k',
+	[0x26] = 'l',
+	[0x2c] = 'z', [0x2d] = 'x', [0x2e] = 'c', [0x2f] = 'v',
+	[0x30] = 'b', [0x31] = 'n', [0x32] = 'm',
+	[0x33] = ',', [0x34] = '.', [0x35] = '-',
+	[0x39] = ' ', [0x56] = '<',
+};
+
+static const char es_shifted[0x80] = {
+	[0x01] = RDP_KEY_ESC,
+	[0x02] = '!', [0x03] = '"', [0x05] = '$',
+	[0x06] = '%', [0x07] = '&', [0x08] = '/', [0x09] = '(',
+	[0x0a] = ')', [0x0b] = '=', [0x0c] = '?',
+	[0x0e] = RDP_KEY_BACKSPACE, [0x0f] = RDP_KEY_TAB,
+	[0x10] = 'Q', [0x11] = 'W', [0x12] = 'E', [0x13] = 'R',
+	[0x14] = 'T', [0x15] = 'Y', [0x16] = 'U', [0x17] = 'I',
+	[0x18] = 'O', [0x19] = 'P', [0x1b] = '*',
+	[0x1c] = RDP_KEY_ENTER,
+	[0x1e] = 'A', [0x1f] = 'S', [0x20] = 'D', [0x21] = 'F',
+	[0x22] = 'G', [0x23] = 'H', [0x24] = 'J', [0x25] = 'K',
+	[0x26] = 'L',
+	[0x2c] = 'Z', [0x2d] = 'X', [0x2e] = 'C', [0x2f] = 'V',
+	[0x30] = 'B', [0x31] = 'N', [0x32] = 'M',
+	[0x33] = ';', [0x34] = ':', [0x35] = '_',
+	[0x39] = ' ', [0x56] = '>',
+};
+
 void
 rdp_keymap_for_lcid(uint32_t lcid, struct rdp_keymap *out)
 {
@@ -185,14 +270,27 @@ rdp_keymap_for_lcid(uint32_t lcid, struct rdp_keymap *out)
 	switch (lang) {
 	case 0x040C:  /* fr-FR */
 	case 0x080C:  /* fr-BE */
+	case 0x140C:  /* fr-LU */
+	case 0x180C:  /* fr-MC */
 		out->base = fr_base;
 		out->shifted = fr_shifted;
 		break;
 	case 0x0407:  /* de-DE */
 	case 0x0807:  /* de-CH */
-	case 0x100C:  /* fr-CH */
+	case 0x0C07:  /* de-AT */
+	case 0x1407:  /* de-LI */
+	case 0x100C:  /* fr-CH (QWERTZ) */
 		out->base = de_base;
 		out->shifted = de_shifted;
+		break;
+	case 0x0809:  /* en-GB */
+	case 0x1809:  /* en-IE */
+		out->base = uk_base;
+		out->shifted = uk_shifted;
+		break;
+	case 0x040A:  /* es-ES */
+		out->base = es_base;
+		out->shifted = es_shifted;
 		break;
 	default:      /* US and every unknown layout */
 		out->base = base;

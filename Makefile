@@ -127,6 +127,7 @@ REGRESS_PROGS = \
 	regress/wire/bitmap_rle_test \
 	regress/wire/fastpath_test \
 	regress/wire/rdpgfx_test \
+	regress/greeter/keymap_test \
 	$(FUSE_REGRESS) \
 	$(OBSD_FUSE_REGRESS)
 
@@ -369,6 +370,12 @@ regress/wire/rdpgfx_test: regress/wire/rdpgfx_test.c src/channels/rdpgfx.c \
 	$(CC) $(CFLAGS) $(TEST_SAN) -Isrc/include \
 		-o $@ regress/wire/rdpgfx_test.c src/channels/rdpgfx.c \
 		src/common/buf.c src/common/log.c
+
+# Per-LCID greeter keymap tables (self-contained; the scancode index guard is
+# covered by $(TEST_SAN)).
+regress/greeter/keymap_test: regress/greeter/keymap_test.c src/greeter/keymap.c
+	$(CC) $(CFLAGS) $(TEST_SAN) -Isrc/include \
+		-o $@ regress/greeter/keymap_test.c src/greeter/keymap.c
 
 # Printer module unit test.  printer.c is recompiled with the test so the
 # sanitization and the wire header layout are covered directly; $(TEST_SAN)
