@@ -236,8 +236,12 @@ regress/wire/x224_test: regress/wire/x224_test.o $(WIRE_LIB) $(COMMON_LIB)
 regress/wire/mcs_test: regress/wire/mcs_test.o $(WIRE_LIB) $(COMMON_LIB)
 	$(CC) $(LDFLAGS) -o $@ regress/wire/mcs_test.o $(WIRE_LIB) $(COMMON_LIB)
 
-regress/wire/capset_test: regress/wire/capset_test.o $(WIRE_LIB) $(COMMON_LIB)
-	$(CC) $(LDFLAGS) -o $@ regress/wire/capset_test.o $(WIRE_LIB) $(COMMON_LIB)
+# capset.c is recompiled with the test so $(TEST_SAN) covers the Confirm Active
+# parser's offset reads into attacker-supplied capability sets.
+regress/wire/capset_test: regress/wire/capset_test.c src/wire/capset.c \
+		src/common/buf.c
+	$(CC) $(CFLAGS) $(TEST_SAN) -Isrc/include \
+		-o $@ regress/wire/capset_test.c src/wire/capset.c src/common/buf.c
 
 regress/wire/rdp_pdu_test: regress/wire/rdp_pdu_test.o $(WIRE_LIB) $(COMMON_LIB)
 	$(CC) $(LDFLAGS) -o $@ regress/wire/rdp_pdu_test.o $(WIRE_LIB) $(COMMON_LIB)

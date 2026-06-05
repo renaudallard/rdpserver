@@ -80,9 +80,86 @@ test_demand_active(void)
 	if (cap_count != 12) FAIL("bitmap-cache cap_count = %u", cap_count);
 }
 
+/* Build an Order capability set (88 bytes); set the MemBlt orderSupport slot
+ * when memblt is non-zero.  orderSupport[] starts 32 bytes into the body. */
+static size_t
+order_cap(uint8_t *p, int memblt)
+{
+	memset(p, 0, 88);
+	p[0] = RDP_CAP_ORDER & 0xff; p[1] = RDP_CAP_ORDER >> 8;
+	p[2] = 88; p[3] = 0;
+	if (memblt)
+		p[4 + 32 + RDP_ORDER_NEG_MEMBLT_INDEX] = 1;
+	return 88;
+}
+
+/* Build a Bitmap Cache Rev2 capability set (40 bytes). */
+static size_t
+rev2_cap(uint8_t *p)
+{
+	memset(p, 0, 40);
+	p[0] = RDP_CAP_BITMAPCACHE_REV2 & 0xff;
+	p[1] = RDP_CAP_BITMAPCACHE_REV2 >> 8;
+	p[2] = 40; p[3] = 0;
+	return 40;
+}
+
+/* Wrap concatenated capability sets in a Confirm Active body. */
+static size_t
+build_confirm(uint8_t *buf, const uint8_t *caps, size_t caps_len,
+    uint16_t cap_count)
+{
+	uint16_t lenComb = (uint16_t)(4 + caps_len);   /* capCount+pad2+caps */
+	size_t off;
+	memset(buf, 0, 6);                             /* shareId, originatorId */
+	off = 6;
+	buf[off++] = 4; buf[off++] = 0;                /* lengthSourceDescriptor */
+	buf[off++] = (uint8_t)lenComb; buf[off++] = (uint8_t)(lenComb >> 8);
+	memcpy(buf + off, "RDP", 3); buf[off + 3] = 0; off += 4;
+	buf[off++] = (uint8_t)cap_count; buf[off++] = (uint8_t)(cap_count >> 8);
+	buf[off++] = 0; buf[off++] = 0;                /* pad2 */
+	memcpy(buf + off, caps, caps_len); off += caps_len;
+	return off;
+}
+
+static void
+test_parse_confirm_active(void)
+{
+	uint8_t caps[256], buf[512];
+	size_t cl, n;
+	int ok;
+
+	/* MemBlt order support + Rev2 cache cap -> the client accepts orders. */
+	cl = order_cap(caps, 1);
+	cl += rev2_cap(caps + cl);
+	n = build_confirm(buf, caps, cl, 2);
+	ok = -1;
+	if (rdp_capset_parse_confirm_active(buf, n, NULL, NULL, NULL, NULL,
+	    NULL, &ok) != 0) FAIL("parse memblt+rev2");
+	if (ok != 1) FAIL("memblt+rev2 -> ok=%d", ok);
+
+	/* MemBlt but no Rev2 cap (cache disabled) -> orders must not be used. */
+	cl = order_cap(caps, 1);
+	n = build_confirm(buf, caps, cl, 1);
+	ok = -1;
+	if (rdp_capset_parse_confirm_active(buf, n, NULL, NULL, NULL, NULL,
+	    NULL, &ok) != 0) FAIL("parse memblt-only");
+	if (ok != 0) FAIL("memblt-only -> ok=%d", ok);
+
+	/* Rev2 cap but MemBlt slot zero -> orders must not be used. */
+	cl = order_cap(caps, 0);
+	cl += rev2_cap(caps + cl);
+	n = build_confirm(buf, caps, cl, 2);
+	ok = -1;
+	if (rdp_capset_parse_confirm_active(buf, n, NULL, NULL, NULL, NULL,
+	    NULL, &ok) != 0) FAIL("parse rev2-no-memblt");
+	if (ok != 0) FAIL("rev2-no-memblt -> ok=%d", ok);
+}
+
 int
 main(void)
 {
 	test_demand_active();
+	test_parse_confirm_active();
 	return 0;
 }

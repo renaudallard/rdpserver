@@ -71,6 +71,9 @@
 #define RDP_CAP_GLYPHCACHE       0x0010
 #define RDP_CAP_OFFSCREENCACHE   0x0011
 #define RDP_CAP_BITMAPCACHE_HOSTSUPPORT 0x0012
+/* Client-to-server only; the server never emits it, but parses it from the
+ * Confirm Active to learn the client enabled its bitmap cache. */
+#define RDP_CAP_BITMAPCACHE_REV2 0x0013
 #define RDP_CAP_VIRTUALCHANNEL   0x0014
 #define RDP_CAP_MULTIFRAGMENT    0x001A
 #define RDP_CAP_LARGEPOINTER     0x001B
@@ -109,12 +112,15 @@ ssize_t rdp_capset_build_demand_active(uint8_t *out, size_t cap,
  * about: the client's desktop bpp and, when present, the
  * MultifragmentUpdate MaxRequestSize, the Pointer colorPointerFlag, the
  * LargePointer largePointerSupportFlags and the Pointer cap's pointer
- * cache size.  Any out-param may be NULL.  max_request_size_out,
- * color_ptr_out, large_ptr_flags_out and pointer_cache_size_out default
- * to 0 when their cap is absent.  Returns 0 on success. */
+ * cache size.  bitmap_cache_ok_out is set to 1 only when the client both
+ * announced MemBlt order support and sent a Bitmap Cache Rev2 cap, i.e. it
+ * will accept the cached-tile drawing orders; 0 otherwise.  Any out-param may
+ * be NULL.  max_request_size_out, color_ptr_out, large_ptr_flags_out,
+ * pointer_cache_size_out and bitmap_cache_ok_out default to 0 when absent.
+ * Returns 0 on success. */
 int rdp_capset_parse_confirm_active(const uint8_t *p, size_t len,
 		uint16_t *bpp_out, uint32_t *max_request_size_out,
 		uint16_t *color_ptr_out, uint16_t *large_ptr_flags_out,
-		uint16_t *pointer_cache_size_out);
+		uint16_t *pointer_cache_size_out, int *bitmap_cache_ok_out);
 
 #endif /* RDP_CAPSET_H */

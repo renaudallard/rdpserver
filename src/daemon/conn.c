@@ -1574,6 +1574,11 @@ static int g_allow_bitmap_cache;
 /* Per-connection bitmap cache slot manager (one worker == one connection),
  * created when g_allow_bitmap_cache is set. */
 static struct rdp_bmpcache *g_bmpcache;
+/* Set from the client's Confirm Active: 1 only when the client announced both
+ * MemBlt order support and a Bitmap Cache Rev2 cap.  The cached-tile drawing
+ * orders are sent only when this is set, so a client that did not enable its
+ * bitmap cache is never sent orders it would reject. */
+static int g_client_bitmap_cache_ok;
 
 /* Try to recognise a channel-bearing TPKT/MCS SDR and dispatch.
  * Returns 1 if handled, 0 if not, -1 on disconnect, 2 if a resize
@@ -3019,7 +3024,8 @@ run_proxy(struct rdp_tls *t, int be_fd,
 					if (push_frame_tiled(t, fhdr.x,
 						fhdr.y, fhdr.w, fhdr.h,
 						frame_buf, chunk_target,
-						g_allow_bitmap_cache
+						(g_allow_bitmap_cache
+						 && g_client_bitmap_cache_ok)
 						? g_bmpcache : NULL) != 0)
 						break;
 				}
@@ -4095,13 +4101,15 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 		if (payload_len > 6) {
 			uint32_t mrq = 0;
 			uint16_t cptr = 0, lptr = 0, pcache = 0;
+			int cache_ok = 0;
 			if (rdp_capset_parse_confirm_active(payload + 6,
 				payload_len - 6, NULL, &mrq, &cptr, &lptr,
-				&pcache) == 0) {
+				&pcache, &cache_ok) == 0) {
 				client_max_request = mrq;
 				client_color_ptr = cptr;
 				client_large_ptr = lptr;
 				client_pointer_cache_size = pcache;
+				g_client_bitmap_cache_ok = cache_ok;
 			}
 		}
 		rdp_debug("conn[%s]: client MaxRequestSize=%u colorPtr=%u largePtr=0x%04x ptrCache=%u",

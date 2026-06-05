@@ -422,10 +422,11 @@ int
 rdp_capset_parse_confirm_active(const uint8_t *p, size_t len,
 		uint16_t *bpp_out, uint32_t *max_request_size_out,
 		uint16_t *color_ptr_out, uint16_t *large_ptr_flags_out,
-		uint16_t *pointer_cache_size_out)
+		uint16_t *pointer_cache_size_out, int *bitmap_cache_ok_out)
 {
 	uint16_t lenSrc, lenComb, capCount;
 	size_t off = 0;
+	int saw_memblt = 0, saw_cache_rev2 = 0;
 
 	if (len < 10) return -1;
 	off += 4;  /* shareId */
@@ -442,6 +443,7 @@ rdp_capset_parse_confirm_active(const uint8_t *p, size_t len,
 	if (color_ptr_out) *color_ptr_out = 0;
 	if (large_ptr_flags_out) *large_ptr_flags_out = 0;
 	if (pointer_cache_size_out) *pointer_cache_size_out = 0;
+	if (bitmap_cache_ok_out) *bitmap_cache_ok_out = 0;
 	/* Iterate caps; we just sanity-check lengths. */
 	{
 		size_t end = off + lenComb - 4;
@@ -480,10 +482,24 @@ rdp_capset_parse_confirm_active(const uint8_t *p, size_t len,
 			    && large_ptr_flags_out)
 				*large_ptr_flags_out = (uint16_t)p[off + 4]
 					| ((uint16_t)p[off + 5] << 8);          /* largePointerSupportFlags */
+			/* Order cap orderSupport[] (32 bytes) starts 32 bytes into
+			 * the cap body; a non-zero MemBlt slot means the client
+			 * accepts MemBlt primary orders. */
+			if (ctype == RDP_CAP_ORDER
+			    && clen >= 4 + 32 + RDP_ORDER_NEG_MEMBLT_INDEX + 1
+			    && p[off + 4 + 32 + RDP_ORDER_NEG_MEMBLT_INDEX] != 0)
+				saw_memblt = 1;
+			/* The client advertises its own bitmap cache cells with a
+			 * Bitmap Cache Rev2 cap; without it the client will reject
+			 * the Cache Bitmap orders. */
+			if (ctype == RDP_CAP_BITMAPCACHE_REV2)
+				saw_cache_rev2 = 1;
 			off += clen;
 			total++;
 		}
 		(void)total;
 	}
+	if (bitmap_cache_ok_out)
+		*bitmap_cache_ok_out = saw_memblt && saw_cache_rev2;
 	return 0;
 }
