@@ -126,6 +126,7 @@ REGRESS_PROGS = \
 	regress/wire/bmpcache_test \
 	regress/wire/bitmap_rle_test \
 	regress/wire/fastpath_test \
+	regress/wire/rdpgfx_test \
 	$(FUSE_REGRESS) \
 	$(OBSD_FUSE_REGRESS)
 
@@ -356,6 +357,14 @@ regress/wire/fastpath_test: regress/wire/fastpath_test.c src/wire/fastpath.c \
 	$(CC) $(CFLAGS) $(TEST_SAN) -Isrc/include \
 		-o $@ regress/wire/fastpath_test.c src/wire/fastpath.c \
 		src/wire/bitmap_rle.c src/common/buf.c
+
+# GFX CapsAdvertise parser bounds.  rdpgfx.c is recompiled with the test so
+# $(TEST_SAN) catches any over-read past the PDU on hostile capsData lengths.
+regress/wire/rdpgfx_test: regress/wire/rdpgfx_test.c src/channels/rdpgfx.c \
+		src/common/buf.c src/common/log.c
+	$(CC) $(CFLAGS) $(TEST_SAN) -Isrc/include \
+		-o $@ regress/wire/rdpgfx_test.c src/channels/rdpgfx.c \
+		src/common/buf.c src/common/log.c
 
 # Printer module unit test.  printer.c is recompiled with the test so the
 # sanitization and the wire header layout are covered directly; $(TEST_SAN)

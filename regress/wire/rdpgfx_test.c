@@ -1,0 +1,155 @@
+/*
+ * Copyright (c) 2026 Renaud Allard <renaud@allard.it>
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ *
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in
+ *    the documentation and/or other materials provided with the
+ *    distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+ * COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+ * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+ * ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGES.
+ */
+/*
+ * rdpgfx_test.c -- RDPGFX_CMDID_CAPSADVERTISE parser bounds hardening.
+ *
+ * Exercises a well-formed advertise plus the malicious shapes a hostile client
+ * can send: a cap-set length that runs past the PDU, a length that would
+ * integer-overflow the bounds arithmetic, more cap sets than the slot array
+ * holds, and trailing bytes from a following PDU that must not be parsed as
+ * extra cap sets (the pduLength field bounds the walk).
+ */
+
+#include "../../src/channels/rdpgfx.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define FAIL(...) do {                                \
+	(void)fprintf(stderr, "fail: " __VA_ARGS__);  \
+	(void)fputc('\n', stderr);                    \
+	exit(1);                                       \
+} while (0)
+
+static void
+put32(uint8_t *p, uint32_t v)
+{
+	p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8);
+	p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
+}
+
+/* Build a CAPSADVERTISE header at buf: cmdId, flags=0, pduLength, count. */
+static size_t
+hdr(uint8_t *buf, uint32_t pdu_len, uint16_t count)
+{
+	buf[0] = (uint8_t)(RDPGFX_CMDID_CAPSADVERTISE & 0xff);
+	buf[1] = (uint8_t)(RDPGFX_CMDID_CAPSADVERTISE >> 8);
+	buf[2] = 0; buf[3] = 0;                 /* flags */
+	put32(buf + 4, pdu_len);                /* pduLength */
+	buf[8] = (uint8_t)(count & 0xff);
+	buf[9] = (uint8_t)(count >> 8);
+	return 10;
+}
+
+/* Append a cap set (version, dataLength, then dataLength bytes of which the
+ * first 4 are flags when present). */
+static size_t
+capset(uint8_t *p, uint32_t ver, uint32_t dlen, uint32_t flags)
+{
+	put32(p, ver);
+	put32(p + 4, dlen);
+	if (dlen >= 4) put32(p + 8, flags);
+	return 8 + dlen;
+}
+
+int
+main(void)
+{
+	struct rdpgfx_caps_advertise adv;
+	uint8_t buf[512];
+	size_t n;
+
+	/* Well-formed: two cap sets. */
+	n = hdr(buf, 0, 2);
+	n += capset(buf + n, 0x000A0002u, 4, 0x22);
+	n += capset(buf + n, 0x00080105u, 4, 0x02);
+	if (rdp_rdpgfx_parse_caps_advertise(buf, n, &adv) != 0) FAIL("wellformed");
+	if (adv.count != 2) FAIL("count %u != 2", adv.count);
+	if (adv.sets[0].version != 0x000A0002u || adv.sets[0].flags != 0x22)
+		FAIL("set0");
+	if (adv.sets[1].version != 0x00080105u) FAIL("set1");
+
+	/* Too short, wrong cmdId. */
+	if (rdp_rdpgfx_parse_caps_advertise(buf, 9, &adv) != -1) FAIL("short");
+	{
+		uint8_t bad[16];
+		memset(bad, 0, sizeof bad);
+		bad[0] = 0x99;   /* not CAPSADVERTISE */
+		if (rdp_rdpgfx_parse_caps_advertise(bad, sizeof bad, &adv) != -1)
+			FAIL("wrong cmdId");
+	}
+
+	/* A cap-set length that runs past the buffer is not over-read. */
+	n = hdr(buf, 0, 2);
+	n += capset(buf + n, 0x000A0002u, 4, 0x22);
+	put32(buf + n, 0x000A0100u);             /* second set version */
+	put32(buf + n + 4, 0x10000);             /* dataLength way past buf */
+	n += 8;
+	if (rdp_rdpgfx_parse_caps_advertise(buf, n, &adv) != 0) FAIL("overrun");
+	if (adv.count != 1) FAIL("overrun count %u != 1", adv.count);
+
+	/* A length near UINT32_MAX must not overflow the bounds arithmetic. */
+	n = hdr(buf, 0, 1);
+	put32(buf + n, 0x000A0002u);
+	put32(buf + n + 4, 0xFFFFFFFFu);         /* dataLength */
+	n += 8;
+	if (rdp_rdpgfx_parse_caps_advertise(buf, n, &adv) != 0) FAIL("overflow");
+	if (adv.count != 0) FAIL("overflow count %u != 0", adv.count);
+
+	/* pduLength bounds the walk: count claims 2, but pduLength only covers
+	 * the first set; the trailing bytes (a following PDU) must be ignored. */
+	{
+		size_t base = hdr(buf, 22, 2);   /* pduLength = 10 + (8+4) */
+		size_t m = base + capset(buf + base, 0x000A0002u, 4, 0x22);
+		/* Trailing bytes that look like a second cap set. */
+		m += capset(buf + m, 0xDEADBEEFu, 4, 0xBADF00Du);
+		if (rdp_rdpgfx_parse_caps_advertise(buf, m, &adv) != 0)
+			FAIL("pdulen");
+		if (adv.count != 1) FAIL("pdulen count %u != 1", adv.count);
+		if (adv.sets[0].version != 0x000A0002u)
+			FAIL("pdulen read into trailing PDU");
+	}
+
+	/* More cap sets than the slot array holds: stored count is capped, no
+	 * out-of-bounds write. */
+	{
+		uint16_t k;
+		n = hdr(buf, 0, 30);
+		for (k = 0; k < 30; k++)
+			n += capset(buf + n, 0x000A0002u + k, 4, k);
+		if (rdp_rdpgfx_parse_caps_advertise(buf, n, &adv) != 0)
+			FAIL("manysets");
+		if (adv.count != RDPGFX_MAX_CAPSETS)
+			FAIL("manysets count %u != %u", adv.count, RDPGFX_MAX_CAPSETS);
+	}
+
+	(void)printf("rdpgfx_test: all ok\n");
+	return 0;
+}

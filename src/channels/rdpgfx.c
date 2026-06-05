@@ -58,21 +58,35 @@ rdp_rdpgfx_parse_caps_advertise(const uint8_t *pdu, size_t len,
 		struct rdpgfx_caps_advertise *out)
 {
 	uint16_t cmdId, cnt, i;
-	size_t off;
+	uint32_t pdu_len;
+	size_t bound, off;
 
 	if (len < RDPGFX_HEADER_SIZE + 2) return -1;
 	cmdId = (uint16_t)pdu[0] | ((uint16_t)pdu[1] << 8);
 	if (cmdId != RDPGFX_CMDID_CAPSADVERTISE) return -1;
 
+	/* Honour the PDU's own pduLength: a single DRDYNVC message can carry
+	 * several concatenated GFX PDUs, so the cap-set walk must stop at the
+	 * end of this PDU, not at the end of the whole reassembled buffer; a
+	 * missing or oversized length falls back to the buffer length. */
+	pdu_len = ld32le(pdu + 4);
+	bound = len;
+	if (pdu_len >= RDPGFX_HEADER_SIZE + 2 && pdu_len < bound)
+		bound = pdu_len;
+
 	cnt = (uint16_t)pdu[8] | ((uint16_t)pdu[9] << 8);
 	out->count = 0;
 	off = 10;
 	rdp_info("rdpgfx: caps advertise, %u cap sets", (unsigned)cnt);
-	for (i = 0; i < cnt && off + 8 <= len; i++) {
-		uint32_t ver = ld32le(pdu + off);
-		uint32_t dlen = ld32le(pdu + off + 4);
-		uint32_t flags = 0;
-		if (off + 8 + (size_t)dlen > len)
+	for (i = 0; i < cnt; i++) {
+		uint32_t ver, dlen, flags = 0;
+		if (off + 8 > bound)
+			break;   /* no room for another capset header */
+		ver = ld32le(pdu + off);
+		dlen = ld32le(pdu + off + 4);
+		/* Overflow-safe: capsData must fit in the bytes left after the
+		 * 8-byte capset header (off + 8 <= bound is established above). */
+		if (dlen > bound - (off + 8))
 			break;   /* capsData runs past the PDU; malformed */
 		if (dlen >= 4)
 			flags = ld32le(pdu + off + 8);
