@@ -32,6 +32,7 @@
 
 #include "wayland_comp.h"
 
+#include "kbdmap.h"
 #include "../include/compat.h"
 #include "../include/rdp_log.h"
 
@@ -44,6 +45,8 @@
 #include <wlr/render/wlr_renderer.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_data_device.h>
+#include <wlr/types/wlr_keyboard.h>
+#include <wlr/interfaces/wlr_keyboard.h>
 #include <wlr/types/wlr_output.h>
 #include <wlr/types/wlr_output_layout.h>
 #include <wlr/types/wlr_seat.h>
@@ -68,7 +71,8 @@ struct rdp_wl_comp {
 	struct wlr_compositor      *compositor;
 	struct wlr_xdg_shell       *xdg_shell;
 	struct wlr_seat            *seat;
-	struct wlr_keyboard        *keyboard;
+	struct wlr_keyboard         keyboard;
+	int                         kbd_ready;
 	const char                 *socket;
 
 	uint8_t                    *fb;
@@ -349,8 +353,17 @@ on_new_xdg_toplevel(struct wl_listener *listener, void *data)
 	 * the surface is not yet initialized. */
 }
 
+/* No-op LED sink: the headless seat drives no keyboard LEDs, but wlroots calls
+ * impl->led_update on lock-key changes, so it must not be NULL. */
+static void
+kbd_led_update(struct wlr_keyboard *kb, uint32_t leds)
+{
+	(void)kb;
+	(void)leds;
+}
+
 struct rdp_wl_comp *
-rdp_wl_comp_create(int width, int height)
+rdp_wl_comp_create(int width, int height, uint32_t lcid)
 {
 	struct rdp_wl_comp *c;
 
@@ -389,6 +402,44 @@ rdp_wl_comp_create(int width, int height)
 	wlr_seat_set_capabilities(c->seat,
 	    WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD
 	    | WL_SEAT_CAPABILITY_TOUCH);
+
+	/* Give the seat a keyboard carrying the client's layout, so session
+	 * apps receive the right characters for the keycodes injected from RDP
+	 * scancodes.  Without a keymap clients fall back to the libxkbcommon
+	 * default (US). */
+	{
+		static const struct wlr_keyboard_impl kbd_impl = {
+			.name = "rdp-keyboard",
+			.led_update = kbd_led_update
+		};
+		const char *layout = NULL, *variant = NULL;
+		struct xkb_context *xkb;
+		struct xkb_keymap *keymap = NULL;
+
+		rdp_klid_to_xkb(lcid, &layout, &variant);
+		wlr_keyboard_init(&c->keyboard, &kbd_impl, "rdp-keyboard");
+		c->kbd_ready = 1;
+		xkb = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+		if (xkb != NULL) {
+			struct xkb_rule_names rules;
+			memset(&rules, 0, sizeof rules);
+			rules.layout = layout;
+			rules.variant = variant;
+			keymap = xkb_keymap_new_from_names(xkb, &rules,
+			    XKB_KEYMAP_COMPILE_NO_FLAGS);
+			xkb_context_unref(xkb);
+		}
+		if (keymap != NULL) {
+			wlr_keyboard_set_keymap(&c->keyboard, keymap);
+			xkb_keymap_unref(keymap);
+			rdp_info("wayland keyboard layout: LCID 0x%x -> %s",
+			    (unsigned)lcid, layout);
+		} else {
+			rdp_warn("wayland: xkb keymap for '%s' failed; "
+			    "default layout", layout ? layout : "us");
+		}
+		wlr_seat_set_keyboard(c->seat, &c->keyboard);
+	}
 
 	c->output = wlr_headless_add_output(c->backend, width, height);
 	if (c->output == NULL) goto fail;
@@ -594,6 +645,8 @@ void
 rdp_wl_comp_destroy(struct rdp_wl_comp *c)
 {
 	if (c == NULL) return;
+	if (c->kbd_ready)
+		wlr_keyboard_finish(&c->keyboard);
 	free(c->fb);
 	if (c->display != NULL)
 		wl_display_destroy_clients(c->display);
@@ -604,8 +657,8 @@ rdp_wl_comp_destroy(struct rdp_wl_comp *c)
 
 #else /* !HAVE_WLROOTS */
 
-struct rdp_wl_comp *rdp_wl_comp_create(int w, int h)
-{ (void)w; (void)h; return NULL; }
+struct rdp_wl_comp *rdp_wl_comp_create(int w, int h, uint32_t lcid)
+{ (void)w; (void)h; (void)lcid; return NULL; }
 const char *rdp_wl_comp_get_socket(struct rdp_wl_comp *c)
 { (void)c; return NULL; }
 int rdp_wl_comp_dispatch(struct rdp_wl_comp *c, int t)

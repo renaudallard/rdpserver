@@ -1100,12 +1100,12 @@ send_window_event(int op, uint32_t window_id, int32_t x, int32_t y,
 
 #if HAVE_WLROOTS
 static int
-run_wayland_mode(int w, int h)
+run_wayland_mode(int w, int h, uint32_t lcid)
 {
 	struct rdp_wl_comp *wl;
 	uint8_t *row_buf;
 
-	wl = rdp_wl_comp_create(w, h);
+	wl = rdp_wl_comp_create(w, h, lcid);
 	if (wl == NULL) {
 		rdp_err("wayland compositor init failed");
 		return 1;
@@ -1411,7 +1411,7 @@ main(int argc, char *argv[])
 
 	if (use_wayland) {
 #if HAVE_WLROOTS
-		int rc = run_wayland_mode(w, h);
+		int rc = run_wayland_mode(w, h, (uint32_t)lcid);
 		rdp_log_close();
 		return rc;
 #else

@@ -44,7 +44,9 @@ struct rdp_wl_window_event {
 	char     title[256];
 };
 
-struct rdp_wl_comp *rdp_wl_comp_create(int width, int height);
+/* lcid is the client's keyboard layout (Windows LCID); it selects the xkb
+ * keymap the compositor advertises to session apps.  0 = US. */
+struct rdp_wl_comp *rdp_wl_comp_create(int width, int height, uint32_t lcid);
 const char *rdp_wl_comp_get_socket(struct rdp_wl_comp *c);
 int rdp_wl_comp_dispatch(struct rdp_wl_comp *c, int timeout_ms);
 int rdp_wl_comp_get_framebuffer(struct rdp_wl_comp *c,
