@@ -125,6 +125,7 @@ REGRESS_PROGS = \
 	regress/wire/order_test \
 	regress/wire/bmpcache_test \
 	regress/wire/bitmap_rle_test \
+	regress/wire/fastpath_test \
 	$(FUSE_REGRESS) \
 	$(OBSD_FUSE_REGRESS)
 
@@ -346,6 +347,15 @@ regress/wire/bmpcache_test: regress/wire/bmpcache_test.c src/wire/bmpcache.c
 regress/wire/bitmap_rle_test: regress/wire/bitmap_rle_test.c src/wire/bitmap_rle.c
 	$(CC) $(CFLAGS) $(TEST_SAN) -Isrc/include \
 		-o $@ regress/wire/bitmap_rle_test.c src/wire/bitmap_rle.c
+
+# TS_UPDATE_BITMAP builder, including the RLE-compressed path.  fastpath.c and
+# its codec/buffer deps are recompiled with the test so $(TEST_SAN) covers the
+# builder's offset arithmetic and the body shift.
+regress/wire/fastpath_test: regress/wire/fastpath_test.c src/wire/fastpath.c \
+		src/wire/bitmap_rle.c src/common/buf.c
+	$(CC) $(CFLAGS) $(TEST_SAN) -Isrc/include \
+		-o $@ regress/wire/fastpath_test.c src/wire/fastpath.c \
+		src/wire/bitmap_rle.c src/common/buf.c
 
 # Printer module unit test.  printer.c is recompiled with the test so the
 # sanitization and the wire header layout are covered directly; $(TEST_SAN)

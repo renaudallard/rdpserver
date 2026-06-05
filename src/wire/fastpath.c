@@ -32,6 +32,7 @@
 
 #include "fastpath.h"
 
+#include "bitmap_rle.h"
 #include "../common/buf.h"
 #include "../include/rdp_log.h"
 
@@ -205,6 +206,73 @@ encode_bitmap_pixels(uint8_t *out, const uint8_t *src, size_t src_stride,
 	return row_bytes * h;
 }
 
+/* TS_BITMAP_DATA flags (MS-RDPBCGR 2.2.9.1.1.3.1.2.2). */
+#define BITMAP_COMPRESSION      0x0001
+#define NO_BITMAP_COMPRESSION_HDR 0x0400
+
+/* Write one TS_BITMAP_DATA (the per-rectangle structure: 18 header bytes then
+ * the bitmap) for the rectangle [x, y, w, h] from 24bpp top-down BGR pixels
+ * into dst (cap bytes).  When the tile is within the RLE codec's 64x64 limit,
+ * its rows are packed (stride == w*3) and interleaved RLE shrinks it below the
+ * raw 4-pixel-padded rows (counting the 8-byte compression header), the
+ * compressed form is written; otherwise the raw bottom-up rows are.  The
+ * compression header is always included, so any client decodes it.  Returns
+ * the number of bytes written, or -1 on overflow. */
+static ssize_t
+write_bitmap_data(uint8_t *dst, size_t cap, uint16_t x, uint16_t y,
+		uint16_t w, uint16_t h, const uint8_t *pixels, size_t stride)
+{
+	uint16_t wpad = (uint16_t)((w + 3) & ~3u);
+	size_t pixel_bytes = (size_t)wpad * 3 * h;
+	uint16_t r2 = (uint16_t)(x + w - 1);
+	uint16_t b2 = (uint16_t)(y + h - 1);
+	uint8_t rle[64 * 64 * 3 + 256];
+	size_t rle_len = 0;
+
+	/* The 18-byte TS_BITMAP_DATA header is written below before either
+	 * branch revalidates against the data size, so it must fit first. */
+	if (cap < 18) return -1;
+	dst[0] = (uint8_t)(x & 0xff);  dst[1] = (uint8_t)(x >> 8);
+	dst[2] = (uint8_t)(y & 0xff);  dst[3] = (uint8_t)(y >> 8);
+	dst[4] = (uint8_t)(r2 & 0xff); dst[5] = (uint8_t)(r2 >> 8);
+	dst[6] = (uint8_t)(b2 & 0xff); dst[7] = (uint8_t)(b2 >> 8);
+	dst[12] = 24; dst[13] = 0;                 /* bitsPerPixel = 24 */
+
+	if (w >= 1 && w <= 64 && h >= 1 && h <= 64 && stride == (size_t)w * 3
+	    && rdp_bitmap_rle_compress_24(rle, sizeof rle, &rle_len, pixels, w, h)
+	       == 0 && rle_len + 8 < pixel_bytes) {
+		size_t total = 18 + 8 + rle_len;
+		uint16_t scan = (uint16_t)(w * 3);
+		uint16_t uncomp = (uint16_t)(w * 3 * h);
+		if (cap < total) return -1;
+		dst[8] = (uint8_t)(w & 0xff);  dst[9] = (uint8_t)(w >> 8);
+		dst[10] = (uint8_t)(h & 0xff); dst[11] = (uint8_t)(h >> 8);
+		dst[14] = BITMAP_COMPRESSION; dst[15] = 0;      /* flags */
+		dst[16] = (uint8_t)(rle_len & 0xff);            /* bitmapLength */
+		dst[17] = (uint8_t)((rle_len >> 8) & 0xff);
+		/* bitmapComprHdr (TS_CD_HEADER, 8 bytes). */
+		dst[18] = 0; dst[19] = 0;                       /* cbCompFirstRowSize */
+		dst[20] = (uint8_t)(rle_len & 0xff);            /* cbCompMainBodySize */
+		dst[21] = (uint8_t)((rle_len >> 8) & 0xff);
+		dst[22] = (uint8_t)(scan & 0xff);               /* cbScanWidth */
+		dst[23] = (uint8_t)(scan >> 8);
+		dst[24] = (uint8_t)(uncomp & 0xff);             /* cbUncompressedSize */
+		dst[25] = (uint8_t)(uncomp >> 8);
+		memcpy(dst + 26, rle, rle_len);
+		return (ssize_t)total;
+	}
+
+	/* Raw: bottom-up rows padded to a 4-pixel width. */
+	if (18 + pixel_bytes > 0xffff || cap < 18 + pixel_bytes) return -1;
+	dst[8] = (uint8_t)(wpad & 0xff); dst[9] = (uint8_t)(wpad >> 8);
+	dst[10] = (uint8_t)(h & 0xff);   dst[11] = (uint8_t)(h >> 8);
+	dst[14] = 0; dst[15] = 0;                  /* flags = 0 (uncompressed) */
+	dst[16] = (uint8_t)(pixel_bytes & 0xff);   /* bitmapLength */
+	dst[17] = (uint8_t)((pixel_bytes >> 8) & 0xff);
+	(void)encode_bitmap_pixels(dst + 18, pixels, stride, w, h);
+	return (ssize_t)(18 + pixel_bytes);
+}
+
 /* Write a bare TS_UPDATE_BITMAP body (no fast-path wrapper) to out.
  * Returns the body size, or -1 if it would exceed cap or 0xffff. */
 ssize_t
@@ -212,31 +280,14 @@ rdp_fp_build_bitmap_body(uint8_t *out, size_t cap,
 		uint16_t x, uint16_t y, uint16_t w, uint16_t h,
 		const uint8_t *pixels, size_t pixels_stride)
 {
-	uint16_t wpad = (uint16_t)((w + 3) & ~3u);
-	size_t pixel_bytes = (size_t)wpad * 3 * h;
-	size_t body_size = 4 + 18 + pixel_bytes;
-	uint8_t *body = out;
+	ssize_t bd;
 
-	if (body_size > 0xffff) return -1;
-	if (cap < body_size) return -1;
-	body[0] = 0x01; body[1] = 0x00;
-	body[2] = 0x01; body[3] = 0x00;
-	body[4] = (uint8_t)(x & 0xff); body[5] = (uint8_t)(x >> 8);
-	body[6] = (uint8_t)(y & 0xff); body[7] = (uint8_t)(y >> 8);
-	{
-		uint16_t r2 = (uint16_t)(x + w - 1);
-		uint16_t b2 = (uint16_t)(y + h - 1);
-		body[8] = (uint8_t)(r2 & 0xff);  body[9] = (uint8_t)(r2 >> 8);
-		body[10] = (uint8_t)(b2 & 0xff); body[11] = (uint8_t)(b2 >> 8);
-	}
-	body[12] = (uint8_t)(wpad & 0xff); body[13] = (uint8_t)(wpad >> 8);
-	body[14] = (uint8_t)(h & 0xff);    body[15] = (uint8_t)(h >> 8);
-	body[16] = 24; body[17] = 0;       /* bitsPerPixel = 24 */
-	body[18] = 0;  body[19] = 0;       /* flags = 0 (uncompressed) */
-	body[20] = (uint8_t)(pixel_bytes & 0xff);
-	body[21] = (uint8_t)((pixel_bytes >> 8) & 0xff);
-	(void)encode_bitmap_pixels(body + 22, pixels, pixels_stride, w, h);
-	return (ssize_t)body_size;
+	if (cap < 4) return -1;
+	out[0] = 0x01; out[1] = 0x00;      /* updateType = UPDATETYPE_BITMAP */
+	out[2] = 0x01; out[3] = 0x00;      /* numberRectangles = 1 */
+	bd = write_bitmap_data(out + 4, cap - 4, x, y, w, h, pixels, pixels_stride);
+	if (bd < 0 || 4 + (size_t)bd > 0xffff) return -1;
+	return 4 + bd;
 }
 
 ssize_t
@@ -244,58 +295,37 @@ rdp_fp_build_bitmap_update(uint8_t *out, size_t cap,
 		uint16_t x, uint16_t y, uint16_t w, uint16_t h,
 		const uint8_t *pixels, size_t pixels_stride)
 {
-	uint16_t wpad = (uint16_t)((w + 3) & ~3u);
-	size_t pixel_bytes = (size_t)wpad * 3 * h;
-	/* TS_UPDATE_BITMAP header: updateType(2)=0x0001 + numberRectangles(2)
-	 *   then per rect: destLeft/Top/Right/Bottom(2 each), width(2),
-	 *   height(2), bitsPerPixel(2), flags(2), bitmapLength(2),
-	 *   bitmapData(...). */
-	size_t body_size = 4 + 18 + pixel_bytes;
-	uint8_t *body;
+	ssize_t bd;
+	size_t body_size;
+	struct rdp_buf b;
+	size_t inner, total, hdr_n;
+	uint8_t hdr[4];
 
+	/* Build the TS_UPDATE_BITMAP body at out+4, then prefix the fast-path
+	 * record headers (which are 1-2 bytes shorter, so the body is shifted
+	 * left into place once their length is known). */
+	if (cap < 8) return -1;
+	out[4] = 0x01; out[5] = 0x00;
+	out[6] = 0x01; out[7] = 0x00;
+	bd = write_bitmap_data(out + 8, cap - 8, x, y, w, h, pixels, pixels_stride);
+	if (bd < 0) return -1;
+	body_size = 4 + (size_t)bd;
 	if (body_size > 0xffff) return -1;
-	if (cap < 4 + body_size) return -1;
-	body = out + 4;
-	body[0] = 0x01; body[1] = 0x00;
-	body[2] = 0x01; body[3] = 0x00;
-	body[4] = (uint8_t)(x & 0xff); body[5] = (uint8_t)(x >> 8);
-	body[6] = (uint8_t)(y & 0xff); body[7] = (uint8_t)(y >> 8);
-	{
-		uint16_t r2 = (uint16_t)(x + w - 1);
-		uint16_t b2 = (uint16_t)(y + h - 1);
-		body[8] = (uint8_t)(r2 & 0xff);  body[9] = (uint8_t)(r2 >> 8);
-		body[10] = (uint8_t)(b2 & 0xff); body[11] = (uint8_t)(b2 >> 8);
-	}
-	body[12] = (uint8_t)(wpad & 0xff); body[13] = (uint8_t)(wpad >> 8);
-	body[14] = (uint8_t)(h & 0xff);    body[15] = (uint8_t)(h >> 8);
-	body[16] = 24; body[17] = 0;       /* bitsPerPixel = 24 */
-	body[18] = 0;  body[19] = 0;       /* flags = 0 (uncompressed) */
-	body[20] = (uint8_t)(pixel_bytes & 0xff);
-	body[21] = (uint8_t)((pixel_bytes >> 8) & 0xff);
-	(void)encode_bitmap_pixels(body + 22, pixels, pixels_stride, w, h);
 
-	/* Now wrap in fast-path Update record header. */
-	{
-		struct rdp_buf b;
-		size_t inner = 3 + body_size;
-		size_t total = inner < 0x80 - 2 ? 1 + 1 + inner : 1 + 2 + inner;
-		uint8_t hdr[4];
-		size_t hdr_n;
-
-		if (total > RDP_FP_MAX_PACKET_SIZE) return -1;
-		rdp_buf_init(&b, hdr, sizeof hdr);
-		if (fp_write_header(&b, total) != 0) return -1;
-		hdr_n = rdp_buf_used(&b);
-		if (hdr_n + 3 + body_size > cap) return -1;
-		/* Shift body to make room for header. */
-		memmove(out + hdr_n + 3, out + 4, body_size);
-		memcpy(out, hdr, hdr_n);
-		out[hdr_n + 0] = (uint8_t)((RDP_FP_UPDATE_BITMAP & 0x0f)
-			| (RDP_FP_FRAGMENT_SINGLE << 4));
-		out[hdr_n + 1] = (uint8_t)(body_size & 0xff);
-		out[hdr_n + 2] = (uint8_t)((body_size >> 8) & 0xff);
-		return (ssize_t)(hdr_n + 3 + body_size);
-	}
+	inner = 3 + body_size;
+	total = inner < 0x80 - 2 ? 1 + 1 + inner : 1 + 2 + inner;
+	if (total > RDP_FP_MAX_PACKET_SIZE) return -1;
+	rdp_buf_init(&b, hdr, sizeof hdr);
+	if (fp_write_header(&b, total) != 0) return -1;
+	hdr_n = rdp_buf_used(&b);
+	if (hdr_n + 3 + body_size > cap) return -1;
+	memmove(out + hdr_n + 3, out + 4, body_size);
+	memcpy(out, hdr, hdr_n);
+	out[hdr_n + 0] = (uint8_t)((RDP_FP_UPDATE_BITMAP & 0x0f)
+		| (RDP_FP_FRAGMENT_SINGLE << 4));
+	out[hdr_n + 1] = (uint8_t)(body_size & 0xff);
+	out[hdr_n + 2] = (uint8_t)((body_size >> 8) & 0xff);
+	return (ssize_t)(hdr_n + 3 + body_size);
 }
 
 int
