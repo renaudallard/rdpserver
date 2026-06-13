@@ -1962,27 +1962,10 @@ maybe_dispatch_clip(struct rdp_tls *t, int be_fd,
 						fm, (size_t)fn);
 				return 1;
 			}
-			if (pdu_type2 ==
-			    RDP_PDU2_BITMAPCACHE_PERSISTENT_LIST
-			    && payload_len > 18) {
-				/* The client lists the cached tiles it already
-				 * holds on disk from a prior session; load them
-				 * into the cache so they are recalled with
-				 * MemBlt instead of being re-sent. */
-				size_t nk = 0;
-				int pf = 0, pl = 0;
-				(void)rdp_bmpcache_parse_persistent_list(
-					payload + 18, payload_len - 18,
-					NULL, 0, &nk, &pf, &pl);
-				if (g_bmpcache != NULL)
-					(void)rdp_bmpcache_ingest_persistent(
-						g_bmpcache, payload + 18,
-						payload_len - 18);
-				rdp_debug("conn[%s]: persistent key list: "
-					"%zu keys (first=%d last=%d)",
-					peer, nk, pf, pl);
-				return 1;
-			}
+			/* The Persistent Key List PDU is part of the connection
+			 * finalization sequence (MS-RDPBCGR 2.2.1.17) and so is
+			 * read and ingested by the finalization reader in
+			 * run_proxy, not here in the steady-state dispatcher. */
 			if (pdu_type2 == RDP_PDU2_SUPPRESS_OUTPUT) {
 				/* allowDisplayUpdates is the first body
 				 * byte (payload[18]): 0 = suppress output,
@@ -2431,6 +2414,27 @@ run_proxy(struct rdp_tls *t, int be_fd,
 				    && fl >= 18) {
 					uint16_t pt = (uint16_t)(fp[2]
 						| (fp[3] << 8));
+					if ((pt & 0x0f) == RDP_PDU_TYPE_DATA
+					    && fp[14] ==
+					    RDP_PDU2_BITMAPCACHE_PERSISTENT_LIST
+					    && fl > 18) {
+						/* The client lists the cached tiles it
+						 * already holds on disk from a prior
+						 * session; load them so they are recalled
+						 * with MemBlt instead of re-sent.  This PDU
+						 * arrives in the finalization stream, before
+						 * the Font List, so it is ingested here. */
+						size_t nk = 0; int pf = 0, pl = 0;
+						(void)rdp_bmpcache_parse_persistent_list(
+							fp + 18, fl - 18, NULL, 0,
+							&nk, &pf, &pl);
+						if (g_bmpcache != NULL)
+							(void)rdp_bmpcache_ingest_persistent(
+								g_bmpcache, fp + 18, fl - 18);
+						rdp_debug("conn[%s]: persistent key list: "
+							"%zu keys (first=%d last=%d)",
+							peer, nk, pf, pl);
+					}
 					if ((pt & 0x0f) == RDP_PDU_TYPE_DATA
 					    && fp[14] == RDP_PDU2_FONTLIST) {
 						ssize_t fn =

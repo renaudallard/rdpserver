@@ -230,6 +230,8 @@ When set, the server advertises the Bitmap Cache Rev2 and host-support
 capability sets so the client caches repeated tiles and recalls them with
 MemBlt orders, saving bandwidth on the legacy bitmap path
 .Pq it has no effect on a GFX or AVC session .
+A client that returns a Persistent Key List has its previously cached tiles
+re-seeded into the cache so they are recalled instead of re-sent.
 Cache orders carry an interleaved-RLE 24bpp stream, so they are sent only to
 clients that negotiated 24bpp; clients at another depth
 .Pq mstsc uses 32bpp
