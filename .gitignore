@@ -14,6 +14,7 @@ src/session/rdp-cups-backend
 # regress + fuzz
 regress/common/*_test
 regress/wire/*_test
+regress/greeter/*_test
 regress/integ/*_live
 regress/fuzz/fuzz_parsers
 
