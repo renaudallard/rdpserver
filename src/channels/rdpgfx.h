@@ -120,6 +120,13 @@ int rdp_rdpgfx_parse_frame_ack(const uint8_t *pdu, size_t len,
 		uint32_t *queue_depth, uint32_t *frame_id,
 		uint32_t *total_decoded);
 
+/* Frame flow control: returns 1 when another GFX frame may be sent given the
+ * client's frame-acknowledge state (last_ack_frame, frame_id and the
+ * decode-queue depth it last reported).  The in-flight window scales with the
+ * reported queue depth, so a client that keeps up gets a deeper window and one
+ * that falls behind is throttled. */
+int rdp_rdpgfx_may_send_frame(const struct rdpgfx_state *gfx);
+
 /* Build RDPGFX_CMDID_RESETGRAPHICS. */
 ssize_t rdp_rdpgfx_build_reset(uint8_t *out, size_t cap,
 		uint16_t w, uint16_t h);

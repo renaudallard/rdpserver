@@ -2867,16 +2867,12 @@ run_proxy(struct rdp_tls *t, int be_fd,
 					continue;
 				if (gfx.active && h264 != NULL
 				    && dv->dv.gfx_channel_id >= 0) {
-					uint32_t pending = gfx.frame_id
-						- gfx.last_ack_frame;
 					int fresh = !gfx.surface_created;
 					ensure_gfx_surface(t, user_id, dv,
 						&gfx, desktop_w, desktop_h);
 					if (fresh && gfx.surface_created)
 						rdp_h264_force_idr(h264);
-					if (pending < 2
-					    || gfx.queue_depth == 0xFFFFFFFF
-					    || gfx.last_ack_frame == 0) {
+					if (rdp_rdpgfx_may_send_frame(&gfx)) {
 						const uint8_t *h264_out;
 						size_t h264_len;
 						int keyframe;
@@ -2920,16 +2916,12 @@ run_proxy(struct rdp_tls *t, int be_fd,
 					}
 				} else if (gfx.active && avc444 != NULL
 				    && dv->dv.gfx_channel_id >= 0) {
-					uint32_t pending = gfx.frame_id
-						- gfx.last_ack_frame;
 					int fresh = !gfx.surface_created;
 					ensure_gfx_surface(t, user_id, dv,
 						&gfx, desktop_w, desktop_h);
 					if (fresh && gfx.surface_created)
 						rdp_avc444_force_idr(avc444);
-					if (pending < 2
-					    || gfx.queue_depth == 0xFFFFFFFF
-					    || gfx.last_ack_frame == 0) {
+					if (rdp_rdpgfx_may_send_frame(&gfx)) {
 						const uint8_t *m_out;
 						const uint8_t *a_out;
 						size_t m_len, a_len;
@@ -2980,13 +2972,9 @@ run_proxy(struct rdp_tls *t, int be_fd,
 					}
 				} else if (gfx.active && prog != NULL
 				    && dv->dv.gfx_channel_id >= 0) {
-					uint32_t pending = gfx.frame_id
-						- gfx.last_ack_frame;
 					ensure_gfx_surface(t, user_id, dv,
 						&gfx, desktop_w, desktop_h);
-					if (pending < 2
-					    || gfx.queue_depth == 0xFFFFFFFF
-					    || gfx.last_ack_frame == 0) {
+					if (rdp_rdpgfx_may_send_frame(&gfx)) {
 						const uint8_t *prog_out;
 						size_t prog_len;
 						if (rdp_progressive_encode(prog,
@@ -3053,13 +3041,9 @@ run_proxy(struct rdp_tls *t, int be_fd,
 				if (gfx.active
 				    && gfx.codec == RDPGFX_CODEC_AVC420
 				    && dv->dv.gfx_channel_id >= 0) {
-					uint32_t pending = gfx.frame_id
-						- gfx.last_ack_frame;
 					ensure_gfx_surface(t, user_id, dv,
 						&gfx, desktop_w, desktop_h);
-					if (pending < 2
-					    || gfx.queue_depth == 0xFFFFFFFF
-					    || gfx.last_ack_frame == 0) {
+					if (rdp_rdpgfx_may_send_frame(&gfx)) {
 						uint8_t *gpdu;
 						size_t gpdu_cap =
 							fhdr.h264_len + 256;

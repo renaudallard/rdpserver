@@ -257,6 +257,25 @@ rdp_rdpgfx_parse_frame_ack(const uint8_t *pdu, size_t len,
 	return 0;
 }
 
+int
+rdp_rdpgfx_may_send_frame(const struct rdpgfx_state *gfx)
+{
+	uint32_t pending, window;
+
+	/* No acknowledgement yet, or the client suspended acknowledgements
+	 * (queue depth 0xFFFFFFFF): do not throttle. */
+	if (gfx->last_ack_frame == 0 || gfx->queue_depth == 0xFFFFFFFFu)
+		return 1;
+	pending = gfx->frame_id - gfx->last_ack_frame;
+	if (gfx->queue_depth >= 2)
+		window = 1;          /* client backed up: one frame in flight */
+	else if (gfx->queue_depth == 1)
+		window = 2;          /* moderate (the previous fixed window) */
+	else
+		window = 4;          /* client keeping up: a deeper window */
+	return pending < window;
+}
+
 ssize_t
 rdp_rdpgfx_build_reset(uint8_t *out, size_t cap,
 		uint16_t w, uint16_t h)

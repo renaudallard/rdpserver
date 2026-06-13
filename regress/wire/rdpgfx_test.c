@@ -79,6 +79,35 @@ capset(uint8_t *p, uint32_t ver, uint32_t dlen, uint32_t flags)
 	return 8 + dlen;
 }
 
+static int
+may_send(uint32_t last_ack, uint32_t frame_id, uint32_t qd)
+{
+	struct rdpgfx_state g;
+	memset(&g, 0, sizeof g);
+	g.last_ack_frame = last_ack;
+	g.frame_id = frame_id;
+	g.queue_depth = qd;
+	return rdp_rdpgfx_may_send_frame(&g);
+}
+
+static void
+test_may_send_frame(void)
+{
+	/* No ack yet, or the client suspended acks: never throttled. */
+	if (!may_send(0, 100, 0)) FAIL("startup should send");
+	if (!may_send(10, 100, 0xFFFFFFFFu)) FAIL("suspended should send");
+	/* queue depth 0 -> window 4 (pending = frame_id - last_ack). */
+	if (!may_send(10, 13, 0)) FAIL("qd0 pending3");
+	if (may_send(10, 14, 0))  FAIL("qd0 pending4 should hold");
+	/* queue depth 1 -> window 2. */
+	if (!may_send(10, 11, 1)) FAIL("qd1 pending1");
+	if (may_send(10, 12, 1))  FAIL("qd1 pending2 should hold");
+	/* queue depth >= 2 -> window 1. */
+	if (!may_send(10, 10, 2)) FAIL("qd2 pending0");
+	if (may_send(10, 11, 2))  FAIL("qd2 pending1 should hold");
+	if (may_send(10, 11, 9))  FAIL("qd9 pending1 should hold");
+}
+
 int
 main(void)
 {
@@ -149,6 +178,8 @@ main(void)
 		if (adv.count != RDPGFX_MAX_CAPSETS)
 			FAIL("manysets count %u != %u", adv.count, RDPGFX_MAX_CAPSETS);
 	}
+
+	test_may_send_frame();
 
 	(void)printf("rdpgfx_test: all ok\n");
 	return 0;
