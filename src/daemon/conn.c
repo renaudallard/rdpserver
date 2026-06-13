@@ -239,6 +239,29 @@ autodetect_send(struct rdp_tls *t, uint16_t user_id, uint16_t chan,
 		RDP_SEC_HDR_LEN + ad_len);
 }
 
+/* Heartbeat PDU period and the missed-heartbeat warning/reconnect counts the
+ * server advertises to the client (MS-RDPBCGR 2.2.16.1). */
+#define HEARTBEAT_PERIOD_S      30u
+#define HEARTBEAT_WARN_COUNT     3u
+#define HEARTBEAT_RECONN_COUNT   5u
+
+/* Send a server Heartbeat PDU on the MCS message channel so a client that
+ * advertised support keeps the connection alive while the session is idle.
+ * The body is reserved(1) + period(1) + count1(1) + count2(1) after the
+ * SEC_HEARTBEAT security header. */
+static int
+send_heartbeat(struct rdp_tls *t, uint16_t user_id, uint16_t chan)
+{
+	uint8_t body[RDP_SEC_HDR_LEN + 4];
+	if (rdp_sec_build_header(body, sizeof body, RDP_SEC_HEARTBEAT) < 0)
+		return -1;
+	body[RDP_SEC_HDR_LEN + 0] = 0;                       /* reserved */
+	body[RDP_SEC_HDR_LEN + 1] = HEARTBEAT_PERIOD_S;      /* period */
+	body[RDP_SEC_HDR_LEN + 2] = HEARTBEAT_WARN_COUNT;    /* count1 */
+	body[RDP_SEC_HDR_LEN + 3] = HEARTBEAT_RECONN_COUNT;  /* count2 */
+	return send_send_data(t, user_id, chan, body, sizeof body);
+}
+
 /* Wait for and parse one autodetect response on the message channel.
  * Returns 0 on success, 1 on a clean timeout (no bytes consumed), -1 on a
  * transport or protocol error. */
@@ -1579,6 +1602,10 @@ static struct rdp_bmpcache *g_bmpcache;
  * orders are sent only when this is set, so a client that did not enable its
  * bitmap cache is never sent orders it would reject. */
 static int g_client_bitmap_cache_ok;
+/* Set when the client advertised RNS_UD_CS_SUPPORT_HEARTBEAT_PDU; g_heartbeat_chan
+ * is the MCS message channel to send Heartbeat PDUs on (0 if none). */
+static int g_client_heartbeat;
+static uint16_t g_heartbeat_chan;
 
 /* Try to recognise a channel-bearing TPKT/MCS SDR and dispatch.
  * Returns 1 if handled, 0 if not, -1 on disconnect, 2 if a resize
@@ -2487,9 +2514,20 @@ run_proxy(struct rdp_tls *t, int be_fd,
 		}
 	}
 
+	/* Heartbeat timer: when the client supports the Heartbeat PDU, poll with
+	 * a finite timeout and emit a heartbeat every period so an idle session
+	 * is not dropped by the client's connection-health check. */
+	struct timespec hb_next = {0, 0};
+	int hb_on = g_client_heartbeat && g_heartbeat_chan != 0;
+	if (hb_on) {
+		clock_gettime(CLOCK_MONOTONIC, &hb_next);
+		hb_next.tv_sec += HEARTBEAT_PERIOD_S;
+	}
+
 	for (;;) {
 		struct pollfd pfd[2];
 		int tls_fd = rdp_tls_fd(t);
+		int timeout = -1;
 
 		pfd[0].fd = tls_fd;
 		pfd[0].events = POLLIN;
@@ -2497,9 +2535,29 @@ run_proxy(struct rdp_tls *t, int be_fd,
 		pfd[1].fd = be_fd;
 		pfd[1].events = POLLIN;
 		pfd[1].revents = 0;
-		if (poll(pfd, 2, -1) < 0) {
+		if (hb_on) {
+			struct timespec now = {0, 0};
+			long ms;
+			clock_gettime(CLOCK_MONOTONIC, &now);
+			ms = (hb_next.tv_sec - now.tv_sec) * 1000
+			    + (hb_next.tv_nsec - now.tv_nsec) / 1000000;
+			timeout = ms > 0 ? (int)ms : 0;
+		}
+		if (poll(pfd, 2, timeout) < 0) {
 			if (errno == EINTR) continue;
 			break;
+		}
+		if (hb_on) {
+			struct timespec now = {0, 0};
+			clock_gettime(CLOCK_MONOTONIC, &now);
+			if (now.tv_sec > hb_next.tv_sec
+			    || (now.tv_sec == hb_next.tv_sec
+				&& now.tv_nsec >= hb_next.tv_nsec)) {
+				(void)send_heartbeat(t, user_id,
+					g_heartbeat_chan);
+				hb_next = now;
+				hb_next.tv_sec += HEARTBEAT_PERIOD_S;
+			}
 		}
 		if (pfd[1].revents & (POLLHUP | POLLERR)) {
 			rdp_debug("conn[%s]: backend gone (rev=0x%x)",
@@ -3903,6 +3961,9 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 				cr2.msgchannel_id =
 					(uint16_t)(1004 + ci.channel_count);
 			msgchannel_id = cr2.msgchannel_id;
+			g_client_heartbeat = (ci.early_capability_flags
+			    & RDP_CS_EARLYCAP_HEARTBEAT) != 0;
+			g_heartbeat_chan = msgchannel_id;
 
 			dt_n = rdp_x224_build_dt(scratch + 4, sizeof scratch - 4);
 			cr_n = rdp_mcs_build_connect_response(

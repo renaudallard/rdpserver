@@ -56,6 +56,7 @@
 #define RDP_SEC_ENCRYPT        0x0008
 #define RDP_SEC_AUTODETECT_REQ 0x1000   /* server -> client autodetect */
 #define RDP_SEC_AUTODETECT_RSP 0x2000   /* client -> server autodetect */
+#define RDP_SEC_HEARTBEAT      0x4000   /* server -> client heartbeat */
 #define RDP_SEC_HDR_LEN      4u
 
 /* INFO_PACKET flags (MS-RDPBCGR 2.2.1.11.1.1). */

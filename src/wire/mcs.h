@@ -103,8 +103,10 @@
 #define RDP_SC_NET       0x0C03
 
 /* CS_CORE earlyCapabilityFlags: client supports network characteristics
- * auto-detection (RNS_UD_CS_SUPPORT_NETCHAR_AUTODETECT). */
+ * auto-detection (RNS_UD_CS_SUPPORT_NETCHAR_AUTODETECT) and the server
+ * Heartbeat PDU (RNS_UD_CS_SUPPORT_HEARTBEAT_PDU). */
 #define RDP_CS_EARLYCAP_NETCHAR_AUTODETECT 0x0080
+#define RDP_CS_EARLYCAP_HEARTBEAT          0x0400
 
 /* Parsed contents of an MCS Connect Initial -- the bits we need. */
 #define RDP_MCS_MAX_CHANNELS 32
