@@ -143,6 +143,13 @@ ssize_t rdp_fp_build_bitmap_update(uint8_t *out, size_t cap,
 		uint16_t x, uint16_t y, uint16_t w, uint16_t h,
 		const uint8_t *pixels, size_t pixels_stride);
 
+/* Permit (on != 0) or forbid interleaved-RLE compression of fast-path
+ * bitmaps.  The codec emits a 24bpp stream that some clients (mstsc) only
+ * decode when the session colour depth is 24bpp; the daemon forbids it for
+ * clients whose preferred depth is not 24 so they receive raw bitmaps, which
+ * every client accepts.  Defaults to permitted. */
+void rdp_fp_allow_rle_compress(int on);
+
 /* Decoded fast-path input event. */
 struct rdp_fp_input_event {
 	uint8_t  type;

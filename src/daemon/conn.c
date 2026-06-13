@@ -1602,6 +1602,11 @@ static struct rdp_bmpcache *g_bmpcache;
  * orders are sent only when this is set, so a client that did not enable its
  * bitmap cache is never sent orders it would reject. */
 static int g_client_bitmap_cache_ok;
+/* The client's preferred colour depth from its Bitmap cap.  The interleaved-RLE
+ * codec (used by both the cache orders and the fast-path bitmaps) emits a 24bpp
+ * stream that mstsc only decodes in a 24bpp session, so RLE output is sent only
+ * to 24bpp clients; others get raw bitmaps, which every client accepts. */
+static uint16_t g_client_bpp = 24;
 /* Set when the client advertised RNS_UD_CS_SUPPORT_HEARTBEAT_PDU; g_heartbeat_chan
  * is the MCS message channel to send Heartbeat PDUs on (0 if none). */
 static int g_client_heartbeat;
@@ -3096,7 +3101,8 @@ run_proxy(struct rdp_tls *t, int be_fd,
 						fhdr.y, fhdr.w, fhdr.h,
 						frame_buf, chunk_target,
 						(g_allow_bitmap_cache
-						 && g_client_bitmap_cache_ok)
+						 && g_client_bitmap_cache_ok
+						 && g_client_bpp == 24)
 						? g_bmpcache : NULL) != 0)
 						break;
 				}
@@ -4168,16 +4174,23 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 		 * confirm-active body follows the 6-byte share-control header. */
 		if (payload_len > 6) {
 			uint32_t mrq = 0;
-			uint16_t cptr = 0, lptr = 0, pcache = 0;
+			uint16_t cptr = 0, lptr = 0, pcache = 0, cbpp = 24;
 			int cache_ok = 0;
 			if (rdp_capset_parse_confirm_active(payload + 6,
-				payload_len - 6, NULL, &mrq, &cptr, &lptr,
+				payload_len - 6, &cbpp, &mrq, &cptr, &lptr,
 				&pcache, &cache_ok) == 0) {
 				client_max_request = mrq;
 				client_color_ptr = cptr;
 				client_large_ptr = lptr;
 				client_pointer_cache_size = pcache;
 				g_client_bitmap_cache_ok = cache_ok;
+				g_client_bpp = cbpp;
+				/* The interleaved-RLE codec emits a 24bpp stream;
+				 * clients that negotiated another depth (mstsc uses
+				 * 32bpp) reject it but accept raw 24bpp, so only
+				 * compress fast-path bitmaps for 24bpp clients (the
+				 * cache orders are gated the same way below). */
+				rdp_fp_allow_rle_compress(cbpp == 24);
 			}
 		}
 		rdp_debug("conn[%s]: client MaxRequestSize=%u colorPtr=%u largePtr=0x%04x ptrCache=%u",

@@ -210,14 +210,29 @@ encode_bitmap_pixels(uint8_t *out, const uint8_t *src, size_t src_stride,
 #define BITMAP_COMPRESSION      0x0001
 #define NO_BITMAP_COMPRESSION_HDR 0x0400
 
+/* Whether interleaved-RLE compression may be used for fast-path bitmaps.  The
+ * codec emits a 24bpp stream; mstsc only decodes interleaved RLE that matches
+ * the session's colour depth, so it rejects our 24bpp stream (with a fatal
+ * protocol error) unless the client negotiated 24bpp, even though it accepts
+ * the equivalent raw 24bpp bitmap.  The daemon clears this for any client whose
+ * preferred depth is not 24 so those clients get the raw form (which all
+ * clients accept).  Per-worker (rdpd forks per connection). */
+static int g_fp_rle_ok = 1;
+
+void
+rdp_fp_allow_rle_compress(int on)
+{
+	g_fp_rle_ok = on ? 1 : 0;
+}
+
 /* Write one TS_BITMAP_DATA (the per-rectangle structure: 18 header bytes then
  * the bitmap) for the rectangle [x, y, w, h] from 24bpp top-down BGR pixels
- * into dst (cap bytes).  When the tile is within the RLE codec's 64x64 limit,
- * its rows are packed (stride == w*3) and interleaved RLE shrinks it below the
- * raw 4-pixel-padded rows (counting the 8-byte compression header), the
- * compressed form is written; otherwise the raw bottom-up rows are.  The
- * compression header is always included, so any client decodes it.  Returns
- * the number of bytes written, or -1 on overflow. */
+ * into dst (cap bytes).  When RLE compression is permitted for this client
+ * (see rdp_fp_allow_rle_compress), the tile is within the RLE codec's 64x64
+ * limit, its rows are packed (stride == w*3) and interleaved RLE shrinks it
+ * below the raw 4-pixel-padded rows (counting the 8-byte compression header),
+ * the compressed form is written; otherwise the raw bottom-up rows are.
+ * Returns the number of bytes written, or -1 on overflow. */
 static ssize_t
 write_bitmap_data(uint8_t *dst, size_t cap, uint16_t x, uint16_t y,
 		uint16_t w, uint16_t h, const uint8_t *pixels, size_t stride)
@@ -238,7 +253,8 @@ write_bitmap_data(uint8_t *dst, size_t cap, uint16_t x, uint16_t y,
 	dst[6] = (uint8_t)(b2 & 0xff); dst[7] = (uint8_t)(b2 >> 8);
 	dst[12] = 24; dst[13] = 0;                 /* bitsPerPixel = 24 */
 
-	if (w >= 1 && w <= 64 && h >= 1 && h <= 64 && stride == (size_t)w * 3
+	if (g_fp_rle_ok && w >= 1 && w <= 64 && h >= 1 && h <= 64
+	    && stride == (size_t)w * 3
 	    && rdp_bitmap_rle_compress_24(rle, sizeof rle, &rle_len, pixels, w, h)
 	       == 0 && rle_len + 8 < pixel_bytes) {
 		size_t total = 18 + 8 + rle_len;
