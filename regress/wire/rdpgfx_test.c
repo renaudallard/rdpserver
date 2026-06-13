@@ -108,6 +108,41 @@ test_may_send_frame(void)
 	if (may_send(10, 11, 9))  FAIL("qd9 pending1 should hold");
 }
 
+static void
+test_bytes_in_flight(void)
+{
+	struct rdpgfx_state g;
+
+	/* Frame 10 acked, queue depth 0 (frame window 4).  Send frame 11 as a
+	 * 2 MiB keyframe: under the frame window but over the byte budget. */
+	memset(&g, 0, sizeof g);
+	g.last_ack_frame = 10; g.frame_id = 10; g.queue_depth = 0;
+	g.bytes_sent = 1000;
+	g.cum_bytes[10 % RDPGFX_ACK_RING] = 1000;
+	g.frame_id = 11;
+	rdp_rdpgfx_frame_sent(&g, 2u << 20);
+	if (rdp_rdpgfx_may_send_frame(&g))
+		FAIL("large frame in flight should throttle on bytes");
+
+	/* A small frame in flight stays under the budget. */
+	memset(&g, 0, sizeof g);
+	g.last_ack_frame = 10; g.frame_id = 10; g.queue_depth = 0;
+	g.bytes_sent = 1000;
+	g.cum_bytes[10 % RDPGFX_ACK_RING] = 1000;
+	g.frame_id = 11;
+	rdp_rdpgfx_frame_sent(&g, 8u * 1024);
+	if (!rdp_rdpgfx_may_send_frame(&g))
+		FAIL("small frame should send");
+
+	/* Nothing pending: always send, even after a huge frame. */
+	memset(&g, 0, sizeof g);
+	g.last_ack_frame = 11; g.frame_id = 11; g.queue_depth = 0;
+	g.bytes_sent = 3u << 20;
+	g.cum_bytes[11 % RDPGFX_ACK_RING] = 3u << 20;
+	if (!rdp_rdpgfx_may_send_frame(&g))
+		FAIL("no frames pending should send");
+}
+
 int
 main(void)
 {
@@ -180,6 +215,7 @@ main(void)
 	}
 
 	test_may_send_frame();
+	test_bytes_in_flight();
 
 	(void)printf("rdpgfx_test: all ok\n");
 	return 0;

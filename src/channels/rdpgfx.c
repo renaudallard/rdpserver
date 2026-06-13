@@ -257,10 +257,18 @@ rdp_rdpgfx_parse_frame_ack(const uint8_t *pdu, size_t len,
 	return 0;
 }
 
+void
+rdp_rdpgfx_frame_sent(struct rdpgfx_state *gfx, size_t bytes)
+{
+	gfx->bytes_sent += bytes;
+	gfx->cum_bytes[gfx->frame_id % RDPGFX_ACK_RING] = gfx->bytes_sent;
+}
+
 int
 rdp_rdpgfx_may_send_frame(const struct rdpgfx_state *gfx)
 {
 	uint32_t pending, window;
+	uint64_t in_flight;
 
 	/* No acknowledgement yet, or the client suspended acknowledgements
 	 * (queue depth 0xFFFFFFFF): do not throttle. */
@@ -273,7 +281,17 @@ rdp_rdpgfx_may_send_frame(const struct rdpgfx_state *gfx)
 		window = 2;          /* moderate (the previous fixed window) */
 	else
 		window = 4;          /* client keeping up: a deeper window */
-	return pending < window;
+	if (pending >= window)
+		return 0;
+	/* Bytes still in flight = total sent minus the snapshot taken when the
+	 * last acknowledged frame was sent.  Cap them so a few large keyframes
+	 * cannot pile up behind the frame window on a slow link; a single frame
+	 * (nothing pending) is always allowed so the stream cannot stall. */
+	if (pending == 0)
+		return 1;
+	in_flight = gfx->bytes_sent
+	    - gfx->cum_bytes[gfx->last_ack_frame % RDPGFX_ACK_RING];
+	return in_flight < RDPGFX_INFLIGHT_BUDGET;
 }
 
 ssize_t

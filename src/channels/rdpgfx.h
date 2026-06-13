@@ -98,7 +98,18 @@ struct rdpgfx_state {
 	uint32_t queue_depth;
 	uint16_t desktop_w;
 	uint16_t desktop_h;
+	uint64_t bytes_sent;     /* cumulative GFX frame bytes ever sent */
+	/* Snapshot of bytes_sent after each frame id (mod the ring), so the
+	 * flow control can compute the bytes still in flight from the last
+	 * acknowledged frame. */
+	uint64_t cum_bytes[8];
 };
+
+/* Ring size for cum_bytes[] above; must exceed the largest in-flight frame
+ * window.  In-flight bytes over this budget throttle sending, a backstop
+ * against bursts of large keyframes that the frame-count window alone allows. */
+#define RDPGFX_ACK_RING        8
+#define RDPGFX_INFLIGHT_BUDGET (1u << 20)   /* 1 MiB */
 
 /* Parse RDPGFX_CMDID_CAPSADVERTISE into structured output. */
 int rdp_rdpgfx_parse_caps_advertise(const uint8_t *pdu, size_t len,
@@ -126,6 +137,10 @@ int rdp_rdpgfx_parse_frame_ack(const uint8_t *pdu, size_t len,
  * reported queue depth, so a client that keeps up gets a deeper window and one
  * that falls behind is throttled. */
 int rdp_rdpgfx_may_send_frame(const struct rdpgfx_state *gfx);
+
+/* Record that the current frame (gfx->frame_id, already incremented) of `bytes`
+ * was sent, for the bytes-in-flight accounting used by the flow control. */
+void rdp_rdpgfx_frame_sent(struct rdpgfx_state *gfx, size_t bytes);
 
 /* Build RDPGFX_CMDID_RESETGRAPHICS. */
 ssize_t rdp_rdpgfx_build_reset(uint8_t *out, size_t cap,

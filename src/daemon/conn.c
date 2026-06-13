@@ -2915,7 +2915,7 @@ run_proxy(struct rdp_tls *t, int be_fd,
 									gh,
 									h264_out,
 									h264_len);
-								if (gn > 0)
+								if (gn > 0) {
 									(void)send_gfx_pdu(
 										t,
 										user_id,
@@ -2923,6 +2923,10 @@ run_proxy(struct rdp_tls *t, int be_fd,
 										dv->dv.gfx_channel_id,
 										gpdu,
 										(size_t)gn);
+									rdp_rdpgfx_frame_sent(
+										&gfx,
+										(size_t)gn);
+								}
 								free(gpdu);
 							}
 						}
@@ -2971,7 +2975,7 @@ run_proxy(struct rdp_tls *t, int be_fd,
 									m_len,
 									a_out,
 									a_len);
-								if (gn > 0)
+								if (gn > 0) {
 									(void)send_gfx_pdu(
 										t,
 										user_id,
@@ -2979,6 +2983,10 @@ run_proxy(struct rdp_tls *t, int be_fd,
 										dv->dv.gfx_channel_id,
 										gpdu,
 										(size_t)gn);
+									rdp_rdpgfx_frame_sent(
+										&gfx,
+										(size_t)gn);
+								}
 								free(gpdu);
 							}
 						}
@@ -3009,7 +3017,7 @@ run_proxy(struct rdp_tls *t, int be_fd,
 									gfx.frame_id,
 									prog_out,
 									prog_len);
-								if (gn > 0)
+								if (gn > 0) {
 									(void)send_gfx_pdu(
 										t,
 										user_id,
@@ -3017,6 +3025,10 @@ run_proxy(struct rdp_tls *t, int be_fd,
 										dv->dv.gfx_channel_id,
 										gpdu,
 										(size_t)gn);
+									rdp_rdpgfx_frame_sent(
+										&gfx,
+										(size_t)gn);
+								}
 								free(gpdu);
 							}
 						}
@@ -3073,7 +3085,7 @@ run_proxy(struct rdp_tls *t, int be_fd,
 								fhdr.h,
 								h264_data,
 								fhdr.h264_len);
-							if (gn > 0)
+							if (gn > 0) {
 								(void)send_gfx_pdu(
 									t,
 									user_id,
@@ -3081,6 +3093,10 @@ run_proxy(struct rdp_tls *t, int be_fd,
 									dv->dv.gfx_channel_id,
 									gpdu,
 									(size_t)gn);
+								rdp_rdpgfx_frame_sent(
+									&gfx,
+									(size_t)gn);
+							}
 							free(gpdu);
 						}
 					}
