@@ -8,6 +8,7 @@
 .Sh SYNOPSIS
 .Nm
 .Op Fl 4ABCdfmNPVW
+.Op Fl c Ar cert Fl k Ar key
 .Op Fl h Ar host
 .Op Fl p Ar port
 .Op Fl S Ar socket
@@ -126,6 +127,17 @@ Path to the
 AF_UNIX socket.
 When omitted, the built-in stub authenticator accepts any non-empty
 username/password pair.
+.It Fl c Ar cert Fl k Ar key
+Serve the operator-supplied PEM certificate (chain)
+.Ar cert
+with the private key
+.Ar key
+instead of a self-signed certificate.
+The two options are given together; the certificate must load or the daemon
+exits, so a misconfigured path fails loudly rather than silently falling back
+to an untrusted self-signed certificate.
+When neither is given, a self-signed development certificate is generated and
+used.
 .It Fl V
 Offer RDPGFX AVC
 .Pq H.264

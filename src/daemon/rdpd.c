@@ -136,7 +136,8 @@ static void
 usage(const char *prog)
 {
 	(void)fprintf(stderr,
-"usage: %s [-d] [-f] [-V] [-4] [-P] [-W] [-m] [-N] [-p port] [-h host] [-S sock]\n"
+"usage: %s [-d] [-f] [-V] [-4] [-P] [-W] [-m] [-N] [-c cert -k key]\n"
+"            [-p port] [-h host] [-S sock]\n"
 "  -d        enable debug log level\n"
 "  -f        run in foreground; log to stderr\n"
 "  -V        offer RDPGFX AVC (H.264) to v10.x clients (mstsc, macOS);\n"
@@ -154,6 +155,9 @@ usage(const char *prog)
 "            fast-path bitmap path; off by default\n"
 "  -N        run connect-time network auto-detection (RTT and bandwidth)\n"
 "            and cap the H.264 bitrate to the measured link; off by default\n"
+"  -c cert   PEM certificate (chain) file; requires -k.  Without it a\n"
+"            self-signed development certificate is generated and used\n"
+"  -k key    PEM private key file for -c\n"
 "  -p port   listen port (default %s)\n"
 "  -h host   bind address (default: all)\n"
 "  -S sock   path to rdp-sessionmgr AF_UNIX socket\n"
@@ -172,10 +176,11 @@ main(int argc, char *argv[])
 	int allow_progressive = 0, prefer_wan_audio = 0, allow_microphone = 1;
 	int allow_avc444 = 0, allow_autodetect = 0, allow_camera = 0;
 	int allow_bitmap_cache = 0;
+	const char *cert_path = NULL, *key_path = NULL;
 	int opt, listen_fd;
 	struct rdp_log_cfg lc;
 
-	while ((opt = getopt(argc, argv, "AV4NPWmCBdfp:h:S:H?")) != -1) {
+	while ((opt = getopt(argc, argv, "AV4NPWmCBc:k:dfp:h:S:H?")) != -1) {
 		switch (opt) {
 		case 'A': auto_login = 1; break;
 		case 'V': allow_v10_avc = 1; break;
@@ -186,6 +191,8 @@ main(int argc, char *argv[])
 		case 'm': allow_microphone = 0; break;
 		case 'C': allow_camera = 1; break;
 		case 'B': allow_bitmap_cache = 1; break;
+		case 'c': cert_path = optarg; break;
+		case 'k': key_path = optarg; break;
 		case 'd': debug = 1; break;
 		case 'f': foreground = 1; break;
 		case 'p': port = optarg; break;
@@ -199,6 +206,14 @@ main(int argc, char *argv[])
 			usage(argv[0]);
 			return 1;
 		}
+	}
+
+	/* The operator certificate and key are supplied together or not at
+	 * all; one without the other is a usage error. */
+	if ((cert_path == NULL) != (key_path == NULL)) {
+		(void)fprintf(stderr, "rdpd: -c and -k must be given together\n");
+		usage(argv[0]);
+		return 1;
 	}
 
 	memset(&lc, 0, sizeof lc);
@@ -217,19 +232,29 @@ main(int argc, char *argv[])
 		return 1;
 	}
 
-	if (rdp_tls_ensure_selfsigned(RDP_CERT_PATH, RDP_KEY_PATH, "rdpd") != 0) {
-		rdp_err("failed to ensure self-signed certificate");
-		(void)close(listen_fd);
-		rdp_log_close();
-		return 1;
+	/* With an operator-supplied certificate, load it as-is and require it to
+	 * be valid (no fallback to a self-signed cert, so a misconfigured path
+	 * fails loudly instead of silently serving an untrusted cert).  Without
+	 * one, generate and use the self-signed development certificate. */
+	if (cert_path == NULL) {
+		cert_path = RDP_CERT_PATH;
+		key_path = RDP_KEY_PATH;
+		if (rdp_tls_ensure_selfsigned(cert_path, key_path, "rdpd") != 0) {
+			rdp_err("failed to ensure self-signed certificate");
+			(void)close(listen_fd);
+			rdp_log_close();
+			return 1;
+		}
 	}
-	struct rdp_tls_ctx *tls = rdp_tls_ctx_new(RDP_CERT_PATH, RDP_KEY_PATH);
+	struct rdp_tls_ctx *tls = rdp_tls_ctx_new(cert_path, key_path);
 	if (tls == NULL) {
-		rdp_err("failed to load TLS context");
+		rdp_err("failed to load TLS certificate %s / key %s",
+			cert_path, key_path);
 		(void)close(listen_fd);
 		rdp_log_close();
 		return 1;
 	}
+	rdp_info("TLS certificate: %s", cert_path);
 
 	rdp_info("rdpd %s listening on %s:%s",
 		RDP_VERSION_STR, host ? host : "*", port);

@@ -69,7 +69,7 @@ sends fast-path bitmap updates).
 
 | | Status | Notes |
 | --- | --- | --- |
-| TLS, MCS connect, channel join | ✓ | TLS 1.2 or 1.3 (1.3 preferred, 1.2 floor). |
+| TLS, MCS connect, channel join | ✓ | TLS 1.2 or 1.3 (1.3 preferred, 1.2 floor).  By default a self-signed development certificate is generated; an operator can serve a real certificate with `rdpd -c cert -k key` (the cert must load or the daemon exits, so a bad path fails loudly instead of silently serving the untrusted self-signed one). |
 | Demand Active / Confirm Active / finalization | ✓ | |
 | Fast-path Bitmap Update output (24bpp, tiled) | ✓ | Each 64x64 tile is interleaved-RLE compressed (the same codec as the bitmap cache) and sent compressed whenever that is smaller than the raw rows; incompressible tiles and any rectangle beyond the 64x64 codec limit fall back to raw pixels, so a frame is never enlarged.  Small updates are sent as a single fragment; a bitmap update too large for one fast-path PDU is split into FIRST/NEXT/LAST fragments honoring the client's MultifragmentUpdate MaxRequestSize (16KB safe default when absent). |
 | Fast-path input (scancode, mouse, sync, Unicode) | ✓ | Scancode and mouse forwarded to the session; Unicode events forwarded and injected via a spare-keycode keysym remap; sync (Caps/Num/Scroll Lock state) is forwarded and applied to the session keyboard via the XKB lock modifiers. |
