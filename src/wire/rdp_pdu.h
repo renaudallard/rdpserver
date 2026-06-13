@@ -79,6 +79,7 @@
 
 /* SET_ERROR_INFO codes (MS-RDPBCGR 2.2.5.1.1). */
 #define ERRINFO_NONE                    0x00000000
+#define ERRINFO_SERVER_DENIED_CONNECTION 0x00000007
 #define ERRINFO_LOGOFF_BY_USER          0x0000000C
 
 #define RDP_INFOTYPE_LOGON              0

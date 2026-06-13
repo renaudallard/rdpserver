@@ -2311,6 +2311,19 @@ cam_forward_action(struct rdp_tls *t, uint32_t user_id, int be_fd,
 	}
 }
 
+/* Send a Set Error Info PDU so the client shows a disconnect reason instead of
+ * a bare drop.  Only valid on an activated connection. */
+static void
+send_error_info(struct rdp_tls *t, uint16_t user_id, uint16_t io_channel,
+		uint32_t code)
+{
+	uint8_t ei[128];
+	ssize_t en = rdp_pdu_build_set_error_info(ei, sizeof ei, user_id,
+		RDP_CONN_SHARE_ID, code);
+	if (en > 0)
+		(void)send_send_data(t, user_id, io_channel, ei, (size_t)en);
+}
+
 static void
 run_proxy(struct rdp_tls *t, int be_fd,
 		struct clip_state *cs, struct dynvc_state *dv,
@@ -3612,14 +3625,8 @@ run_proxy(struct rdp_tls *t, int be_fd,
 out:
 	/* If the session backend died (process exit or crash), tell the
 	 * client why so it shows a reason instead of a silent drop. */
-	if (backend_lost) {
-		uint8_t ei[64];
-		ssize_t en = rdp_pdu_build_set_error_info(ei, sizeof ei,
-			user_id, RDP_CONN_SHARE_ID, ERRINFO_LOGOFF_BY_USER);
-		if (en > 0)
-			(void)send_send_data(t, user_id, io_channel,
-				ei, (size_t)en);
-	}
+	if (backend_lost)
+		send_error_info(t, user_id, io_channel, ERRINFO_LOGOFF_BY_USER);
 	if (h264 != NULL) rdp_h264_close(h264);
 	if (avc444 != NULL) rdp_avc444_close(avc444);
 	if (prog != NULL) rdp_progressive_close(prog);
@@ -4243,13 +4250,8 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 				rdp_sessmgr_close(&sm);
 				rdp_info("conn[%s]: backend fd %d", peer, be_fd);
 				{
-					uint8_t ei[128];
-					ssize_t en = rdp_pdu_build_set_error_info(
-						ei, sizeof ei, user_id,
-						RDP_CONN_SHARE_ID, 0);
-					if (en > 0)
-						(void)send_send_data(t, user_id,
-							io_channel, ei, (size_t)en);
+					send_error_info(t, user_id, io_channel,
+						ERRINFO_NONE);
 					uint8_t li[1200];
 					ssize_t ln = rdp_pdu_build_save_session_logon_v2(
 						li, sizeof li, user_id,
@@ -4272,6 +4274,8 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 		}
 		explicit_bzero(nla_pass, sizeof nla_pass);
 		rdp_warn("conn[%s]: NLA auth failed via sessmgr", peer);
+		send_error_info(t, user_id, io_channel,
+			ERRINFO_SERVER_DENIED_CONNECTION);
 		goto done;
 	}
 
@@ -4433,6 +4437,8 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 
 		if (sm.fd < 0) {
 			rdp_info("conn[%s]: no sessmgr; skipping SPAWN", peer);
+			send_error_info(t, user_id, io_channel,
+				ERRINFO_SERVER_DENIED_CONNECTION);
 			goto done;
 		}
 		{
@@ -4443,6 +4449,8 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 				rdp_err("conn[%s]: SPAWN failed: %s",
 					peer, strerror(errno));
 				rdp_sessmgr_close(&sm);
+				send_error_info(t, user_id, io_channel,
+					ERRINFO_SERVER_DENIED_CONNECTION);
 				goto done;
 			}
 			rdp_sessmgr_close(&sm);
