@@ -133,7 +133,7 @@ As an alternative to AVC, `rdpd -P` offers **RFX Progressive** (MS-RDPEGFX `RFX_
 
 For an accelerated session to work end to end:
 
-- The server encodes with **libx264** on the CPU; there is no GPU encode path.  Frames are rounded to even dimensions for 4:2:0.
+- The server encodes with **libx264** on the CPU; there is no GPU encode path.  Frames are rounded to even dimensions for 4:2:0.  The bitstream is pinned to H.264 **Main profile** (CABAC entropy coding) to match the Windows server.
 - Large keyframes (GFX PDUs over 64 KB) are split into ZGFX multipart segments, without which the client decoder tears down the channel.
 - The first frame to a freshly created RDPGFX surface is forced to an IDR keyframe (rather than waiting for the periodic 60-frame keyframe), so the client never has to decode a P-frame referencing surface data it discarded on reset.
 - The client must have a working H.264 decoder.  `xfreerdp` uses libavcodec (and can GPU-decode via VA-API/VDPAU/NVDEC or VideoToolbox); Microsoft clients need a GPU decoder.

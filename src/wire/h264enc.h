@@ -31,7 +31,9 @@
  *
  * Configured for low-latency RDP: ultrafast preset, zerolatency
  * tune, single thread, Annex B NAL output, no B-frames, keyframe
- * every 60 frames or on demand (see rdp_h264_force_idr).
+ * every 60 frames or on demand (see rdp_h264_force_idr).  The output
+ * is pinned to H.264 Main profile (CABAC on) to match the Windows
+ * server.
  */
 
 #ifndef RDP_H264ENC_H

@@ -100,6 +100,19 @@ init_encoder(struct rdp_h264 *e, int w, int h)
 	e->param.rc.f_rf_constant_max = 45.0f;
 	e->param.i_log_level = X264_LOG_NONE;
 
+	/*
+	 * Pin the output to H.264 Main profile, matching the Windows server.
+	 * CABAC is Main's defining feature over the Constrained Baseline the
+	 * ultrafast preset would otherwise emit; without it apply_profile()
+	 * only restricts features and the stream stays Baseline.  Applying the
+	 * "main" profile then locks out the High-profile tools (8x8 transform,
+	 * non-flat scaling lists) so the bitstream is exactly Main.  CABAC
+	 * costs a little encode and client-decode time but compresses better.
+	 */
+	e->param.b_cabac = 1;
+	if (x264_param_apply_profile(&e->param, "main") < 0)
+		return -1;
+
 	e->enc = x264_encoder_open(&e->param);
 	if (e->enc == NULL) return -1;
 	x264_picture_init(&e->pic_in);
