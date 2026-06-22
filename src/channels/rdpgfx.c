@@ -234,14 +234,29 @@ rdp_rdpgfx_build_caps_confirm(uint8_t *out, size_t cap,
 		uint32_t version, uint32_t flags)
 {
 	struct rdp_buf b;
-	uint32_t bodyLen = 12;
+	uint32_t caps_len, bodyLen, i;
+
+	/*
+	 * The capsData is a 4-byte flags word for every version except v10.1,
+	 * whose capsData is 16 bytes: the flags word followed by 12 reserved
+	 * zero bytes (MS-RDPEGFX 2.2.3.4; the FreeRDP client advertises v10.1
+	 * with capsDataLength 0x10).  Emit the length the confirmed version
+	 * requires rather than a fixed 4, matching the Windows and FreeRDP
+	 * servers.  caps_len is derived from the version we chose, never
+	 * reflected from the client, so a malformed advertise cannot inflate
+	 * it past this stack buffer.
+	 */
+	caps_len = (version == RDPGFX_CAPVERSION_101) ? 16 : 4;
+	bodyLen = 8 + caps_len;
 	if (cap < RDPGFX_HEADER_SIZE + bodyLen) return -1;
 	rdp_buf_init(&b, out, cap);
 	if (put_gfx_header(&b, RDPGFX_CMDID_CAPSCONFIRM,
 		RDPGFX_HEADER_SIZE + bodyLen) != 0) return -1;
 	if (rdp_buf_put_u32le(&b, version) != 0) return -1;
-	if (rdp_buf_put_u32le(&b, 4) != 0) return -1;
+	if (rdp_buf_put_u32le(&b, caps_len) != 0) return -1;
 	if (rdp_buf_put_u32le(&b, flags) != 0) return -1;
+	for (i = 4; i < caps_len; i++)
+		if (rdp_buf_put_u8(&b, 0) != 0) return -1;
 	return (ssize_t)rdp_buf_used(&b);
 }
 

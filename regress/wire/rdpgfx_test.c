@@ -55,6 +55,13 @@ put32(uint8_t *p, uint32_t v)
 	p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
 }
 
+static uint32_t
+get32(const uint8_t *p)
+{
+	return (uint32_t)p[0] | ((uint32_t)p[1] << 8)
+	    | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
 /* Build a CAPSADVERTISE header at buf: cmdId, flags=0, pduLength, count. */
 static size_t
 hdr(uint8_t *buf, uint32_t pdu_len, uint16_t count)
@@ -143,6 +150,44 @@ test_bytes_in_flight(void)
 		FAIL("no frames pending should send");
 }
 
+static void
+test_caps_confirm(void)
+{
+	uint8_t buf[64];
+	ssize_t n;
+	uint32_t i;
+
+	/* Ordinary version: 4-byte capsData (flags only), 20-byte PDU. */
+	n = rdp_rdpgfx_build_caps_confirm(buf, sizeof buf,
+		0x000A0200u, RDPGFX_CAPS_FLAG_AVC_DISABLED);
+	if (n != 20) FAIL("confirm v10.2 len %zd != 20", (ssize_t)n);
+	if (get32(buf) != RDPGFX_CMDID_CAPSCONFIRM)
+		FAIL("confirm cmdId");
+	if (get32(buf + 4) != 20) FAIL("confirm v10.2 pduLength");
+	if (get32(buf + 8) != 0x000A0200u) FAIL("confirm v10.2 version");
+	if (get32(buf + 12) != 4) FAIL("confirm v10.2 capsDataLength != 4");
+	if (get32(buf + 16) != RDPGFX_CAPS_FLAG_AVC_DISABLED)
+		FAIL("confirm v10.2 flags");
+
+	/* v10.1: 16-byte capsData (flags + 12 reserved zero bytes), 32-byte
+	 * PDU, matching the FreeRDP/Windows servers. */
+	n = rdp_rdpgfx_build_caps_confirm(buf, sizeof buf, RDPGFX_CAPVERSION_101,
+		RDPGFX_CAPS_FLAG_AVC420_ENABLED);
+	if (n != 32) FAIL("confirm v10.1 len %zd != 32", (ssize_t)n);
+	if (get32(buf + 4) != 32) FAIL("confirm v10.1 pduLength");
+	if (get32(buf + 8) != RDPGFX_CAPVERSION_101) FAIL("confirm v10.1 version");
+	if (get32(buf + 12) != 16) FAIL("confirm v10.1 capsDataLength != 16");
+	if (get32(buf + 16) != RDPGFX_CAPS_FLAG_AVC420_ENABLED)
+		FAIL("confirm v10.1 flags");
+	for (i = 20; i < 32; i++)
+		if (buf[i] != 0) FAIL("confirm v10.1 pad byte %u nonzero", i);
+
+	/* A buffer too small for the v10.1 capsData is refused, not overrun. */
+	if (rdp_rdpgfx_build_caps_confirm(buf, 20, RDPGFX_CAPVERSION_101, 0)
+	    != -1)
+		FAIL("confirm v10.1 should reject a 20-byte buffer");
+}
+
 int
 main(void)
 {
@@ -216,6 +261,7 @@ main(void)
 
 	test_may_send_frame();
 	test_bytes_in_flight();
+	test_caps_confirm();
 
 	(void)printf("rdpgfx_test: all ok\n");
 	return 0;
