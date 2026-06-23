@@ -93,6 +93,10 @@
 
 static const char *session_path = RDP_SESSION_PATH;
 
+/* Max desktop size handed to each rdp-session for dynamic resize; the session
+ * sizes its Xvfb framebuffer to this so the desktop can grow up to here. */
+static int max_w = 3840, max_h = 2160;
+
 static volatile sig_atomic_t want_shutdown;
 
 static void
@@ -963,7 +967,7 @@ spawn_session(const struct passwd *pw, uint16_t w, uint16_t h,
 		return -1;
 	}
 	if (pid == 0) {
-		char wbuf[8], hbuf[8], kbuf[16];
+		char wbuf[8], hbuf[8], kbuf[16], mbuf[16];
 		char tzbuf[RDP_SESSMGR_TZ_MAX + 1];
 		int i;
 
@@ -1032,9 +1036,10 @@ spawn_session(const struct passwd *pw, uint16_t w, uint16_t h,
 		(void)snprintf(kbuf, sizeof kbuf, "%u", (unsigned)lcid);
 		(void)snprintf(tzbuf, sizeof tzbuf, "%s",
 			(tz != NULL) ? tz : "");
+		(void)snprintf(mbuf, sizeof mbuf, "%dx%d", max_w, max_h);
 		execl(session_path, "rdp-session",
 			"-w", wbuf, "-H", hbuf, "-k", kbuf,
-			"-z", tzbuf, (char *)NULL);
+			"-z", tzbuf, "-m", mbuf, (char *)NULL);
 		(void)dprintf(2, "exec %s: %s\n",
 			session_path, strerror(errno));
 		_exit(127);
@@ -1793,13 +1798,15 @@ usage(const char *prog)
 {
 	(void)fprintf(stderr,
 "usage: %s [-d] [-f] [-s socket] [-u drop-user] [-S service] [-X path]\n"
+"          [-m WxH]\n"
 "  -d         enable debug log level\n"
 "  -f         run in foreground; log to stderr\n"
 "  -s path    listen socket path (default %s)\n"
 "  -u user    drop privileges to this user after bind\n"
 "             (only safe if SPAWN is not used)\n"
 "  -S name    PAM service name (default 'login')\n"
-"  -X path    rdp-session binary path (default %s)\n",
+"  -X path    rdp-session binary path (default %s)\n"
+"  -m WxH     max desktop size for dynamic resize (default 3840x2160)\n",
 		prog, RDP_SESSMGR_DEFAULT_SOCK, RDP_SESSION_PATH);
 }
 
@@ -1812,7 +1819,7 @@ main(int argc, char *argv[])
 	int debug = 0, foreground = 0, opt, listen_fd;
 	struct rdp_log_cfg lc;
 
-	while ((opt = getopt(argc, argv, "dfs:u:S:X:h?")) != -1) {
+	while ((opt = getopt(argc, argv, "dfs:u:S:X:m:h?")) != -1) {
 		switch (opt) {
 		case 'd': debug = 1; break;
 		case 'f': foreground = 1; break;
@@ -1820,6 +1827,14 @@ main(int argc, char *argv[])
 		case 'u': drop_user = optarg; break;
 		case 'S': service = optarg; break;
 		case 'X': session_path = optarg; break;
+		case 'm':
+			if (sscanf(optarg, "%dx%d", &max_w, &max_h) != 2
+			    || max_w < 200 || max_h < 200
+			    || max_w > 8192 || max_h > 8192) {
+				usage(argv[0]);
+				return 1;
+			}
+			break;
 		case 'h':
 		case '?':
 			usage(argv[0]);

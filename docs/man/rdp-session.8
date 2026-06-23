@@ -12,6 +12,7 @@
 .Op Fl H Ar height
 .Op Fl k Ar lcid
 .Op Fl z Ar tz
+.Op Fl m Ar WxH
 .Sh DESCRIPTION
 .Nm
 is the unprivileged per-user component of the Remote Desktop
@@ -208,6 +209,14 @@ string.
 It is exported into the session environment so the session clock matches
 the client.
 An empty value keeps the server's zone.
+.It Fl m Ar WxH
+Maximum desktop size.
+The Xvfb framebuffer is allocated at this size (or the initial geometry if
+that is larger), and the desktop starts at the requested geometry and can
+grow up to this size on a dynamic resize.
+The default is
+.Ar 3840x2160 .
+Applies to the Xvfb backend only.
 .El
 .Sh DRIVE REDIRECTION
 On Linux the drives the client redirects over the RDPDR channel are

@@ -168,7 +168,7 @@ find_free_display(void)
 }
 
 static pid_t
-spawn_xvfb(int display_num, int w, int h)
+spawn_xvfb(int display_num, int fbw, int fbh)
 {
 	pid_t pid;
 	char disp[16], screen[64];
@@ -177,8 +177,12 @@ spawn_xvfb(int display_num, int w, int h)
 	if (pid < 0)
 		return -1;
 	if (pid == 0) {
+		/* fbw x fbh is the framebuffer (the maximum the desktop can
+		 * grow to); the caller sets the initial mode smaller via RANDR.
+		 * Xvfb fixes its framebuffer at this size, so a later dynamic
+		 * resize can only grow up to here. */
 		(void)snprintf(disp, sizeof disp, ":%d", display_num);
-		(void)snprintf(screen, sizeof screen, "%dx%dx24", w, h);
+		(void)snprintf(screen, sizeof screen, "%dx%dx24", fbw, fbh);
 		execl(RDP_XVFB_PATH, "Xvfb", disp,
 			"-screen", "0", screen,
 			"-nolisten", "tcp",
@@ -1287,13 +1291,14 @@ static void
 usage(const char *prog)
 {
 	(void)fprintf(stderr,
-"usage: %s [-D] [-W] [-w width] [-H height] [-k lcid] [-z tz]\n"
+"usage: %s [-D] [-W] [-w width] [-H height] [-k lcid] [-z tz] [-m WxH]\n"
 "  -D     use native DDX driver instead of Xvfb\n"
 "  -W     use Wayland compositor instead of X11\n"
 "  -w n   desktop width  (default 1024)\n"
 "  -H n   desktop height (default 768)\n"
 "  -k id  client keyboard layout id (LCID; 0 = us)\n"
 "  -z tz  client POSIX TZ string for the session clock\n"
+"  -m WxH max desktop size for dynamic resize (default 3840x2160)\n"
 "\n"
 "File descriptor 3 must be a SOCK_STREAM socket to the rdpd worker;\n"
 "rdp-sessionmgr sets this up on SPAWN.\n",
@@ -1354,6 +1359,8 @@ int
 main(int argc, char *argv[])
 {
 	int w = 1024, h = 768;
+	int maxw = 3840, maxh = 2160;   /* dynamic-resize framebuffer cap */
+	int fb_w, fb_h;
 	int opt, use_ddx = 0, use_wayland = 0;
 	int display_num;
 	unsigned long lcid = 0;
@@ -1373,12 +1380,20 @@ main(int argc, char *argv[])
 	 * on teardown. */
 	int rail_window_sent = 0;
 
-	while ((opt = getopt(argc, argv, "DWw:H:k:z:?")) != -1) {
+	while ((opt = getopt(argc, argv, "DWw:H:k:z:m:?")) != -1) {
 		switch (opt) {
 		case 'D': use_ddx = 1; break;
 		case 'W': use_wayland = 1; break;
 		case 'w': w = atoi(optarg); break;
 		case 'H': h = atoi(optarg); break;
+		case 'm':
+			if (sscanf(optarg, "%dx%d", &maxw, &maxh) != 2
+			    || maxw < 200 || maxh < 200
+			    || maxw > 8192 || maxh > 8192) {
+				usage(argv[0]);
+				return 1;
+			}
+			break;
 		case 'k': lcid = strtoul(optarg, NULL, 10); break;
 		case 'z':
 			(void)snprintf(client_tz, sizeof client_tz,
@@ -1434,7 +1449,12 @@ main(int argc, char *argv[])
 	}
 	rdp_info("using display :%d (geometry %dx%d)", display_num, w, h);
 
-	xvfb_pid = spawn_xvfb(display_num, w, h);
+	/* The framebuffer is the larger of the configured cap and the initial
+	 * size, so the desktop can grow by RANDR up to here (and a client that
+	 * starts bigger than the cap still gets a framebuffer that fits it). */
+	fb_w = w > maxw ? w : maxw;
+	fb_h = h > maxh ? h : maxh;
+	xvfb_pid = spawn_xvfb(display_num, fb_w, fb_h);
 	if (xvfb_pid < 0) {
 		rdp_err("spawn Xvfb: %s", strerror(errno));
 		return 1;
@@ -1463,8 +1483,9 @@ main(int argc, char *argv[])
 	XSync(dpy, False);
 	uni_init_spares(dpy);
 
-	/* Resize the Xvfb desktop from 3840x2160 down to the client's
-	 * requested size via RANDR. */
+	/* Set the initial mode down from the framebuffer to the client's
+	 * requested size via RANDR; later resizes can grow back up to the
+	 * framebuffer (fb_w x fb_h). */
 	{
 		char cmd[256];
 		(void)snprintf(cmd, sizeof cmd,
@@ -1679,7 +1700,7 @@ main(int argc, char *argv[])
 				struct rdp_be_resize rs;
 				memcpy(&rs, buf, sizeof rs);
 				if (rs.width >= 200 && rs.height >= 200
-				    && rs.width <= 3840 && rs.height <= 2160) {
+				    && rs.width <= fb_w && rs.height <= fb_h) {
 					char cmd[256];
 					rdp_info("resize: %ux%u -> %ux%u",
 						(unsigned)w, (unsigned)h,

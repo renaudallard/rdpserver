@@ -12,6 +12,7 @@
 .Op Fl u Ar user
 .Op Fl S Ar service
 .Op Fl X Ar path
+.Op Fl m Ar WxH
 .Sh DESCRIPTION
 .Nm
 is the privileged half of
@@ -124,6 +125,13 @@ Path to the
 binary.
 The default is
 .Pa /usr/local/sbin/rdp-session .
+.It Fl m Ar WxH
+Maximum desktop size, passed to each
+.Xr rdp-session 8
+as the framebuffer it allocates for dynamic resize.
+The desktop can grow up to this size when the client requests a resize.
+The default is
+.Ar 3840x2160 .
 .El
 .Sh SEE ALSO
 .Xr rdpd 8 ,
