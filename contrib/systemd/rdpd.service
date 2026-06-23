@@ -32,7 +32,14 @@ Requires=rdp-sessionmgr.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/sbin/rdpd -p 3389 -S /var/run/rdpserver/sessmgr.sock
+# rdpd writes its self-signed cert to the relative path tmp/server.crt, so
+# run from a stable state directory; the cert then persists across reboots
+# instead of being regenerated each boot (which trips client cert warnings).
+# Supply your own with -c cert -k key to skip the self-signed cert.
+WorkingDirectory=/var/lib/rdpserver
+ExecStartPre=/bin/mkdir -p /var/lib/rdpserver/tmp
+# -f keeps rdpd in the foreground, as Type=simple requires.
+ExecStart=/usr/local/sbin/rdpd -f -p 3389 -S /var/run/rdpserver/sessmgr.sock
 Restart=on-failure
 RestartSec=5
 

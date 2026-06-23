@@ -32,7 +32,10 @@ Before=rdpd.service
 [Service]
 Type=simple
 ExecStartPre=/bin/mkdir -p /var/run/rdpserver
-ExecStart=/usr/local/sbin/rdp-sessionmgr -s /var/run/rdpserver/sessmgr.sock -X /usr/local/sbin/rdp-session
+# -f keeps the broker in the foreground, as Type=simple requires.
+# -S rdpd selects the PAM service shipped in contrib/pam.d/rdpd; drop it
+# to fall back to the universally-present "login" service.
+ExecStart=/usr/local/sbin/rdp-sessionmgr -f -s /var/run/rdpserver/sessmgr.sock -S rdpd -X /usr/local/sbin/rdp-session
 Restart=on-failure
 RestartSec=5
 
