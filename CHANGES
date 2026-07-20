@@ -1,6 +1,12 @@
 rdpserver release notes
 
 Unreleased (0.0.9, Phase J)
+	Dynamic-resize reactivation is now skipped when the client's
+	monitor-layout request matches the current desktop size.  A no-op
+	Deactivate-All / re-Demand-Active cycle is not just wasted work:
+	some clients (the macOS Windows App) do not re-send Confirm Active
+	for it, so the reactivation failed and dropped the connection.
+
 	Non-blocking client output so a slow link never starves input.
 	The steady-state proxy loop used to write frames with blocking
 	SSL_write calls; over a congested link (e.g. a VPN carrying

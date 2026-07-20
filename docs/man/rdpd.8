@@ -51,7 +51,9 @@ Client drive, printer, and serial device redirection is handled by the
 channel.
 Multi-monitor layouts are parsed from the GCC CS_MONITOR block, and
 dynamic resize is supported over the RDPEDISP Display Control channel,
-which the server opens and on which it advertises its monitor limits.
+which the server opens and on which it advertises its monitor limits;
+a layout request that matches the current desktop size is treated as a
+no-op and does not trigger a reactivation.
 .Pp
 The steady-state connection runs the client socket non-blocking with a
 per-connection output queue, so a slow or congested link cannot block

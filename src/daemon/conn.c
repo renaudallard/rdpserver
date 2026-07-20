@@ -2801,7 +2801,14 @@ run_proxy(struct rdp_tls *t, int be_fd,
 						prog = NULL;
 					}
 				}
-				if (r == 2 && rw > 0 && rh > 0) {
+				if (r == 2 && rw > 0 && rh > 0
+				    && (rw != desktop_w || rh != desktop_h)) {
+					/* A monitor-layout request for the size
+					 * we already have needs no reactivation;
+					 * running the full Deactivate/Demand-
+					 * Active cycle for a no-op is wasteful and
+					 * drops some clients (e.g. the macOS
+					 * Windows App) that do not re-Confirm. */
 					int rerc;
 					/* Reactivation is a synchronous request/
 					 * reply handshake: drain any queued output,
