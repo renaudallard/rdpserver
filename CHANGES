@@ -1,6 +1,31 @@
 rdpserver release notes
 
 Unreleased (0.0.9, Phase J)
+	Non-blocking client output so a slow link never starves input.
+	The steady-state proxy loop used to write frames with blocking
+	SSL_write calls; over a congested link (e.g. a VPN carrying
+	uncompressed bitmap frames) a single frame could block the loop
+	for seconds, during which client input was never read, so mouse
+	clicks and keystrokes were dropped or delayed while video still
+	trickled through.  The client socket is now switched to
+	non-blocking for the loop; the TLS layer gained a per-connection
+	output queue (rdp_tls_queue / rdp_tls_flush) and an inbound
+	buffer (rdp_tls_fill), with SSL_MODE_ENABLE_PARTIAL_WRITE and
+	SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER set so a queued frame drains
+	incrementally.  The loop polls POLLOUT to drain output and always
+	services input, so input stays responsive regardless of link
+	speed.  Flow control drops a fresh full-desktop frame when the
+	queue is already backed up (the next full frame supersedes it),
+	giving the legacy bitmap path the same frame-shedding the GFX
+	path already had; an absolute queue cap bounds memory and, when
+	hit, flow-controls DDX incremental regions too (logged, never
+	silent).  Measured over a 480 kbit/s throttle with a full-screen
+	high-entropy desktop: input events processed went from 9 (max
+	stall 9.4 s) to 226 (max stall 0.31 s).  The synchronous resize
+	reactivation handshake coexists with the non-blocking loop: queued
+	output is flushed and the fd set blocking for the handshake, then
+	restored.
+
 	NLA / CredSSP / NTLMv2 framework, NOT advertised yet.
 
 	Honest scoping: NLA cryptographically requires server-side

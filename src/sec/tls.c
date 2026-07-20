@@ -71,6 +71,20 @@ struct rdp_tls_ctx {
 struct rdp_tls {
 	SSL *ssl;
 	int  fd;
+	int  nonblock;      /* fd switched to O_NONBLOCK (steady-state loop) */
+	int  want;          /* what a stalled flush is waiting on; see RDP_TLS_WANT_* */
+
+	/* Outbound queue: bytes [out_off, out_len) are encrypted-and-queued
+	 * application data still to hand to SSL_write.  Drained by rdp_tls_flush
+	 * as the socket accepts it.  Grown by rdp_tls_queue; ACCEPT_MOVING_WRITE_
+	 * BUFFER lets the buffer move between partial writes. */
+	uint8_t *out;
+	size_t   out_off, out_len, out_cap;
+
+	/* Inbound buffer: bytes [in_off, in_len) read off the wire but not yet
+	 * framed into a PDU by the caller. */
+	uint8_t *in;
+	size_t   in_off, in_len, in_cap;
 };
 
 static int tls_inited;
@@ -243,6 +257,11 @@ rdp_tls_accept(struct rdp_tls_ctx *ctx, int fd)
 		free(t);
 		return NULL;
 	}
+	/* Allow non-blocking SSL_write to make partial progress and to retry
+	 * from a moved buffer, so the daemon can queue output and drain it
+	 * incrementally without pinning a single buffer address. */
+	(void)SSL_set_mode(t->ssl, SSL_MODE_ENABLE_PARTIAL_WRITE
+		| SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
 	for (;;) {
 		int r = SSL_accept(t->ssl);
 		if (r == 1) break;
@@ -320,6 +339,169 @@ rdp_tls_write_full(struct rdp_tls *t, const void *buf, size_t n)
 }
 
 int
+rdp_tls_set_nonblock(struct rdp_tls *t, int on)
+{
+	int fl = fcntl(t->fd, F_GETFL, 0);
+	if (fl < 0) return -1;
+	if (on) fl |= O_NONBLOCK;
+	else    fl &= ~O_NONBLOCK;
+	if (fcntl(t->fd, F_SETFL, fl) < 0) return -1;
+	t->nonblock = on ? 1 : 0;
+	return 0;
+}
+
+int
+rdp_tls_queue(struct rdp_tls *t, const void *buf, size_t len)
+{
+	if (len == 0) return 0;
+	/* Reclaim already-drained head space before growing. */
+	if (t->out_off > 0 && t->out_off == t->out_len) {
+		t->out_off = t->out_len = 0;
+	} else if (t->out_off > 0 && t->out_off > t->out_cap / 2) {
+		memmove(t->out, t->out + t->out_off, t->out_len - t->out_off);
+		t->out_len -= t->out_off;
+		t->out_off = 0;
+	}
+	if (t->out_len + len > t->out_cap) {
+		size_t need = t->out_len + len;
+		size_t cap = t->out_cap ? t->out_cap : 8192;
+		uint8_t *nb;
+		while (cap < need) {
+			if (cap > (size_t)SIZE_MAX / 2) { cap = need; break; }
+			cap *= 2;
+		}
+		nb = realloc(t->out, cap);
+		if (nb == NULL) return -1;
+		t->out = nb;
+		t->out_cap = cap;
+	}
+	memcpy(t->out + t->out_len, buf, len);
+	t->out_len += len;
+	return 0;
+}
+
+int
+rdp_tls_flush(struct rdp_tls *t)
+{
+	t->want = 0;
+	while (t->out_off < t->out_len) {
+		size_t remain = t->out_len - t->out_off;
+		int r = SSL_write(t->ssl, t->out + t->out_off,
+			remain > (size_t)INT_MAX ? INT_MAX : (int)remain);
+		if (r > 0) {
+			t->out_off += (size_t)r;
+			continue;
+		}
+		int err = SSL_get_error(t->ssl, r);
+		if (err == SSL_ERROR_WANT_WRITE) {
+			t->want = RDP_TLS_WANT_WRITE;
+			return 1;
+		}
+		if (err == SSL_ERROR_WANT_READ) {
+			t->want = RDP_TLS_WANT_READ;
+			return 1;
+		}
+		errno = EIO;
+		return -1;
+	}
+	/* Fully drained: reset offsets and release an oversized buffer so a
+	 * one-off large frame does not pin memory for the life of the session. */
+	t->out_off = t->out_len = 0;
+	if (t->out_cap > (size_t)1 << 20) {
+		free(t->out);
+		t->out = NULL;
+		t->out_cap = 0;
+	}
+	return 0;
+}
+
+int
+rdp_tls_send(struct rdp_tls *t, const void *buf, size_t len)
+{
+	if (!t->nonblock)
+		return rdp_tls_write_full(t, buf, len) == (ssize_t)len ? 0 : -1;
+	if (rdp_tls_queue(t, buf, len) != 0)
+		return -1;
+	/* Opportunistic drain; leftover stays queued for the poll loop to
+	 * flush on POLLOUT.  A pending (would-block) result is not an error. */
+	return rdp_tls_flush(t) < 0 ? -1 : 0;
+}
+
+size_t
+rdp_tls_out_bytes(const struct rdp_tls *t)
+{
+	return t->out_len - t->out_off;
+}
+
+int
+rdp_tls_want(const struct rdp_tls *t)
+{
+	return t->want;
+}
+
+ssize_t
+rdp_tls_fill(struct rdp_tls *t)
+{
+	int r;
+	uint8_t tmp[16384];
+
+	/* Compact the read buffer so consumed head space is reclaimed. */
+	if (t->in_off > 0) {
+		if (t->in_off == t->in_len) {
+			t->in_off = t->in_len = 0;
+		} else {
+			memmove(t->in, t->in + t->in_off,
+				t->in_len - t->in_off);
+			t->in_len -= t->in_off;
+			t->in_off = 0;
+		}
+	}
+	r = SSL_read(t->ssl, tmp, (int)sizeof tmp);
+	if (r <= 0) {
+		int err = SSL_get_error(t->ssl, r);
+		if (err == SSL_ERROR_ZERO_RETURN) return 0;   /* clean EOF */
+		if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE)
+			return RDP_TLS_FILL_WOULDBLOCK;
+		if (err == SSL_ERROR_SYSCALL) {
+			/* A signal is retryable; anything else (incl. a peer
+			 * that closed without a close_notify, r == 0) is EOF. */
+			if (r < 0 && errno == EINTR)
+				return RDP_TLS_FILL_WOULDBLOCK;
+			return 0;
+		}
+		errno = EIO;
+		return -1;
+	}
+	if (t->in_len + (size_t)r > t->in_cap) {
+		size_t need = t->in_len + (size_t)r;
+		size_t cap = t->in_cap ? t->in_cap : 16384;
+		uint8_t *nb;
+		while (cap < need) cap *= 2;
+		nb = realloc(t->in, cap);
+		if (nb == NULL) return -1;
+		t->in = nb;
+		t->in_cap = cap;
+	}
+	memcpy(t->in + t->in_len, tmp, (size_t)r);
+	t->in_len += (size_t)r;
+	return r;
+}
+
+const uint8_t *
+rdp_tls_in_data(const struct rdp_tls *t, size_t *len)
+{
+	*len = t->in_len - t->in_off;
+	return t->in + t->in_off;
+}
+
+void
+rdp_tls_in_consume(struct rdp_tls *t, size_t n)
+{
+	t->in_off += n;
+	if (t->in_off > t->in_len) t->in_off = t->in_len;
+}
+
+int
 rdp_tls_fd(const struct rdp_tls *t)
 {
 	return t->fd;
@@ -369,5 +551,7 @@ rdp_tls_close(struct rdp_tls *t)
 		(void)SSL_shutdown(t->ssl);
 		SSL_free(t->ssl);
 	}
+	free(t->out);
+	free(t->in);
 	free(t);
 }

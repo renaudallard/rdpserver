@@ -52,6 +52,12 @@ channel.
 Multi-monitor layouts are parsed from the GCC CS_MONITOR block, and
 dynamic resize is supported over the RDPEDISP Display Control channel,
 which the server opens and on which it advertises its monitor limits.
+.Pp
+The steady-state connection runs the client socket non-blocking with a
+per-connection output queue, so a slow or congested link cannot block
+the server mid-frame and starve input: mouse and keyboard stay
+responsive while video degrades gracefully, and a full-desktop frame is
+dropped when the client is behind rather than deepening the queue.
 Multitouch and pen input is received over the MS-RDPEI
 .Sy Microsoft::Windows::RDS::Input
 dynamic channel and forwarded to the session

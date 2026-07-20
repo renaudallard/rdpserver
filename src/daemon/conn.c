@@ -148,7 +148,7 @@ static int
 write_tpkt_tls(struct rdp_tls *t, uint8_t *buf, size_t len)
 {
 	if (rdp_tpkt_encode_hdr(buf, (uint16_t)len) < 0) return -1;
-	return rdp_tls_write_full(t, buf, len) == (ssize_t)len ? 0 : -1;
+	return rdp_tls_send(t, buf, len);
 }
 
 /* Wrap a body (X.224 DT + MCS Send Data Indication + payload) for the
@@ -244,6 +244,21 @@ autodetect_send(struct rdp_tls *t, uint16_t user_id, uint16_t chan,
 #define HEARTBEAT_PERIOD_S      30u
 #define HEARTBEAT_WARN_COUNT     3u
 #define HEARTBEAT_RECONN_COUNT   5u
+
+/* Flow control for the client output queue.  When more than this many bytes
+ * are still queued to a slow client, a fresh full-desktop frame is dropped
+ * rather than piled on -- the next full frame supersedes it, so the client
+ * always converges on the latest screen while input keeps flowing.  Partial
+ * (incremental) frames are never dropped here, since each covers a distinct
+ * area; they are bounded instead by the hard cap below. */
+#define RDP_FRAME_QUEUE_HIGH_WATER  (256u * 1024u)
+
+/* Absolute ceiling on queued output.  A client this far behind is not keeping
+ * up at all; drop the frame (full or incremental) rather than grow memory
+ * without bound.  A dropped incremental region goes stale only until the next
+ * damage repaints it.  This is the only place incremental (DDX) frames are
+ * dropped, so it doubles as DDX-mode flow control. */
+#define RDP_FRAME_QUEUE_HARD_CAP    (16u * 1024u * 1024u)
 
 /* Send a server Heartbeat PDU on the MCS message channel so a client that
  * advertised support keeps the connection alive while the session is idle.
@@ -511,8 +526,7 @@ send_clip_pdu(struct rdp_tls *t,
 			size_t total = 4 + (size_t)dt_n + (size_t)mcs_n;
 			if (rdp_tpkt_encode_hdr(buf, (uint16_t)total) < 0)
 				return -1;
-			if (rdp_tls_write_full(t, buf, total)
-			    != (ssize_t)total)
+			if (rdp_tls_send(t, buf, total) != 0)
 				return -1;
 		}
 		off += chunk;
@@ -1116,7 +1130,7 @@ send_bitmap_fragments(struct rdp_tls *t, const uint8_t *body,
 		n = rdp_fp_build_update_frag(pkt, sizeof pkt,
 			RDP_FP_UPDATE_BITMAP, flag, body + off, slice);
 		if (n < 0) return -1;
-		if (rdp_tls_write_full(t, pkt, (size_t)n) != (ssize_t)n)
+		if (rdp_tls_send(t, pkt, (size_t)n) != 0)
 			return -1;
 		off += slice;
 		first = 0;
@@ -1205,7 +1219,7 @@ send_tile_orders(struct rdp_tls *t, struct rdp_bmpcache *cache,
 	    body, blen);
 	if (n < 0)
 		return -1;
-	if (rdp_tls_write_full(t, pkt, (size_t)n) != (ssize_t)n)
+	if (rdp_tls_send(t, pkt, (size_t)n) != 0)
 		return -1;
 	return 0;
 }
@@ -1257,8 +1271,7 @@ push_frame_tiled(struct rdp_tls *t,
 					(uint16_t)(fx + x), (uint16_t)(fy + y),
 					tw, th, tile_pix, (size_t)tw * 3);
 				if (n < 0) return -1;
-				if (rdp_tls_write_full(t, pkt, (size_t)n)
-				    != (ssize_t)n)
+				if (rdp_tls_send(t, pkt, (size_t)n) != 0)
 					return -1;
 				continue;
 			}
@@ -1283,6 +1296,43 @@ push_frame_tiled(struct rdp_tls *t,
 		}
 	}
 	return 0;
+}
+
+/* Frame one TPKT or fast-path PDU out of an already-buffered byte span
+ * [p, p+avail).  Returns 1 with *kind (1 = TPKT, 0 = fast-path) and *plen (the
+ * PDU's total wire length) when a complete PDU is present, 0 when more bytes
+ * are needed, or -1 when the framing is malformed.  Mirrors read_one_rdp_pdu's
+ * length rules so the buffered steady-state loop frames PDUs identically. */
+static int
+frame_one_pdu(const uint8_t *p, size_t avail, int *kind, size_t *plen)
+{
+	size_t total;
+
+	if (avail < 1) return 0;
+	if (p[0] == 0x03) {                       /* TPKT */
+		struct rdp_tpkt h;
+		if (avail < 4) return 0;
+		if (rdp_tpkt_parse_hdr(&h, p) < 0) return -1;
+		if (h.length < 4) return -1;
+		if (avail < h.length) return 0;
+		*kind = 1;
+		*plen = h.length;
+		return 1;
+	}
+	/* Fast-path: 1- or 2-byte length determinant. */
+	if (avail < 2) return 0;
+	if ((p[1] & 0x80) == 0) {
+		total = p[1];
+		if (total < 2) total = 2;
+	} else {
+		if (avail < 3) return 0;
+		total = ((size_t)(p[1] & 0x7f) << 8) | p[2];
+		if (total < 3) total = 3;
+	}
+	if (avail < total) return 0;
+	*kind = 0;
+	*plen = total;
+	return 1;
 }
 
 /* Read one TPKT or fast-path PDU into buf.  Returns total length
@@ -1332,6 +1382,58 @@ read_one_rdp_pdu(struct rdp_tls *t, uint8_t *buf, size_t cap, int *kind)
 	}
 	*kind = 0;
 	return (ssize_t)total;
+}
+
+/* Read one PDU, draining the inbound buffer first and only then reading more
+ * off the wire.  Used by the synchronous reactivation handshake, which runs
+ * with the fd temporarily set blocking so rdp_tls_fill() blocks for data.
+ * Preserves stream order (buffered bytes are ahead of anything still on the
+ * socket).  Returns PDU length, 0 on EOF, -1 on error; sets *kind. */
+static ssize_t
+read_pdu_drain_first(struct rdp_tls *t, uint8_t *buf, size_t cap, int *kind)
+{
+	for (;;) {
+		size_t av, plen;
+		const uint8_t *bp = rdp_tls_in_data(t, &av);
+		int k;
+		int fr = frame_one_pdu(bp, av, &k, &plen);
+		ssize_t got;
+
+		if (fr < 0) return -1;
+		if (fr == 1) {
+			if (plen > cap) {         /* oversized: skip it */
+				rdp_tls_in_consume(t, plen);
+				continue;
+			}
+			memcpy(buf, bp, plen);
+			*kind = k;
+			rdp_tls_in_consume(t, plen);
+			return (ssize_t)plen;
+		}
+		got = rdp_tls_fill(t);        /* blocking here (fd is blocking) */
+		if (got == 0) return 0;
+		if (got < 0) return -1;
+	}
+}
+
+/* Drain the whole outbound queue, waiting for writability as needed.  Used
+ * before a synchronous handshake so queued frames go out ahead of it and in
+ * order.  Returns 0 when empty, -1 on error/timeout. */
+static int
+flush_blocking(struct rdp_tls *t)
+{
+	while (rdp_tls_out_bytes(t) > 0) {
+		struct pollfd p;
+		int fr = rdp_tls_flush(t);
+		if (fr < 0) return -1;
+		if (fr == 0) break;
+		p.fd = rdp_tls_fd(t);
+		p.events = (rdp_tls_want(t) == RDP_TLS_WANT_READ)
+			? POLLIN : POLLOUT;
+		p.revents = 0;
+		if (poll(&p, 1, 5000) <= 0) return -1;
+	}
+	return 0;
 }
 
 struct dynvc_state {
@@ -2048,7 +2150,7 @@ do_reactivate(struct rdp_tls *t, int be_fd, uint16_t user_id,
 		int tries;
 		for (tries = 0; tries < 20 && !got_confirm; tries++) {
 			int kind = 0;
-			ssize_t r = read_one_rdp_pdu(t, buf, sizeof buf, &kind);
+			ssize_t r = read_pdu_drain_first(t, buf, sizeof buf, &kind);
 			if (r <= 0) return -1;
 			if (kind == 1) {
 				const uint8_t *mcs_p;
@@ -2110,9 +2212,9 @@ do_reactivate(struct rdp_tls *t, int be_fd, uint16_t user_id,
 		uint8_t fp[64];
 		ssize_t fn;
 		fn = rdp_fp_build_synchronize(fp, sizeof fp);
-		if (fn > 0) (void)rdp_tls_write_full(t, fp, (size_t)fn);
+		if (fn > 0) (void)rdp_tls_send(t, fp, (size_t)fn);
 		fn = rdp_fp_build_pointer_default(fp, sizeof fp);
-		if (fn > 0) (void)rdp_tls_write_full(t, fp, (size_t)fn);
+		if (fn > 0) (void)rdp_tls_send(t, fp, (size_t)fn);
 	}
 	return 0;
 }
@@ -2370,6 +2472,7 @@ run_proxy(struct rdp_tls *t, int be_fd,
 		ictx.ptr_cache_n = 0;
 	uint8_t *frame_buf = NULL;
 	size_t   frame_cap = 0;
+	time_t   last_drop_log_s = 0;   /* rate-limit the backlog-drop warning */
 	struct rdpgfx_state gfx = {0};
 	struct rdp_h264 *h264 = NULL;
 	struct rdp_avc444 *avc444 = NULL;
@@ -2498,9 +2601,9 @@ run_proxy(struct rdp_tls *t, int be_fd,
 		uint8_t fp[64];
 		ssize_t fn;
 		fn = rdp_fp_build_synchronize(fp, sizeof fp);
-		if (fn > 0) (void)rdp_tls_write_full(t, fp, (size_t)fn);
+		if (fn > 0) (void)rdp_tls_send(t, fp, (size_t)fn);
 		fn = rdp_fp_build_pointer_default(fp, sizeof fp);
-		if (fn > 0) (void)rdp_tls_write_full(t, fp, (size_t)fn);
+		if (fn > 0) (void)rdp_tls_send(t, fp, (size_t)fn);
 	}
 
 	/* RemoteApp: the server drives the RAIL handshake once the session is
@@ -2533,18 +2636,52 @@ run_proxy(struct rdp_tls *t, int be_fd,
 		hb_next.tv_sec += HEARTBEAT_PERIOD_S;
 	}
 
+	/* Switch to non-blocking for the steady-state loop: output is
+	 * queued and drained as the client accepts it, so a slow link can
+	 * never stall the loop or starve input.  The setup above (handshake,
+	 * activation, finalization) ran synchronously and is unaffected. */
+	if (rdp_tls_set_nonblock(t, 1) != 0)
+		rdp_warn("conn[%s]: set nonblock: %s", peer, strerror(errno));
+
 	for (;;) {
 		struct pollfd pfd[2];
 		int tls_fd = rdp_tls_fd(t);
 		int timeout = -1;
+		uint8_t pdu[0x4000];
+		int kind = 0;
+		ssize_t n = 0;
+		int have_pdu;
+
+		/* One rdp_tls_fill can buffer several PDUs; when a complete one
+		 * is already buffered, poll with a zero timeout so buffered input
+		 * drains promptly while output still flushes and backend frames
+		 * are still pulled. */
+		{
+			size_t av;
+			const uint8_t *bp = rdp_tls_in_data(t, &av);
+			size_t pl;
+			int k;
+			have_pdu = frame_one_pdu(bp, av, &k, &pl) == 1;
+		}
 
 		pfd[0].fd = tls_fd;
+		/* Ask for POLLOUT to drain the queue -- unless a stalled flush
+		 * is instead waiting on inbound TLS data (want == WANT_READ, e.g.
+		 * a TLS 1.3 KeyUpdate mid-write): the socket stays writable but
+		 * the write cannot progress, so requesting POLLOUT would spin.
+		 * Wait on POLLIN (always set) in that case; the flush trigger
+		 * below re-runs the flush once the inbound bytes arrive. */
 		pfd[0].events = POLLIN;
+		if (rdp_tls_out_bytes(t) > 0
+		    && rdp_tls_want(t) != RDP_TLS_WANT_READ)
+			pfd[0].events |= POLLOUT;
 		pfd[0].revents = 0;
 		pfd[1].fd = be_fd;
 		pfd[1].events = POLLIN;
 		pfd[1].revents = 0;
-		if (hb_on) {
+		if (have_pdu) {
+			timeout = 0;
+		} else if (hb_on) {
 			struct timespec now = {0, 0};
 			long ms;
 			clock_gettime(CLOCK_MONOTONIC, &now);
@@ -2568,6 +2705,16 @@ run_proxy(struct rdp_tls *t, int be_fd,
 				hb_next.tv_sec += HEARTBEAT_PERIOD_S;
 			}
 		}
+
+		/* Drain queued output when the socket is writable, or when a
+		 * stalled flush is instead waiting on readability (TLS 1.3 can
+		 * want-read mid-write). */
+		if ((pfd[0].revents & POLLOUT)
+		    || (rdp_tls_want(t) == RDP_TLS_WANT_READ
+			&& (pfd[0].revents & POLLIN))) {
+			if (rdp_tls_flush(t) < 0) break;
+		}
+
 		if (pfd[1].revents & (POLLHUP | POLLERR)) {
 			rdp_debug("conn[%s]: backend gone (rev=0x%x)",
 				peer, pfd[1].revents);
@@ -2575,11 +2722,37 @@ run_proxy(struct rdp_tls *t, int be_fd,
 			break;
 		}
 
+		/* Pull whatever arrived into the inbound buffer. */
 		if (pfd[0].revents & POLLIN) {
-			uint8_t pdu[0x4000];
-			int kind = 0;
-			ssize_t n = read_one_rdp_pdu(t, pdu, sizeof pdu, &kind);
-			if (n <= 0) break;
+			ssize_t fr = rdp_tls_fill(t);
+			if (fr == 0 || fr == -1) break;   /* EOF or fatal */
+		}
+
+		/* Frame at most one complete client PDU per iteration so the
+		 * dispatch below (whose breaks exit this loop) is unchanged;
+		 * further buffered PDUs drain on the next zero-timeout pass. */
+		have_pdu = 0;
+		{
+			size_t av;
+			const uint8_t *bp = rdp_tls_in_data(t, &av);
+			size_t pl;
+			int k;
+			int fres = frame_one_pdu(bp, av, &k, &pl);
+			if (fres < 0) break;              /* malformed framing */
+			if (fres == 1) {
+				if (pl > sizeof pdu) {
+					rdp_tls_in_consume(t, pl);
+				} else {
+					memcpy(pdu, bp, pl);
+					n = (ssize_t)pl;
+					kind = k;
+					rdp_tls_in_consume(t, pl);
+					have_pdu = 1;
+				}
+			}
+		}
+
+		if (have_pdu) {
 			if (kind == 1) {
 				uint16_t rw = 0, rh = 0;
 				const uint8_t *gfx_pdu = NULL;
@@ -2629,8 +2802,17 @@ run_proxy(struct rdp_tls *t, int be_fd,
 					}
 				}
 				if (r == 2 && rw > 0 && rh > 0) {
-					if (do_reactivate(t, be_fd, user_id,
-						io_channel, rw, rh, peer) != 0)
+					int rerc;
+					/* Reactivation is a synchronous request/
+					 * reply handshake: drain any queued output,
+					 * run it with the fd temporarily blocking,
+					 * then restore the non-blocking loop. */
+					if (flush_blocking(t) != 0) break;
+					(void)rdp_tls_set_nonblock(t, 0);
+					rerc = do_reactivate(t, be_fd, user_id,
+						io_channel, rw, rh, peer);
+					(void)rdp_tls_set_nonblock(t, 1);
+					if (rerc != 0)
 						break;
 					desktop_w = rw;
 					desktop_h = rh;
@@ -2945,6 +3127,36 @@ run_proxy(struct rdp_tls *t, int be_fd,
 				 * the frame but neither encode nor send it. */
 				if (output_suppressed)
 					continue;
+				/* Flow control: if the client is behind on a
+				 * slow link, drop this full-desktop frame rather
+				 * than deepen the queue (the next one supersedes
+				 * it).  Incremental regions are not dropped here
+				 * -- a dropped region would leave that area
+				 * stale -- unless the hard cap below is hit. */
+				if (rdp_tls_out_bytes(t) > RDP_FRAME_QUEUE_HIGH_WATER
+				    && fhdr.x == 0 && fhdr.y == 0
+				    && fhdr.w >= desktop_w
+				    && fhdr.h >= desktop_h)
+					continue;
+				/* Absolute bound: a client hopelessly behind
+				 * gets any frame dropped so the queue cannot
+				 * grow without limit (also flow-controls DDX
+				 * incremental regions).  Log at most once a
+				 * second so the drop is never silent. */
+				if (rdp_tls_out_bytes(t) > RDP_FRAME_QUEUE_HARD_CAP) {
+					struct timespec dnow = {0, 0};
+					clock_gettime(CLOCK_MONOTONIC, &dnow);
+					if (dnow.tv_sec != last_drop_log_s) {
+						rdp_warn("conn[%s]: client "
+							"backlogged (%zu KiB "
+							"queued); dropping frames",
+							peer,
+							rdp_tls_out_bytes(t)
+							/ 1024);
+						last_drop_log_s = dnow.tv_sec;
+					}
+					continue;
+				}
 				if (gfx.active && h264 != NULL
 				    && dv->dv.gfx_channel_id >= 0) {
 					int fresh = !gfx.surface_created;
@@ -3420,12 +3632,12 @@ run_proxy(struct rdp_tls *t, int be_fd,
 								if (ictx.ptr_cache[i].valid && ictx.ptr_cache[i].hash == hsh) { hit = i; break; }
 							if (hit >= 0) {
 								ssize_t pn = rdp_fp_build_pointer_cached(pkt, sizeof pkt, (uint16_t)hit);
-								if (pn > 0) (void)rdp_tls_write_full(t, pkt, (size_t)pn);
+								if (pn > 0) (void)rdp_tls_send(t, pkt, (size_t)pn);
 							} else {
 								uint16_t slot = ictx.ptr_cache_next;
 								ssize_t pn = rdp_fp_build_pointer_new(pkt, sizeof pkt, slot, hx, hy, sw, sh, src, src_stride);
 								if (pn > 0) {
-									(void)rdp_tls_write_full(t, pkt, (size_t)pn);
+									(void)rdp_tls_send(t, pkt, (size_t)pn);
 									ictx.ptr_cache[slot].hash = hsh;
 									ictx.ptr_cache[slot].valid = 1;
 									ictx.ptr_cache_next = (uint16_t)((slot + 1) % ictx.ptr_cache_n);
@@ -3433,7 +3645,7 @@ run_proxy(struct rdp_tls *t, int be_fd,
 							}
 						} else {
 							ssize_t pn = rdp_fp_build_pointer_new(pkt, sizeof pkt, 0, hx, hy, sw, sh, src, src_stride);
-							if (pn > 0) (void)rdp_tls_write_full(t, pkt, (size_t)pn);
+							if (pn > 0) (void)rdp_tls_send(t, pkt, (size_t)pn);
 						}
 					}
 					free(scaled);
@@ -3487,7 +3699,7 @@ run_proxy(struct rdp_tls *t, int be_fd,
 								RDP_FP_UPDATE_ORDERS,
 								body, 2 + (size_t)on);
 							if (un > 0)
-								(void)rdp_tls_write_full(
+								(void)rdp_tls_send(
 									t, upd, (size_t)un);
 						}
 					}
@@ -4242,9 +4454,9 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 		ssize_t pn;
 
 		pn = rdp_fp_build_synchronize(pkt, sizeof pkt);
-		if (pn > 0) (void)rdp_tls_write_full(t, pkt, (size_t)pn);
+		if (pn > 0) (void)rdp_tls_send(t, pkt, (size_t)pn);
 		pn = rdp_fp_build_pointer_default(pkt, sizeof pkt);
-		if (pn > 0) (void)rdp_tls_write_full(t, pkt, (size_t)pn);
+		if (pn > 0) (void)rdp_tls_send(t, pkt, (size_t)pn);
 	}
 
 	/* Check for auto-reconnect cookie.  If the client presented one

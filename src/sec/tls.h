@@ -76,6 +76,58 @@ ssize_t rdp_tls_write(struct rdp_tls *t, const void *buf, size_t n);
 ssize_t rdp_tls_read_full(struct rdp_tls *t, void *buf, size_t n);
 ssize_t rdp_tls_write_full(struct rdp_tls *t, const void *buf, size_t n);
 
+/*
+ * Buffered non-blocking I/O for the steady-state proxy loop.
+ *
+ * The synchronous read/write calls above are used during connection setup.
+ * Once the loop is running the caller switches the fd to non-blocking and
+ * drives output through an internal queue so a slow client can never stall
+ * the loop (and thus never starve input).
+ */
+
+/* What a stalled flush is waiting on, reported by rdp_tls_want(). */
+#define RDP_TLS_WANT_READ   1
+#define RDP_TLS_WANT_WRITE  2
+
+/* rdp_tls_fill() returns this (a negative sentinel) when no data is available
+ * yet on a non-blocking fd -- distinct from 0 (EOF) and -1 (error). */
+#define RDP_TLS_FILL_WOULDBLOCK  (-2)
+
+/* Toggle O_NONBLOCK on the underlying fd.  Returns 0 or -1/errno. */
+int rdp_tls_set_nonblock(struct rdp_tls *t, int on);
+
+/* Append len bytes to the outbound queue (does not touch the socket).
+ * Returns 0, or -1 if out of memory. */
+int rdp_tls_queue(struct rdp_tls *t, const void *buf, size_t len);
+
+/* Drain as much of the outbound queue to the socket as it will accept.
+ * Returns 0 when fully drained, 1 when bytes remain (would block -- see
+ * rdp_tls_want() for whether to wait for readability or writability), or
+ * -1/errno on a fatal error. */
+int rdp_tls_flush(struct rdp_tls *t);
+
+/* Send buf[0..len): a direct blocking write while the fd is blocking (setup
+ * phase), or queue+opportunistic-flush once non-blocking (steady state).  The
+ * poll loop drains any leftover.  Returns 0, or -1 on a fatal error. */
+int rdp_tls_send(struct rdp_tls *t, const void *buf, size_t len);
+
+/* Bytes still queued but not yet handed to the socket. */
+size_t rdp_tls_out_bytes(const struct rdp_tls *t);
+
+/* After rdp_tls_flush() returns 1: RDP_TLS_WANT_READ or RDP_TLS_WANT_WRITE. */
+int rdp_tls_want(const struct rdp_tls *t);
+
+/* Read whatever is available into the inbound buffer.  Returns bytes read
+ * (>0), 0 on clean EOF, RDP_TLS_FILL_WOULDBLOCK if nothing is available yet,
+ * or -1/errno on error. */
+ssize_t rdp_tls_fill(struct rdp_tls *t);
+
+/* Peek the unframed inbound bytes; sets *len to how many are available. */
+const uint8_t *rdp_tls_in_data(const struct rdp_tls *t, size_t *len);
+
+/* Mark n inbound bytes as consumed once framed into a PDU. */
+void rdp_tls_in_consume(struct rdp_tls *t, size_t n);
+
 /* Underlying fd (for the rare cases we need it -- e.g. setting
  * TCP_NODELAY).  Caller must not directly read/write on it. */
 int rdp_tls_fd(const struct rdp_tls *t);
