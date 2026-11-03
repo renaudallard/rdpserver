@@ -877,13 +877,6 @@ run_ddx_mode(int w, int h)
 		setenv("DISPLAY", buf, 1);
 	}
 
-	{
-		char rtdir[64];
-		(void)snprintf(rtdir, sizeof rtdir, "/run/user/%u",
-			(unsigned)getuid());
-		(void)mkdir(rtdir, 0700);
-		(void)setenv("XDG_RUNTIME_DIR", rtdir, 1);
-	}
 
 	/* Start PulseAudio with a null sink for audio capture. */
 	{
@@ -1117,7 +1110,6 @@ run_wayland_mode(int w, int h, uint32_t lcid)
 	rdp_info("Wayland mode: %s (%dx%d)", rdp_wl_comp_get_socket(wl), w, h);
 
 	(void)setenv("WAYLAND_DISPLAY", rdp_wl_comp_get_socket(wl), 1);
-	(void)setenv("XDG_RUNTIME_DIR", "/tmp", 0);
 
 	{
 		struct rdp_be_hello hello = {(uint16_t)w, (uint16_t)h, 24, 0};
@@ -1551,13 +1543,6 @@ main(int argc, char *argv[])
 		if (rdp_be_send(BE_FD, RDP_BE_HELLO_S2W,
 			&hello, sizeof hello) != 0)
 			rdp_err("HELLO send failed: %s", strerror(errno));
-	}
-	{
-		char rtdir[64];
-		(void)snprintf(rtdir, sizeof rtdir, "/run/user/%u",
-			(unsigned)getuid());
-		(void)mkdir(rtdir, 0700);
-		(void)setenv("XDG_RUNTIME_DIR", rtdir, 1);
 	}
 	{
 		pid_t pa = fork();

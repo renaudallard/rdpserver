@@ -232,7 +232,11 @@ around every RDP login: a per-session root monitor opens the PAM session
 before the user's processes start and closes it when they exit, and
 exports the stack's environment (such as pam_systemd's
 `XDG_RUNTIME_DIR`) to the session.  On OpenBSD the session is set up
-with `setusercontext(3)` from the user's login class.
+with `setusercontext(3)` from the user's login class.  Without a
+runtime directory from PAM the session uses `/run/user/<uid>` when it is
+a 0700 directory owned by the user, else a private
+`/tmp/rdpserver-runtime-<uid>`; a directory of that name owned by anyone
+else, or open to anyone else, is refused.
 Systemd unit files are in
 [`contrib/systemd/`](./contrib/systemd/)
 and OpenBSD rc.d scripts in

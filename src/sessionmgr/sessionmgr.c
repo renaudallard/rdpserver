@@ -909,6 +909,38 @@ fuse_mount_drain(void)
 #endif /* HAVE_OBSD_FUSE */
 
 /*
+ * XDG_RUNTIME_DIR must be a directory owned by the user and closed to
+ * everyone else; session sockets (PulseAudio, Wayland, D-Bus) live there.
+ * Keep what the session stack exported (pam_systemd), else use logind's
+ * /run/user/<uid>, else a private directory under /tmp. Runs as the user,
+ * so a directory someone else planted under that name is refused rather
+ * than taken over, and the variable is then left unset.
+ */
+static void
+set_runtime_dir(const struct passwd *pw)
+{
+	char path[64];
+	struct stat sb;
+	const char *cur = getenv("XDG_RUNTIME_DIR");
+	int i;
+
+	if (cur != NULL && cur[0] != '\0')
+		return;
+	for (i = 0; i < 2; i++) {
+		(void)snprintf(path, sizeof path, i == 0 ? "/run/user/%u"
+		    : "/tmp/rdpserver-runtime-%u", (unsigned)pw->pw_uid);
+		if (i == 1 && mkdir(path, 0700) != 0 && errno != EEXIST)
+			break;
+		if (lstat(path, &sb) == 0 && S_ISDIR(sb.st_mode)
+		    && sb.st_uid == pw->pw_uid && (sb.st_mode & 077) == 0) {
+			(void)setenv("XDG_RUNTIME_DIR", path, 1);
+			return;
+		}
+	}
+	(void)unsetenv("XDG_RUNTIME_DIR");
+}
+
+/*
  * The user's session process. Runs in the child of the session monitor:
  * moves the backend socket to fd 3 and the fuse device to fd 4, builds
  * the environment, drops to the user and execs rdp-session. Never
@@ -969,12 +1001,12 @@ exec_session(struct passwd *pw, struct rdp_auth *auth, int be_fd,
 		"/usr/local/bin:/usr/local/sbin:/usr/X11R6/bin"
 		":/usr/bin:/usr/sbin:/bin:/sbin",
 		1);
-	(void)setenv("XDG_RUNTIME_DIR", "/tmp", 0);
 
 	if (rdp_auth_become_user(auth, pw) != 0) {
 		rdp_err("drop privs: %s", strerror(errno));
 		_exit(127);
 	}
+	set_runtime_dir(pw);
 
 	(void)snprintf(wbuf, sizeof wbuf, "%u", (unsigned)w);
 	(void)snprintf(hbuf, sizeof hbuf, "%u", (unsigned)h);

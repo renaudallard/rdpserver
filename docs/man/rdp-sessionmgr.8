@@ -50,6 +50,17 @@ the user process is set up with
 from the user's login class.
 A session stack that refuses the login fails the spawn.
 .Pp
+When the session stack exports no
+.Ev XDG_RUNTIME_DIR ,
+the session uses
+.Pa /run/user/ Ns Ar uid
+if it is a mode 0700 directory owned by the user, and otherwise creates
+a private
+.Pa /tmp/rdpserver-runtime- Ns Ar uid .
+A directory under either name with any other owner or with group or
+other access is refused and the variable is left unset, so another
+local user cannot plant sockets in the session's runtime directory.
+.Pp
 On
 .Ox ,
 where
