@@ -129,12 +129,15 @@ rdp_rdpgfx_select_caps(const struct rdpgfx_caps_advertise *adv,
 	int has_avc420 = 0;
 	int has_v10_noavc = 0;
 	int has_v10_avc = 0;
+	uint32_t avc81_flags = RDPGFX_CAPS_FLAG_AVC420_ENABLED;
 
 	for (i = 0; i < adv->count; i++) {
 		if (adv->sets[i].version == RDPGFX_CAPVERSION_81
 		    && (adv->sets[i].flags
-			& RDPGFX_CAPS_FLAG_AVC420_ENABLED))
+			& RDPGFX_CAPS_FLAG_AVC420_ENABLED)) {
 			has_avc420 = 1;
+			avc81_flags = adv->sets[i].flags;
+		}
 		if (adv->sets[i].version >= RDPGFX_CAPVERSION_10) {
 			if (adv->sets[i].flags
 			    & RDPGFX_CAPS_FLAG_AVC_DISABLED)
@@ -170,7 +173,18 @@ rdp_rdpgfx_select_caps(const struct rdpgfx_caps_advertise *adv,
 				    & RDPGFX_CAPS_FLAG_AVC_DISABLED)
 					continue;
 				*out_version = adv->sets[i].version;
-				*out_flags = 0;
+				/*
+				 * Echo the client's advertised flags for this
+				 * version verbatim, as the Windows server does,
+				 * so the confirm names a capset the client
+				 * actually offered.  A confirm carrying flags the
+				 * client never advertised for that version (e.g.
+				 * dropping its SMALL_CACHE bit) is rejected and
+				 * the GFX channel is torn down.  The matched
+				 * version has no AVC_DISABLED bit, so AVC stays
+				 * enabled.
+				 */
+				*out_flags = adv->sets[i].flags;
 				/*
 				 * AVC444 (full 4:4:4 chroma) is signalled by
 				 * a v10.x capset without AVC_DISABLED, the same
@@ -193,7 +207,7 @@ rdp_rdpgfx_select_caps(const struct rdpgfx_caps_advertise *adv,
 		 */
 		if (has_avc420) {
 			*out_version = RDPGFX_CAPVERSION_81;
-			*out_flags = RDPGFX_CAPS_FLAG_AVC420_ENABLED;
+			*out_flags = avc81_flags;   /* echo the advertised v8.1 flags */
 			*out_codec = RDPGFX_CODEC_AVC420;
 			return 0;
 		}
@@ -212,16 +226,38 @@ rdp_rdpgfx_select_caps(const struct rdpgfx_caps_advertise *adv,
 			for (i = 0; i < adv->count; i++) {
 				if (adv->sets[i].version != pref[p])
 					continue;
+				/* Prefer a v10.x capset the client advertised
+				 * with AVC already off, so echoing its flags
+				 * verbatim names one of its own capsets and
+				 * still signals no AVC (progressive is chosen
+				 * per frame by the WireToSurface2 codecId). */
+				if (!(adv->sets[i].flags
+				    & RDPGFX_CAPS_FLAG_AVC_DISABLED))
+					continue;
 				*out_version = adv->sets[i].version;
-				*out_flags = RDPGFX_CAPS_FLAG_AVC_DISABLED;
+				*out_flags = adv->sets[i].flags;
 				*out_codec = RDPGFX_CODEC_CAPROGRESSIVE;
 				return 0;
 			}
 		}
-		/* No v10.x advertised; echo the first advertised version. */
+		/* No v10.x set with AVC already off.  A pre-v10 set carries no
+		 * AVC_DISABLED bit, so it can be echoed verbatim and still name
+		 * a capset the client offered. */
+		for (i = 0; i < adv->count; i++) {
+			if (adv->sets[i].version >= RDPGFX_CAPVERSION_10)
+				continue;
+			*out_version = adv->sets[i].version;
+			*out_flags = adv->sets[i].flags;
+			*out_codec = RDPGFX_CODEC_CAPROGRESSIVE;
+			return 0;
+		}
+		/* Only v10.x sets with AVC on: last resort, echo the first one
+		 * and force AVC off, the one case where the confirm cannot
+		 * match an advertised set exactly. */
 		*out_version = adv->sets[0].version;
-		*out_flags = (adv->sets[0].version >= RDPGFX_CAPVERSION_10)
-			? RDPGFX_CAPS_FLAG_AVC_DISABLED : 0;
+		*out_flags = adv->sets[0].flags
+			| ((adv->sets[0].version >= RDPGFX_CAPVERSION_10)
+			   ? RDPGFX_CAPS_FLAG_AVC_DISABLED : 0u);
 		*out_codec = RDPGFX_CODEC_CAPROGRESSIVE;
 		return 0;
 	}

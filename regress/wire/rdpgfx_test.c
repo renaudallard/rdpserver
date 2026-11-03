@@ -188,6 +188,70 @@ test_caps_confirm(void)
 		FAIL("confirm v10.1 should reject a 20-byte buffer");
 }
 
+/* Select from a synthetic advertise and check the confirm echoes a capset
+ * the client actually offered.  0x02 is SMALL_CACHE, a flag the confirm
+ * must keep. */
+static void
+select_one(const uint32_t *ver, const uint32_t *fl, uint16_t count,
+		int progressive, uint32_t want_ver, uint32_t want_flags,
+		enum rdpgfx_codec want_codec, const char *what)
+{
+	struct rdpgfx_caps_advertise adv;
+	uint32_t v = 0, f = 0;
+	enum rdpgfx_codec c = RDPGFX_CODEC_AVC420;
+	uint16_t i;
+
+	memset(&adv, 0, sizeof adv);
+	adv.count = count;
+	for (i = 0; i < count; i++) {
+		adv.sets[i].version = ver[i];
+		adv.sets[i].flags = fl[i];
+	}
+	if (rdp_rdpgfx_select_caps(&adv, &v, &f, &c, 0, progressive, 0) != 0)
+		FAIL("%s: no selection", what);
+	if (v != want_ver || f != want_flags || c != want_codec)
+		FAIL("%s: got ver=0x%08x flags=0x%x codec=%d", what,
+		    v, f, (int)c);
+}
+
+static void
+test_select_caps(void)
+{
+	/* xfreerdp style: v8.1 AVC420 plus v10.2 with AVC on.  The v10.2
+	 * confirm echoes its flags, SMALL_CACHE included. */
+	{
+		uint32_t ver[] = { 0x00080105u, 0x000A0200u };
+		uint32_t fl[] = { RDPGFX_CAPS_FLAG_AVC420_ENABLED | 0x02u, 0x02u };
+		select_one(ver, fl, 2, 0, 0x000A0200u, 0x02u,
+		    RDPGFX_CODEC_AVC420, "avc v10.2 echo");
+	}
+	/* Progressive, v10.x set with AVC already off: echoed verbatim. */
+	{
+		uint32_t ver[] = { 0x000A0400u };
+		uint32_t fl[] = { RDPGFX_CAPS_FLAG_AVC_DISABLED | 0x02u };
+		select_one(ver, fl, 1, 1, 0x000A0400u,
+		    RDPGFX_CAPS_FLAG_AVC_DISABLED | 0x02u,
+		    RDPGFX_CODEC_CAPROGRESSIVE, "prog v10 avc off");
+	}
+	/* Progressive, v10.x only with AVC on, plus a v8 set: the v8 set is
+	 * echoed as advertised rather than inventing a v10.x flag set. */
+	{
+		uint32_t ver[] = { 0x000A0200u, 0x00080004u };
+		uint32_t fl[] = { 0x02u, 0x02u };
+		select_one(ver, fl, 2, 1, 0x00080004u, 0x02u,
+		    RDPGFX_CODEC_CAPROGRESSIVE, "prog v8 fallback");
+	}
+	/* Progressive, only v10.x with AVC on: last resort forces AVC off
+	 * and keeps the client's other flags. */
+	{
+		uint32_t ver[] = { 0x000A0200u };
+		uint32_t fl[] = { 0x02u };
+		select_one(ver, fl, 1, 1, 0x000A0200u,
+		    RDPGFX_CAPS_FLAG_AVC_DISABLED | 0x02u,
+		    RDPGFX_CODEC_CAPROGRESSIVE, "prog forced avc off");
+	}
+}
+
 int
 main(void)
 {
@@ -262,6 +326,7 @@ main(void)
 	test_may_send_frame();
 	test_bytes_in_flight();
 	test_caps_confirm();
+	test_select_caps();
 
 	(void)printf("rdpgfx_test: all ok\n");
 	return 0;
