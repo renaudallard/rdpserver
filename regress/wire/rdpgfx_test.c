@@ -189,7 +189,7 @@ test_caps_confirm(void)
 }
 
 /* Select from a synthetic advertise and check the confirm echoes a capset
- * the client actually offered.  0x02 is SMALL_CACHE, a flag the confirm
+ * the client actually offered. 0x02 is SMALL_CACHE, a flag the confirm
  * must keep. */
 static void
 select_one(const uint32_t *ver, const uint32_t *fl, uint16_t count,
@@ -217,7 +217,7 @@ select_one(const uint32_t *ver, const uint32_t *fl, uint16_t count,
 static void
 test_select_caps(void)
 {
-	/* xfreerdp style: v8.1 AVC420 plus v10.2 with AVC on.  The v10.2
+	/* xfreerdp style: v8.1 AVC420 plus v10.2 with AVC on. The v10.2
 	 * confirm echoes its flags, SMALL_CACHE included. */
 	{
 		uint32_t ver[] = { 0x00080105u, 0x000A0200u };

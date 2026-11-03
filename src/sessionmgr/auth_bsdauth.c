@@ -134,7 +134,7 @@ rdp_auth_become_user(struct rdp_auth *a, struct passwd *pw)
 {
 	(void)a;
 	/* Groups, resource limits, priority, umask, login name and uid from
-	 * the user's login class.  PATH and the environment stay as the
+	 * the user's login class. PATH and the environment stay as the
 	 * session manager set them. */
 	if (setusercontext(NULL, pw, pw->pw_uid,
 	    LOGIN_SETALL & ~(LOGIN_SETPATH | LOGIN_SETENV)) != 0)

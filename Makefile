@@ -309,7 +309,7 @@ regress/wire/tz_test: regress/wire/tz_test.c src/wire/sec.c \
 		-o $@ regress/wire/tz_test.c src/wire/sec.c \
 		src/common/utf16.c src/common/log.c
 
-# CredSSP TSRequest and TSCredentials parse bounds.  cssp.c and ber.c are
+# CredSSP TSRequest and TSCredentials parse bounds. cssp.c and ber.c are
 # recompiled with the test so $(TEST_SAN) covers the length checks.
 regress/wire/cssp_test: regress/wire/cssp_test.c src/sec/cssp.c \
 		src/common/ber.c src/common/buf.c
@@ -317,7 +317,7 @@ regress/wire/cssp_test: regress/wire/cssp_test.c src/sec/cssp.c \
 		-o $@ regress/wire/cssp_test.c src/sec/cssp.c \
 		src/common/ber.c src/common/buf.c
 
-# NTLM unseal signature check and AUTHENTICATE MIC.  ntlm.c and
+# NTLM unseal signature check and AUTHENTICATE MIC. ntlm.c and
 # nla_crypto.c are recompiled with the test so $(TEST_SAN) covers them.
 NTLM_TEST_SRCS = src/sec/ntlm.c src/sec/nla_crypto.c src/common/buf.c \
 	src/common/utf16.c src/common/rand.c src/common/str.c src/common/log.c
@@ -402,7 +402,7 @@ regress/wire/rdpgfx_test: regress/wire/rdpgfx_test.c src/channels/rdpgfx.c \
 
 # Per-LCID greeter keymap tables (self-contained; the scancode index guard is
 # covered by $(TEST_SAN)).
-# Greeter repaint bounds on small desktops.  The greeter sources are
+# Greeter repaint bounds on small desktops. The greeter sources are
 # recompiled with the test so $(TEST_SAN) covers the tile copies; the
 # TLS layer is stubbed in the test.
 GREETER_TEST_SRCS = src/greeter/greeter.c src/greeter/paint.c \

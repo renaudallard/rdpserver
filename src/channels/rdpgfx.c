@@ -177,10 +177,10 @@ rdp_rdpgfx_select_caps(const struct rdpgfx_caps_advertise *adv,
 				 * Echo the client's advertised flags for this
 				 * version verbatim, as the Windows server does,
 				 * so the confirm names a capset the client
-				 * actually offered.  A confirm carrying flags the
+				 * actually offered. A confirm carrying flags the
 				 * client never advertised for that version (e.g.
 				 * dropping its SMALL_CACHE bit) is rejected and
-				 * the GFX channel is torn down.  The matched
+				 * the GFX channel is torn down. The matched
 				 * version has no AVC_DISABLED bit, so AVC stays
 				 * enabled.
 				 */
@@ -240,7 +240,7 @@ rdp_rdpgfx_select_caps(const struct rdpgfx_caps_advertise *adv,
 				return 0;
 			}
 		}
-		/* No v10.x set with AVC already off.  A pre-v10 set carries no
+		/* No v10.x set with AVC already off. A pre-v10 set carries no
 		 * AVC_DISABLED bit, so it can be echoed verbatim and still name
 		 * a capset the client offered. */
 		for (i = 0; i < adv->count; i++) {

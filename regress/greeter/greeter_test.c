@@ -30,7 +30,7 @@
  * greeter_test.c -- greeter repaint stays inside the framebuffer.
  *
  * The login panel has a fixed size, so on a desktop narrower than the panel
- * its rects start left of the framebuffer.  Drive a narrow desktop through
+ * its rects start left of the framebuffer. Drive a narrow desktop through
  * Enter, Enter (submit) and check every bitmap tile the greeter emits lies
  * inside the desktop; an unclipped dirty rect would emit a tile at a
  * wrapped negative x and read pixels from before the framebuffer.

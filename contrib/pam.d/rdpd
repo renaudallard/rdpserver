@@ -4,7 +4,7 @@
 # Install at /etc/pam.d/rdpd and pass `-S rdpd` to rdp-sessionmgr.
 # Without this file, the daemon defaults to the universally-present
 # "login" service.  Tailor the stack to taste (e.g. add pam_faillock
-# for lockouts, pam_access for ACLs).  The session stack runs around
+# for lockouts, pam_access for ACLs). The session stack runs around
 # every RDP login, so pam_limits, pam_loginuid or pam_systemd can be
 # added there as on a console login.
 #

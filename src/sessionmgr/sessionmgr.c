@@ -909,9 +909,9 @@ fuse_mount_drain(void)
 #endif /* HAVE_OBSD_FUSE */
 
 /*
- * The user's session process.  Runs in the child of the session monitor:
+ * The user's session process. Runs in the child of the session monitor:
  * moves the backend socket to fd 3 and the fuse device to fd 4, builds
- * the environment, drops to the user and execs rdp-session.  Never
+ * the environment, drops to the user and execs rdp-session. Never
  * returns.
  */
 static void
@@ -930,8 +930,8 @@ exec_session(struct passwd *pw, struct rdp_auth *auth, int be_fd,
 	}
 #if HAVE_FUSE || HAVE_OBSD_FUSE
 	/* The session probes fd 4 for a FUSE device; nothing new on
-	 * argv.  If there is no mount, fd 4 stays closed and the
-	 * session simply runs without drive support.  dup2 clears
+	 * argv. If there is no mount, fd 4 stays closed and the
+	 * session simply runs without drive support. dup2 clears
 	 * FD_CLOEXEC on the target, but when the fuse fd is already
 	 * fd 4 there is no dup2, so clear it explicitly or the fd
 	 * would close at exec and drop the mount. */
@@ -989,7 +989,7 @@ exec_session(struct passwd *pw, struct rdp_auth *auth, int be_fd,
 }
 
 /* Tell the session manager whether the user process started (0) or not,
- * then close the status pipe.  A lost byte reads as failure there. */
+ * then close the status pipe. A lost byte reads as failure there. */
 static void
 monitor_report(int status_fd, uint8_t status)
 {
@@ -1000,11 +1000,11 @@ monitor_report(int status_fd, uint8_t status)
 }
 
 /*
- * Per-session monitor, a root child of the session manager.  It opens
+ * Per-session monitor, a root child of the session manager. It opens
  * the auth backend's session (PAM pam_setcred + pam_open_session) around
  * the user's process, reports on status_fd whether the user process
  * started, waits for it and closes the session when it exits, the same
- * split login(1) and sshd use.  Never returns.
+ * split login(1) and sshd use. Never returns.
  */
 static void
 session_monitor(struct passwd *pw, struct rdp_auth *auth, int be_fd,
@@ -1136,7 +1136,7 @@ spawn_session(struct passwd *pw, struct rdp_auth *auth, uint16_t w,
 	(void)close(st[1]);
 #if HAVE_FUSE || HAVE_OBSD_FUSE
 	/* Parent keeps no copy of the fuse fd; the kernel holds the mount via
-	 * the session's fd 4.  Remember the mountpoint so we can unmount when
+	 * the session's fd 4. Remember the mountpoint so we can unmount when
 	 * the monitor (which outlives the session) dies, then re-enable
 	 * SIGCHLD now that the record is in place. */
 	if (fusefd >= 0) {

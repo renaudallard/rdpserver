@@ -113,7 +113,7 @@ ld32_safe(const uint8_t *p)
 #define RDP_CONN_BUF       0x4000
 #define RDP_CONN_SHARE_ID  0x000103EAu
 
-/* Desktop size limits.  MS-RDPBCGR puts 200 at the bottom of the client's
+/* Desktop size limits. MS-RDPBCGR puts 200 at the bottom of the client's
  * desktopWidth/Height range; 8192 matches the DisplayControl resize limit
  * and the largest session rdp-sessionmgr will run, and bounds the greeter
  * framebuffer an unauthenticated client can make us allocate. */
@@ -2450,7 +2450,7 @@ send_error_info(struct rdp_tls *t, uint16_t user_id, uint16_t io_channel,
 
 /* Read the client's half of connection finalization (Synchronize, two
  * Controls, the optional Persistent Key List, Font List) and answer the
- * Font List with a Font Map.  Runs once, right after activation, so the
+ * Font List with a Font Map. Runs once, right after activation, so the
  * greeter, which reads input before any session exists, never swallows
  * these PDUs and the proxy loop never mistakes input for them. */
 static void
@@ -4148,7 +4148,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 				if (mi == 0 || ci.monitors[mi].bottom > max_y)
 					max_y = ci.monitors[mi].bottom;
 			}
-			/* Monitor edges are inclusive.  64-bit so hostile
+			/* Monitor edges are inclusive. 64-bit so hostile
 			 * coordinates cannot overflow; a degenerate box keeps
 			 * the core desktop size. */
 			bw = max_x - min_x + 1;

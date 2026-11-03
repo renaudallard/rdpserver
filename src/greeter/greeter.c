@@ -278,7 +278,7 @@ push_dirty(struct g *g, struct rdp_tls *t)
 	int x0, y0, x1, y1, y, x;
 
 	/* The panel is centred with a fixed size, so on a small desktop
-	 * its rects start left of or above the framebuffer.  Clip before
+	 * its rects start left of or above the framebuffer. Clip before
 	 * tiling, or the tile copy below reads from before fb.data. */
 	if (rdp_rect_empty(&d) || !rdp_rect_clip(&g->fb, &d)) {
 		rdp_rect_reset(&g->dirty);

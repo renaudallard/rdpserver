@@ -162,7 +162,7 @@ binding_hash(const char *magic, size_t magic_len, const uint8_t nonce[32],
 
 /* Check the client's pubKeyAuth (MS-CSSP 3.1.5): it must unseal, with
  * sequence number 0, to SHA-256(client-to-server magic || nonce ||
- * pubkey) for v5+, or to our public key itself for v2-4.  A mismatch
+ * pubkey) for v5+, or to our public key itself for v2-4. A mismatch
  * means the client's TLS channel ends at someone other than us. */
 static int
 verify_client_binding(struct rdp_rc4 *rc4, const uint8_t sign_key[16],

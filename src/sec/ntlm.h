@@ -175,7 +175,7 @@ struct rdp_rc4;
 
 /* NTLM UNSEAL of a client-to-server message sealed as above: decrypt
  * into out on the caller's running RC4 stream and check the signature
- * for seq_num.  Returns the message length, or -1 if the signature does
+ * for seq_num. Returns the message length, or -1 if the signature does
  * not verify or out is too small. */
 ssize_t ntlm_unseal_message(struct rdp_rc4 *rc4, const uint8_t sign_key[16],
 		uint32_t seq_num, const uint8_t *in, size_t in_len,
@@ -186,7 +186,7 @@ ssize_t ntlm_unseal_message(struct rdp_rc4 *rc4, const uint8_t sign_key[16],
 int ntlm_auth_has_mic(const struct ntlm_authenticate *auth);
 
 /* Check the AUTHENTICATE MIC (MS-NLMP 3.1.5.1.2) over the three raw
- * NTLM messages.  Returns 0 when it matches. */
+ * NTLM messages. Returns 0 when it matches. */
 int ntlm_verify_mic(const uint8_t exported_session_key[16],
 		const uint8_t *negotiate, size_t negotiate_len,
 		const uint8_t *challenge, size_t challenge_len,
