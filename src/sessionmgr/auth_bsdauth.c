@@ -73,8 +73,7 @@ rdp_auth_user(const char *service, const char *user, const char *pass)
 		return -1;
 	}
 
-	rdp_info("bsd_auth: trying user='%s' (ulen=%zu, plen=%zu)",
-		u, strlen(u), strlen(p));
+	rdp_info("bsd_auth: trying user='%s'", u);
 	ok = auth_userokay(u, NULL, NULL, p);
 	rdp_info("bsd_auth: auth_userokay returned %d", ok);
 
