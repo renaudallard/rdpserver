@@ -28,6 +28,28 @@ allocates the per-user runtime directory, and forks the
 .Xr rdp-session 8
 helper as the target user.
 .Pp
+Each session gets a small root monitor process, forked by
+.Nm ,
+that holds the login open around the user's processes.
+With PAM it sets the user's groups, calls
+.Fn pam_setcred
+and
+.Fn pam_open_session
+before forking
+.Xr rdp-session 8 ,
+passes the environment the session stack exported (for example
+.Ev XDG_RUNTIME_DIR
+from pam_systemd) to it, and calls
+.Fn pam_close_session
+when it exits, so session modules such as pam_limits, pam_loginuid and
+pam_systemd apply to RDP logins as they do to console ones.
+On
+.Ox
+the user process is set up with
+.Xr setusercontext 3
+from the user's login class.
+A session stack that refuses the login fails the spawn.
+.Pp
 On
 .Ox ,
 where

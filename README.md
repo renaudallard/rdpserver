@@ -227,7 +227,12 @@ xfreerdp /v:127.0.0.1:13389 /cert:ignore /size:1024x768 +clipboard
 
 `rdpd` and `rdp-sessionmgr` install to `$PREFIX/sbin` via `make
 install`.  A sample `/etc/pam.d/rdpd` lives in
-[`contrib/pam.d/rdpd`](./contrib/pam.d/rdpd).
+[`contrib/pam.d/rdpd`](./contrib/pam.d/rdpd).  Its `session` stack runs
+around every RDP login: a per-session root monitor opens the PAM session
+before the user's processes start and closes it when they exit, and
+exports the stack's environment (such as pam_systemd's
+`XDG_RUNTIME_DIR`) to the session.  On OpenBSD the session is set up
+with `setusercontext(3)` from the user's login class.
 Systemd unit files are in
 [`contrib/systemd/`](./contrib/systemd/)
 and OpenBSD rc.d scripts in

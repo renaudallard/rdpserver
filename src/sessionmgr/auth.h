@@ -34,21 +34,58 @@
  * into rdp-sessionmgr.  The configure script picks which based on
  * what the host provides.
  *
- * The same `rdp_auth_user` signature is exposed regardless.  All
- * backends must:
- *   - return 0 on success, -1 on failure
- *   - never store the password beyond the call
- *   - explicit_bzero any local copy on the way out
+ * A successful rdp_auth_user returns a handle that carries the login
+ * through to the session, so the backend can run its session stack
+ * around the user's processes:
  *
- * Service name affects which PAM stack is consulted on Linux.  When
- * NULL, "login" is used (universally present, allows password auth
- * out of the box).  Production deployments install a tailored
- * `/etc/pam.d/rdpd` and pass "rdpd" here.
+ *   sessmgr:  rdp_auth_user, then fork the per-session monitor and
+ *             rdp_auth_free its own copy of the handle
+ *   monitor:  rdp_auth_session_open (root), fork the user process,
+ *             wait for it, rdp_auth_session_close
+ *   user:     rdp_auth_session_env, rdp_auth_become_user, exec
+ *
+ * Backends never keep the password past rdp_auth_user and
+ * explicit_bzero any local copy on the way out.
+ *
+ * Service name affects which PAM stack is consulted.  When NULL,
+ * "login" is used (universally present, allows password auth out of
+ * the box).  Production deployments install contrib/pam.d/rdpd and
+ * pass "rdpd" here.
  */
 
 #ifndef RDP_AUTH_H
 #define RDP_AUTH_H
 
-int rdp_auth_user(const char *service, const char *user, const char *pass);
+struct passwd;
+struct rdp_auth;
+
+/* Authenticate user/pass; rhost is the client address for the auth
+ * stack (may be NULL).  Returns 0 and a handle in *out on success. */
+int rdp_auth_user(const char *service, const char *user, const char *pass,
+		const char *rhost, struct rdp_auth **out);
+
+/* Login name the backend settled on, which a PAM module may have mapped
+ * from the name the client typed. */
+const char *rdp_auth_username(const struct rdp_auth *a);
+
+/* Monitor, as root: set the user's groups, establish credentials and
+ * open the session.  Returns 0 on success. */
+int rdp_auth_session_open(struct rdp_auth *a, const struct passwd *pw);
+
+/* NULL-terminated NAME=value list the session stack exported, or NULL.
+ * The strings stay valid until exec. */
+char **rdp_auth_session_env(struct rdp_auth *a);
+
+/* User process: drop to the user for good.  Returns 0 on success. */
+int rdp_auth_become_user(struct rdp_auth *a, struct passwd *pw);
+
+/* Close whatever rdp_auth_session_open set up, then free the handle.
+ * The monitor calls it once the user process has exited; the session
+ * manager also uses it for a handle that never reached a spawn. */
+void rdp_auth_session_close(struct rdp_auth *a);
+
+/* Free the session manager's copy of a handle once the monitor has
+ * forked with it, without disturbing the monitor's session state. */
+void rdp_auth_free(struct rdp_auth *a);
 
 #endif /* RDP_AUTH_H */

@@ -50,16 +50,26 @@
 #include <bsd_auth.h>
 
 #include <errno.h>
+#include <pwd.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+
+struct rdp_auth {
+	char *user;
+};
 
 int
-rdp_auth_user(const char *service, const char *user, const char *pass)
+rdp_auth_user(const char *service, const char *user, const char *pass,
+		const char *rhost, struct rdp_auth **out)
 {
+	struct rdp_auth *a;
 	char *u = NULL, *p = NULL;
 	int ok;
 
 	(void)service;
+	(void)rhost;
+	*out = NULL;
 	if (user == NULL || pass == NULL || user[0] == '\0') {
 		errno = EINVAL;
 		return -1;
@@ -77,14 +87,72 @@ rdp_auth_user(const char *service, const char *user, const char *pass)
 	ok = auth_userokay(u, NULL, NULL, p);
 	rdp_info("bsd_auth: auth_userokay returned %d", ok);
 
-	free(u);
 	explicit_bzero(p, strlen(p));
 	free(p);
 
-	if (ok) {
-		rdp_info("bsd_auth: %s authenticated", user);
-		return 0;
+	if (!ok) {
+		rdp_info("bsd_auth: %s rejected", user);
+		free(u);
+		return -1;
 	}
-	rdp_info("bsd_auth: %s rejected", user);
-	return -1;
+	a = calloc(1, sizeof *a);
+	if (a == NULL) {
+		free(u);
+		return -1;
+	}
+	a->user = u;
+	rdp_info("bsd_auth: %s authenticated", user);
+	*out = a;
+	return 0;
+}
+
+const char *
+rdp_auth_username(const struct rdp_auth *a)
+{
+	return a->user;
+}
+
+int
+rdp_auth_session_open(struct rdp_auth *a, const struct passwd *pw)
+{
+	/* bsd_auth has no session stack; the login class is applied by
+	 * rdp_auth_become_user. */
+	(void)a;
+	(void)pw;
+	return 0;
+}
+
+char **
+rdp_auth_session_env(struct rdp_auth *a)
+{
+	(void)a;
+	return NULL;
+}
+
+int
+rdp_auth_become_user(struct rdp_auth *a, struct passwd *pw)
+{
+	(void)a;
+	/* Groups, resource limits, priority, umask, login name and uid from
+	 * the user's login class.  PATH and the environment stay as the
+	 * session manager set them. */
+	if (setusercontext(NULL, pw, pw->pw_uid,
+	    LOGIN_SETALL & ~(LOGIN_SETPATH | LOGIN_SETENV)) != 0)
+		return -1;
+	return 0;
+}
+
+void
+rdp_auth_session_close(struct rdp_auth *a)
+{
+	rdp_auth_free(a);
+}
+
+void
+rdp_auth_free(struct rdp_auth *a)
+{
+	if (a == NULL)
+		return;
+	free(a->user);
+	free(a);
 }

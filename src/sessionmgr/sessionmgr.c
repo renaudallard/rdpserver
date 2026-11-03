@@ -908,14 +908,160 @@ fuse_mount_drain(void)
 }
 #endif /* HAVE_OBSD_FUSE */
 
-static int
-spawn_session(const struct passwd *pw, uint16_t w, uint16_t h,
-		uint32_t lcid, const char *tz, int *out_fd)
+/*
+ * The user's session process.  Runs in the child of the session monitor:
+ * moves the backend socket to fd 3 and the fuse device to fd 4, builds
+ * the environment, drops to the user and execs rdp-session.  Never
+ * returns.
+ */
+static void
+exec_session(struct passwd *pw, struct rdp_auth *auth, int be_fd,
+		int fusefd, uint16_t w, uint16_t h, uint32_t lcid,
+		const char *tz)
 {
-	int sv[2];
-	pid_t pid;
+	char wbuf[8], hbuf[8], kbuf[16], mbuf[16];
+	char tzbuf[RDP_SESSMGR_TZ_MAX + 1];
+	char **penv;
+	int i;
+
+	if (be_fd != 3) {
+		if (dup2(be_fd, 3) < 0) _exit(127);
+		(void)close(be_fd);
+	}
 #if HAVE_FUSE || HAVE_OBSD_FUSE
+	/* The session probes fd 4 for a FUSE device; nothing new on
+	 * argv.  If there is no mount, fd 4 stays closed and the
+	 * session simply runs without drive support.  dup2 clears
+	 * FD_CLOEXEC on the target, but when the fuse fd is already
+	 * fd 4 there is no dup2, so clear it explicitly or the fd
+	 * would close at exec and drop the mount. */
+	if (fusefd >= 0 && fusefd != 4) {
+		if (dup2(fusefd, 4) < 0) _exit(127);
+		(void)close(fusefd);
+	} else if (fusefd == 4) {
+		(void)fcntl(4, F_SETFD, 0);
+	}
+	/* Close all fds except 0-4 (3 = backend RPC, 4 = fuse). */
+	for (i = 5; i < 64; i++)
+		(void)close(i);
+#else
+	(void)fusefd;
+	/* Close all fds except 0-3 so leaked sessmgr sockets
+	 * don't persist into the user session. */
+	for (i = 4; i < 64; i++)
+		(void)close(i);
+#endif
+	(void)setsid();
+	if (chdir(pw->pw_dir) != 0) {
+		if (chdir("/") != 0) { /* unreachable in practice */ }
+	}
+	/* Whatever the session stack exported (pam_systemd sets
+	 * XDG_RUNTIME_DIR and XDG_SESSION_ID, for instance) goes in
+	 * first; the login basics below override it. */
+	penv = rdp_auth_session_env(auth);
+	for (i = 0; penv != NULL && penv[i] != NULL; i++)
+		(void)putenv(penv[i]);
+	(void)setenv("HOME", pw->pw_dir, 1);
+	(void)setenv("USER", pw->pw_name, 1);
+	(void)setenv("LOGNAME", pw->pw_name, 1);
+	(void)setenv("SHELL", pw->pw_shell[0] ? pw->pw_shell : "/bin/sh", 1);
+	(void)setenv("PATH",
+		"/usr/local/bin:/usr/local/sbin:/usr/X11R6/bin"
+		":/usr/bin:/usr/sbin:/bin:/sbin",
+		1);
+	(void)setenv("XDG_RUNTIME_DIR", "/tmp", 0);
+
+	if (rdp_auth_become_user(auth, pw) != 0) {
+		rdp_err("drop privs: %s", strerror(errno));
+		_exit(127);
+	}
+
+	(void)snprintf(wbuf, sizeof wbuf, "%u", (unsigned)w);
+	(void)snprintf(hbuf, sizeof hbuf, "%u", (unsigned)h);
+	(void)snprintf(kbuf, sizeof kbuf, "%u", (unsigned)lcid);
+	(void)snprintf(tzbuf, sizeof tzbuf, "%s", (tz != NULL) ? tz : "");
+	(void)snprintf(mbuf, sizeof mbuf, "%dx%d", max_w, max_h);
+	execl(session_path, "rdp-session",
+		"-w", wbuf, "-H", hbuf, "-k", kbuf,
+		"-z", tzbuf, "-m", mbuf, (char *)NULL);
+	(void)dprintf(2, "exec %s: %s\n", session_path, strerror(errno));
+	_exit(127);
+}
+
+/* Tell the session manager whether the user process started (0) or not,
+ * then close the status pipe.  A lost byte reads as failure there. */
+static void
+monitor_report(int status_fd, uint8_t status)
+{
+	ssize_t r;
+
+	do { r = write(status_fd, &status, 1); } while (r < 0 && errno == EINTR);
+	(void)close(status_fd);
+}
+
+/*
+ * Per-session monitor, a root child of the session manager.  It opens
+ * the auth backend's session (PAM pam_setcred + pam_open_session) around
+ * the user's process, reports on status_fd whether the user process
+ * started, waits for it and closes the session when it exits, the same
+ * split login(1) and sshd use.  Never returns.
+ */
+static void
+session_monitor(struct passwd *pw, struct rdp_auth *auth, int be_fd,
+		int fusefd, int status_fd, uint16_t w, uint16_t h,
+		uint32_t lcid, const char *tz)
+{
+	struct sigaction sa;
+	pid_t pid;
+
+	/* The session manager's handlers do not belong here; in
+	 * particular its SIGCHLD reaper would steal the user process's
+	 * exit status from the waitpid below. */
+	memset(&sa, 0, sizeof sa);
+	sa.sa_handler = SIG_DFL;
+	sigemptyset(&sa.sa_mask);
+	(void)sigaction(SIGCHLD, &sa, NULL);
+	(void)sigaction(SIGTERM, &sa, NULL);
+	(void)sigaction(SIGINT, &sa, NULL);
+
+	if (rdp_auth_session_open(auth, pw) != 0) {
+		rdp_auth_session_close(auth);
+		monitor_report(status_fd, 1);
+		_exit(1);
+	}
+	pid = fork();
+	if (pid < 0) {
+		rdp_err("fork session: %s", strerror(errno));
+		rdp_auth_session_close(auth);
+		monitor_report(status_fd, 1);
+		_exit(1);
+	}
+	if (pid == 0) {
+		(void)close(status_fd);
+		exec_session(pw, auth, be_fd, fusefd, w, h, lcid, tz);
+	}
+	(void)close(be_fd);
+	if (fusefd >= 0)
+		(void)close(fusefd);
+	monitor_report(status_fd, 0);
+	rdp_info("spawned rdp-session pid %d for uid %u (%ux%u)",
+		(int)pid, (unsigned)pw->pw_uid, (unsigned)w, (unsigned)h);
+	while (waitpid(pid, NULL, 0) < 0 && errno == EINTR)
+		;
+	rdp_auth_session_close(auth);
+	_exit(0);
+}
+
+static int
+spawn_session(struct passwd *pw, struct rdp_auth *auth, uint16_t w,
+		uint16_t h, uint32_t lcid, const char *tz, int *out_fd)
+{
+	int sv[2], st[2];
+	pid_t pid;
+	uint8_t status = 1;
+	ssize_t r;
 	int fusefd = -1;
+#if HAVE_FUSE || HAVE_OBSD_FUSE
 	char mountpoint[512];
 	sigset_t chld_mask, old_mask;
 	int masked = 0;
@@ -924,6 +1070,12 @@ spawn_session(const struct passwd *pw, uint16_t w, uint16_t h,
 
 	if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0)
 		return -1;
+	if (pipe(st) < 0) {
+		(void)close(sv[0]); (void)close(sv[1]);
+		return -1;
+	}
+	/* The status pipe must not leak into rdp-session. */
+	(void)fcntl(st[1], F_SETFD, FD_CLOEXEC);
 #if HAVE_FUSE
 	/* Set up the mount before fork so the privileged daemon owns it; the
 	 * fuse fd is passed to the child on fd 4. */
@@ -966,102 +1118,48 @@ spawn_session(const struct passwd *pw, uint16_t w, uint16_t h,
 		}
 #endif
 		(void)close(sv[0]); (void)close(sv[1]);
+		(void)close(st[0]); (void)close(st[1]);
 		return -1;
 	}
 	if (pid == 0) {
-		char wbuf[8], hbuf[8], kbuf[16], mbuf[16];
-		char tzbuf[RDP_SESSMGR_TZ_MAX + 1];
-		int i;
-
 		(void)close(sv[0]);
+		(void)close(st[0]);
 #if HAVE_FUSE || HAVE_OBSD_FUSE
 		/* Restore the inherited SIGCHLD mask so the session starts
 		 * with default signal handling. */
 		if (masked)
 			(void)sigprocmask(SIG_SETMASK, &old_mask, NULL);
 #endif
-		if (sv[1] != 3) {
-			if (dup2(sv[1], 3) < 0) _exit(127);
-			(void)close(sv[1]);
-		}
-#if HAVE_FUSE || HAVE_OBSD_FUSE
-		/* The session probes fd 4 for a FUSE device; nothing new on
-		 * argv.  If there is no mount, fd 4 stays closed and the
-		 * session simply runs without drive support.  dup2 clears
-		 * FD_CLOEXEC on the target, but when the fuse fd is already
-		 * fd 4 there is no dup2, so clear it explicitly or the fd
-		 * would close at exec and drop the mount. */
-		if (fusefd >= 0 && fusefd != 4) {
-			if (dup2(fusefd, 4) < 0) _exit(127);
-			(void)close(fusefd);
-		} else if (fusefd == 4) {
-			(void)fcntl(4, F_SETFD, 0);
-		}
-		/* Close all fds except 0-4 (3 = backend RPC, 4 = fuse). */
-		for (i = 5; i < 64; i++)
-			(void)close(i);
-#else
-		/* Close all fds except 0-3 so leaked sessmgr sockets
-		 * don't persist into the user session. */
-		for (i = 4; i < 64; i++)
-			(void)close(i);
-#endif
-		(void)setsid();
-		if (chdir(pw->pw_dir) != 0) {
-			if (chdir("/") != 0) { /* unreachable in practice */ }
-		}
-		(void)setenv("HOME", pw->pw_dir, 1);
-		(void)setenv("USER", pw->pw_name, 1);
-		(void)setenv("LOGNAME", pw->pw_name, 1);
-		(void)setenv("SHELL", pw->pw_shell[0] ? pw->pw_shell : "/bin/sh", 1);
-		(void)setenv("PATH",
-			"/usr/local/bin:/usr/local/sbin:/usr/X11R6/bin"
-			":/usr/bin:/usr/sbin:/bin:/sbin",
-			1);
-		(void)setenv("XDG_RUNTIME_DIR", "/tmp", 0);
-
-		if (initgroups(pw->pw_name, pw->pw_gid) != 0
-#if HAVE_SETRESUID
-		    || setresgid(pw->pw_gid, pw->pw_gid, pw->pw_gid) != 0
-		    || setresuid(pw->pw_uid, pw->pw_uid, pw->pw_uid) != 0
-#else
-		    || setgid(pw->pw_gid) != 0
-		    || setuid(pw->pw_uid) != 0
-#endif
-		    ) {
-			rdp_err("drop privs: %s", strerror(errno));
-			_exit(127);
-		}
-
-		(void)snprintf(wbuf, sizeof wbuf, "%u", (unsigned)w);
-		(void)snprintf(hbuf, sizeof hbuf, "%u", (unsigned)h);
-		(void)snprintf(kbuf, sizeof kbuf, "%u", (unsigned)lcid);
-		(void)snprintf(tzbuf, sizeof tzbuf, "%s",
-			(tz != NULL) ? tz : "");
-		(void)snprintf(mbuf, sizeof mbuf, "%dx%d", max_w, max_h);
-		execl(session_path, "rdp-session",
-			"-w", wbuf, "-H", hbuf, "-k", kbuf,
-			"-z", tzbuf, "-m", mbuf, (char *)NULL);
-		(void)dprintf(2, "exec %s: %s\n",
-			session_path, strerror(errno));
-		_exit(127);
+		session_monitor(pw, auth, sv[1], fusefd, st[1], w, h, lcid, tz);
 	}
 	(void)close(sv[1]);
+	(void)close(st[1]);
 #if HAVE_FUSE || HAVE_OBSD_FUSE
 	/* Parent keeps no copy of the fuse fd; the kernel holds the mount via
-	 * the child's fd 4.  Remember the mountpoint so we can unmount when
-	 * the session pid dies, then re-enable SIGCHLD now that the record
-	 * is in place. */
+	 * the session's fd 4.  Remember the mountpoint so we can unmount when
+	 * the monitor (which outlives the session) dies, then re-enable
+	 * SIGCHLD now that the record is in place. */
 	if (fusefd >= 0) {
 		(void)close(fusefd);
 		fuse_mount_record(pid, mountpoint);
 	}
 	if (masked)
 		(void)sigprocmask(SIG_SETMASK, &old_mask, NULL);
+#else
+	(void)fusefd;
 #endif
+	/* Wait for the monitor to report that the session stack opened and
+	 * the user process exists, so a refused PAM session fails SPAWN. */
+	do { r = read(st[0], &status, 1); } while (r < 0 && errno == EINTR);
+	(void)close(st[0]);
+	if (r != 1 || status != 0) {
+		rdp_warn("session for uid %u did not start",
+			(unsigned)pw->pw_uid);
+		(void)close(sv[0]);
+		errno = EPERM;
+		return -1;
+	}
 	*out_fd = sv[0];
-	rdp_info("spawned rdp-session pid %d for uid %u (%ux%u)",
-		(int)pid, (unsigned)pw->pw_uid, (unsigned)w, (unsigned)h);
 	return 0;
 }
 
@@ -1216,8 +1314,10 @@ auth_throttle_clear(const char *ip)
 
 static int
 handle_auth(int cfd, const uint8_t *req, size_t req_len,
-		const char *service, char *user_out, size_t user_out_sz)
+		const char *service, char *user_out, size_t user_out_sz,
+		struct rdp_auth **auth_io)
 {
+	struct rdp_auth *auth = NULL;
 	size_t user_len, pass_len, ip_len;
 	char  user[RDP_SESSMGR_USER_MAX + 1];
 	char  pass[RDP_SESSMGR_PASS_MAX + 1];
@@ -1264,7 +1364,7 @@ handle_auth(int cfd, const uint8_t *req, size_t req_len,
 		sigemptyset(&dfl.sa_mask);
 		(void)sigaction(SIGCHLD, &dfl, &saved);
 
-		rc = rdp_auth_user(service, user, pass);
+		rc = rdp_auth_user(service, user, pass, ip, &auth);
 
 		(void)sigaction(SIGCHLD, &saved, NULL);
 	}
@@ -1272,9 +1372,11 @@ handle_auth(int cfd, const uint8_t *req, size_t req_len,
 		cache_nthash(user, pass);
 	explicit_bzero(pass, sizeof pass);
 	if (rc == 0) {
-		size_t n = user_len < user_out_sz - 1 ? user_len : user_out_sz - 1;
-		memcpy(user_out, user, n);
-		user_out[n] = '\0';
+		/* Spawn as the name the auth stack settled on, which a PAM
+		 * module may have mapped from what the client typed. */
+		(void)strlcpy(user_out, rdp_auth_username(auth), user_out_sz);
+		rdp_auth_session_close(*auth_io);
+		*auth_io = auth;
 		auth_throttle_clear(ip);
 		return reply(cfd, RDP_SESSMGR_OK, -1);
 	}
@@ -1309,7 +1411,7 @@ tz_is_safe(const char *s)
 
 static int
 handle_spawn(int cfd, const uint8_t *req, size_t req_len,
-		const char *auth_user, int *retained_fd)
+		const char *auth_user, struct rdp_auth **auth, int *retained_fd)
 {
 	uint16_t w, h, tz_len;
 	uint32_t lcid;
@@ -1318,7 +1420,7 @@ handle_spawn(int cfd, const uint8_t *req, size_t req_len,
 	int fd = -1;
 
 	if (req_len < 12) return reply(cfd, RDP_SESSMGR_FAIL, -1);
-	if (auth_user == NULL || auth_user[0] == '\0')
+	if (auth_user == NULL || auth_user[0] == '\0' || *auth == NULL)
 		return reply(cfd, RDP_SESSMGR_EPERM, -1);
 	w = (uint16_t)req[2] | ((uint16_t)req[3] << 8);
 	h = (uint16_t)req[4] | ((uint16_t)req[5] << 8);
@@ -1348,10 +1450,16 @@ handle_spawn(int cfd, const uint8_t *req, size_t req_len,
 		rdp_warn("SPAWN: refusing to launch as root");
 		return reply(cfd, RDP_SESSMGR_EPERM, -1);
 	}
-	if (spawn_session(pw, w, h, lcid, tz, &fd) != 0) {
+	/* One login, one session: the monitor takes the handle over and
+	 * this process drops its copy whatever the outcome. */
+	if (spawn_session(pw, *auth, w, h, lcid, tz, &fd) != 0) {
 		rdp_err("spawn_session %s: %s", auth_user, strerror(errno));
+		rdp_auth_free(*auth);
+		*auth = NULL;
 		return reply(cfd, RDP_SESSMGR_FAIL, -1);
 	}
+	rdp_auth_free(*auth);
+	*auth = NULL;
 
 	if (*retained_fd >= 0)
 		(void)close(*retained_fd);
@@ -1572,6 +1680,7 @@ static void
 handle_client(int cfd, const char *service)
 {
 	char auth_user[RDP_SESSMGR_USER_MAX + 1] = {0};
+	struct rdp_auth *auth = NULL;
 	int retained_fd = -1;
 	int spawn_done = 0;
 
@@ -1609,12 +1718,12 @@ handle_client(int cfd, const char *service)
 		switch (buf[0]) {
 		case RDP_SESSMGR_OP_AUTH:
 			(void)handle_auth(cfd, buf, (size_t)n, service,
-				auth_user, sizeof auth_user);
+				auth_user, sizeof auth_user, &auth);
 			explicit_bzero(buf, (size_t)n);
 			break;
 		case RDP_SESSMGR_OP_SPAWN:
 			if (handle_spawn(cfd, buf, (size_t)n, auth_user,
-			    &retained_fd) == 0)
+			    &auth, &retained_fd) == 0)
 				spawn_done = 1;
 			break;
 		case RDP_SESSMGR_OP_SUSPEND:
@@ -1654,6 +1763,7 @@ handle_client(int cfd, const char *service)
 		}
 		retained_fd = -1;
 	}
+	rdp_auth_session_close(auth);
 	explicit_bzero(auth_user, sizeof auth_user);
 }
 
