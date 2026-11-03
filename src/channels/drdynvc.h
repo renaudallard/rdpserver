@@ -55,6 +55,14 @@
 #define DRDYNVC_CMD_CLOSE        0x04
 #define DRDYNVC_CMD_CAPS         0x05
 
+/* DATA_FIRST/DATA reassembly state of one dynamic channel. */
+struct dvc_reasm {
+	uint8_t *buf;
+	size_t   cap;
+	size_t   len;
+	uint32_t total;          /* 0 when no PDU is in progress */
+};
+
 struct drdynvc_state {
 	int      caps_exchanged;
 	int      disp_channel_id;  /* -1 if not yet created */
@@ -65,46 +73,22 @@ struct drdynvc_state {
 	int      audioin_create_pending; /* waiting for Create Response */
 	int      rdpei_channel_id;  /* MS-RDPEI; -1 if not created */
 	int      rdpei_create_pending; /* waiting for Create Response */
-	uint8_t *reasm_buf;
-	size_t   reasm_cap;
-	size_t   reasm_len;
-	uint32_t reasm_total;
-	int      reasm_chan;       /* channel being reassembled */
-
-	/* AUDIO_INPUT keeps its own reassembly buffer: GFX and AUDIO_INPUT
-	 * fragment sequences can interleave on the multiplexed DVC transport,
-	 * so a shared buffer would let one channel clobber the other's
-	 * in-progress frame. */
-	uint8_t *ai_reasm_buf;
-	size_t   ai_reasm_cap;
-	size_t   ai_reasm_len;
-	uint32_t ai_reasm_total;
-
-	/* MS-RDPEI keeps its own reassembly buffer for the same reason: GFX,
-	 * AUDIO_INPUT and RDPEI fragment sequences can interleave on the
-	 * multiplexed DVC transport, so a shared buffer would let one channel
-	 * clobber another's in-progress frame. */
-	uint8_t *rei_reasm_buf;
-	size_t   rei_reasm_cap;
-	size_t   rei_reasm_len;
-	uint32_t rei_reasm_total;
+	/* Each dynamic channel keeps its own DATA_FIRST/DATA reassembly:
+	 * fragment sequences of different channels can interleave on the
+	 * multiplexed DVC transport, so a shared buffer would let one
+	 * channel clobber another's in-progress PDU. */
+	struct dvc_reasm gfx_reasm;
+	struct dvc_reasm ai_reasm;    /* AUDIO_INPUT */
+	struct dvc_reasm rei_reasm;   /* MS-RDPEI */
 
 	/* MS-RDPECAM camera: the enumerator control channel and one per-device
-	 * channel.  Each keeps its own reassembly buffer, like the channels
-	 * above, so an interleaved fragment sequence on another channel cannot
-	 * clobber an in-progress camera frame. */
+	 * channel, each with its own reassembly like the channels above. */
 	int      camenum_channel_id;   /* enumerator; -1 if not created */
 	int      camenum_create_pending;
 	int      camdev_channel_id;    /* per-device channel; -1 if not created */
 	int      camdev_create_pending;
-	uint8_t *ce_reasm_buf;
-	size_t   ce_reasm_cap;
-	size_t   ce_reasm_len;
-	uint32_t ce_reasm_total;
-	uint8_t *cd_reasm_buf;
-	size_t   cd_reasm_cap;
-	size_t   cd_reasm_len;
-	uint32_t cd_reasm_total;
+	struct dvc_reasm ce_reasm;    /* camera enumerator */
+	struct dvc_reasm cd_reasm;    /* camera device */
 };
 
 /* Build DRDYNVC Capabilities Request (version 1). */

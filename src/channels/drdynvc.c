@@ -87,6 +87,60 @@ ld32(const uint8_t *p)
 		| ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
+/* Largest reassembled dynamic channel PDU we buffer. */
+#define DVC_REASM_MAX 0x400000u
+
+static void
+dvc_reasm_free(struct dvc_reasm *r)
+{
+	free(r->buf);
+	memset(r, 0, sizeof *r);
+}
+
+/*
+ * Feed one DATA_FIRST (first != 0) or DATA PDU body of a channel.  Returns 1
+ * with *out / *out_len set on a complete PDU (a DATA with nothing in progress
+ * is complete in place), 0 when more fragments are needed, or -1 on a bad
+ * total or allocation failure.  The in-progress state is cleared before
+ * anything can fail, so a stale length never indexes a freed buffer.
+ */
+static int
+dvc_reasm_feed(struct dvc_reasm *r, int first, uint32_t total_len,
+		const uint8_t *data, size_t data_len, const uint8_t **out,
+		size_t *out_len)
+{
+	if (first) {
+		r->len = 0;
+		r->total = 0;
+		if (total_len == 0 || total_len > DVC_REASM_MAX)
+			return -1;
+		if (total_len > r->cap) {
+			free(r->buf);
+			r->cap = 0;
+			r->buf = malloc(total_len);
+			if (r->buf == NULL)
+				return -1;
+			r->cap = total_len;
+		}
+		r->total = total_len;
+	} else if (r->total == 0) {
+		*out = data;
+		*out_len = data_len;
+		return 1;
+	}
+	if (data_len > r->total - r->len)
+		data_len = r->total - r->len;
+	memcpy(r->buf + r->len, data, data_len);
+	r->len += data_len;
+	if (r->len < r->total)
+		return 0;
+	*out = r->buf;
+	*out_len = r->len;
+	r->len = 0;
+	r->total = 0;
+	return 1;
+}
+
 int
 rdp_drdynvc_handle(struct drdynvc_state *st,
 		const uint8_t *pdu, size_t len,
@@ -308,55 +362,10 @@ rdp_drdynvc_handle(struct drdynvc_state *st,
 		/* GFX channel: handle reassembly for fragmented PDUs. */
 		if ((int)chan_id == st->gfx_channel_id
 		    && gfx_data != NULL && gfx_len != NULL) {
-			if (cmd == DRDYNVC_CMD_DATA_FIRST) {
-				if (total_len == 0 || total_len > 0x400000)
-					return -1;
-				if (total_len > st->reasm_cap) {
-					free(st->reasm_buf);
-					st->reasm_buf = malloc(total_len);
-					if (st->reasm_buf == NULL) {
-						st->reasm_cap = 0;
-						return -1;
-					}
-					st->reasm_cap = total_len;
-				}
-				st->reasm_total = total_len;
-				st->reasm_len = 0;
-				st->reasm_chan = (int)chan_id;
-				if (data_len > total_len)
-					data_len = total_len;
-				memcpy(st->reasm_buf, data, data_len);
-				st->reasm_len = data_len;
-				if (st->reasm_len >= st->reasm_total) {
-					*gfx_data = st->reasm_buf;
-					*gfx_len = st->reasm_len;
-					st->reasm_len = 0;
-					st->reasm_total = 0;
-					return 3;
-				}
-				return 0;
-			}
-			if (st->reasm_len > 0
-			    && st->reasm_chan == (int)chan_id) {
-				size_t remain = st->reasm_total
-					- st->reasm_len;
-				if (data_len > remain)
-					data_len = remain;
-				memcpy(st->reasm_buf + st->reasm_len,
-					data, data_len);
-				st->reasm_len += data_len;
-				if (st->reasm_len >= st->reasm_total) {
-					*gfx_data = st->reasm_buf;
-					*gfx_len = st->reasm_len;
-					st->reasm_len = 0;
-					st->reasm_total = 0;
-					return 3;
-				}
-				return 0;
-			}
-			*gfx_data = data;
-			*gfx_len = data_len;
-			return 3;
+			int rc = dvc_reasm_feed(&st->gfx_reasm,
+			    cmd == DRDYNVC_CMD_DATA_FIRST, total_len, data,
+			    data_len, gfx_data, gfx_len);
+			return rc < 0 ? -1 : rc == 0 ? 0 : 3;
 		}
 
 		/* AUDIO_INPUT channel (MS-RDPEAI): one SNDIN PDU per Data PDU
@@ -366,53 +375,10 @@ rdp_drdynvc_handle(struct drdynvc_state *st,
 		if ((int)chan_id == st->audioin_channel_id
 		    && st->audioin_channel_id >= 0
 		    && gfx_data != NULL && gfx_len != NULL) {
-			if (cmd == DRDYNVC_CMD_DATA_FIRST) {
-				if (total_len == 0 || total_len > 0x400000)
-					return -1;
-				if (total_len > st->ai_reasm_cap) {
-					free(st->ai_reasm_buf);
-					st->ai_reasm_buf = malloc(total_len);
-					if (st->ai_reasm_buf == NULL) {
-						st->ai_reasm_cap = 0;
-						return -1;
-					}
-					st->ai_reasm_cap = total_len;
-				}
-				st->ai_reasm_total = total_len;
-				st->ai_reasm_len = 0;
-				if (data_len > total_len)
-					data_len = total_len;
-				memcpy(st->ai_reasm_buf, data, data_len);
-				st->ai_reasm_len = data_len;
-				if (st->ai_reasm_len >= st->ai_reasm_total) {
-					*gfx_data = st->ai_reasm_buf;
-					*gfx_len = st->ai_reasm_len;
-					st->ai_reasm_len = 0;
-					st->ai_reasm_total = 0;
-					return 9;
-				}
-				return 0;
-			}
-			if (st->ai_reasm_len > 0) {
-				size_t remain = st->ai_reasm_total
-					- st->ai_reasm_len;
-				if (data_len > remain)
-					data_len = remain;
-				memcpy(st->ai_reasm_buf + st->ai_reasm_len,
-					data, data_len);
-				st->ai_reasm_len += data_len;
-				if (st->ai_reasm_len >= st->ai_reasm_total) {
-					*gfx_data = st->ai_reasm_buf;
-					*gfx_len = st->ai_reasm_len;
-					st->ai_reasm_len = 0;
-					st->ai_reasm_total = 0;
-					return 9;
-				}
-				return 0;
-			}
-			*gfx_data = data;
-			*gfx_len = data_len;
-			return 9;
+			int rc = dvc_reasm_feed(&st->ai_reasm,
+			    cmd == DRDYNVC_CMD_DATA_FIRST, total_len, data,
+			    data_len, gfx_data, gfx_len);
+			return rc < 0 ? -1 : rc == 0 ? 0 : 9;
 		}
 
 		/* RDPEI channel (MS-RDPEI): one RDPINPUT PDU per Data PDU in
@@ -422,53 +388,10 @@ rdp_drdynvc_handle(struct drdynvc_state *st,
 		if ((int)chan_id == st->rdpei_channel_id
 		    && st->rdpei_channel_id >= 0
 		    && gfx_data != NULL && gfx_len != NULL) {
-			if (cmd == DRDYNVC_CMD_DATA_FIRST) {
-				if (total_len == 0 || total_len > 0x400000)
-					return -1;
-				if (total_len > st->rei_reasm_cap) {
-					free(st->rei_reasm_buf);
-					st->rei_reasm_buf = malloc(total_len);
-					if (st->rei_reasm_buf == NULL) {
-						st->rei_reasm_cap = 0;
-						return -1;
-					}
-					st->rei_reasm_cap = total_len;
-				}
-				st->rei_reasm_total = total_len;
-				st->rei_reasm_len = 0;
-				if (data_len > total_len)
-					data_len = total_len;
-				memcpy(st->rei_reasm_buf, data, data_len);
-				st->rei_reasm_len = data_len;
-				if (st->rei_reasm_len >= st->rei_reasm_total) {
-					*gfx_data = st->rei_reasm_buf;
-					*gfx_len = st->rei_reasm_len;
-					st->rei_reasm_len = 0;
-					st->rei_reasm_total = 0;
-					return 12;
-				}
-				return 0;
-			}
-			if (st->rei_reasm_len > 0) {
-				size_t remain = st->rei_reasm_total
-					- st->rei_reasm_len;
-				if (data_len > remain)
-					data_len = remain;
-				memcpy(st->rei_reasm_buf + st->rei_reasm_len,
-					data, data_len);
-				st->rei_reasm_len += data_len;
-				if (st->rei_reasm_len >= st->rei_reasm_total) {
-					*gfx_data = st->rei_reasm_buf;
-					*gfx_len = st->rei_reasm_len;
-					st->rei_reasm_len = 0;
-					st->rei_reasm_total = 0;
-					return 12;
-				}
-				return 0;
-			}
-			*gfx_data = data;
-			*gfx_len = data_len;
-			return 12;
+			int rc = dvc_reasm_feed(&st->rei_reasm,
+			    cmd == DRDYNVC_CMD_DATA_FIRST, total_len, data,
+			    data_len, gfx_data, gfx_len);
+			return rc < 0 ? -1 : rc == 0 ? 0 : 12;
 		}
 		/* camenum channel (MS-RDPECAM): one PDU per Data PDU in the
 		 * common case; reassemble a fragmented one with its own buffer so
@@ -478,53 +401,10 @@ rdp_drdynvc_handle(struct drdynvc_state *st,
 		if ((int)chan_id == st->camenum_channel_id
 		    && st->camenum_channel_id > 0
 		    && gfx_data != NULL && gfx_len != NULL) {
-			if (cmd == DRDYNVC_CMD_DATA_FIRST) {
-				if (total_len == 0 || total_len > 0x400000)
-					return -1;
-				if (total_len > st->ce_reasm_cap) {
-					free(st->ce_reasm_buf);
-					st->ce_reasm_buf = malloc(total_len);
-					if (st->ce_reasm_buf == NULL) {
-						st->ce_reasm_cap = 0;
-						return -1;
-					}
-					st->ce_reasm_cap = total_len;
-				}
-				st->ce_reasm_total = total_len;
-				st->ce_reasm_len = 0;
-				if (data_len > total_len)
-					data_len = total_len;
-				memcpy(st->ce_reasm_buf, data, data_len);
-				st->ce_reasm_len = data_len;
-				if (st->ce_reasm_len >= st->ce_reasm_total) {
-					*gfx_data = st->ce_reasm_buf;
-					*gfx_len = st->ce_reasm_len;
-					st->ce_reasm_len = 0;
-					st->ce_reasm_total = 0;
-					return 15;
-				}
-				return 0;
-			}
-			if (st->ce_reasm_len > 0) {
-				size_t remain = st->ce_reasm_total
-					- st->ce_reasm_len;
-				if (data_len > remain)
-					data_len = remain;
-				memcpy(st->ce_reasm_buf + st->ce_reasm_len,
-					data, data_len);
-				st->ce_reasm_len += data_len;
-				if (st->ce_reasm_len >= st->ce_reasm_total) {
-					*gfx_data = st->ce_reasm_buf;
-					*gfx_len = st->ce_reasm_len;
-					st->ce_reasm_len = 0;
-					st->ce_reasm_total = 0;
-					return 15;
-				}
-				return 0;
-			}
-			*gfx_data = data;
-			*gfx_len = data_len;
-			return 15;
+			int rc = dvc_reasm_feed(&st->ce_reasm,
+			    cmd == DRDYNVC_CMD_DATA_FIRST, total_len, data,
+			    data_len, gfx_data, gfx_len);
+			return rc < 0 ? -1 : rc == 0 ? 0 : 15;
 		}
 		/* camdev channel (MS-RDPECAM): one PDU per Data PDU in the
 		 * common case; reassemble a fragmented one with its own buffer so
@@ -534,53 +414,10 @@ rdp_drdynvc_handle(struct drdynvc_state *st,
 		if ((int)chan_id == st->camdev_channel_id
 		    && st->camdev_channel_id > 0
 		    && gfx_data != NULL && gfx_len != NULL) {
-			if (cmd == DRDYNVC_CMD_DATA_FIRST) {
-				if (total_len == 0 || total_len > 0x400000)
-					return -1;
-				if (total_len > st->cd_reasm_cap) {
-					free(st->cd_reasm_buf);
-					st->cd_reasm_buf = malloc(total_len);
-					if (st->cd_reasm_buf == NULL) {
-						st->cd_reasm_cap = 0;
-						return -1;
-					}
-					st->cd_reasm_cap = total_len;
-				}
-				st->cd_reasm_total = total_len;
-				st->cd_reasm_len = 0;
-				if (data_len > total_len)
-					data_len = total_len;
-				memcpy(st->cd_reasm_buf, data, data_len);
-				st->cd_reasm_len = data_len;
-				if (st->cd_reasm_len >= st->cd_reasm_total) {
-					*gfx_data = st->cd_reasm_buf;
-					*gfx_len = st->cd_reasm_len;
-					st->cd_reasm_len = 0;
-					st->cd_reasm_total = 0;
-					return 16;
-				}
-				return 0;
-			}
-			if (st->cd_reasm_len > 0) {
-				size_t remain = st->cd_reasm_total
-					- st->cd_reasm_len;
-				if (data_len > remain)
-					data_len = remain;
-				memcpy(st->cd_reasm_buf + st->cd_reasm_len,
-					data, data_len);
-				st->cd_reasm_len += data_len;
-				if (st->cd_reasm_len >= st->cd_reasm_total) {
-					*gfx_data = st->cd_reasm_buf;
-					*gfx_len = st->cd_reasm_len;
-					st->cd_reasm_len = 0;
-					st->cd_reasm_total = 0;
-					return 16;
-				}
-				return 0;
-			}
-			*gfx_data = data;
-			*gfx_len = data_len;
-			return 16;
+			int rc = dvc_reasm_feed(&st->cd_reasm,
+			    cmd == DRDYNVC_CMD_DATA_FIRST, total_len, data,
+			    data_len, gfx_data, gfx_len);
+			return rc < 0 ? -1 : rc == 0 ? 0 : 16;
 		}
 		if ((int)chan_id != st->disp_channel_id)
 			return 0;
@@ -815,29 +652,9 @@ rdp_drdynvc_build_disp_caps(uint8_t *out, size_t cap)
 void
 rdp_drdynvc_cleanup(struct drdynvc_state *st)
 {
-	free(st->reasm_buf);
-	st->reasm_buf = NULL;
-	st->reasm_cap = 0;
-	st->reasm_len = 0;
-	st->reasm_total = 0;
-	free(st->ai_reasm_buf);
-	st->ai_reasm_buf = NULL;
-	st->ai_reasm_cap = 0;
-	st->ai_reasm_len = 0;
-	st->ai_reasm_total = 0;
-	free(st->rei_reasm_buf);
-	st->rei_reasm_buf = NULL;
-	st->rei_reasm_cap = 0;
-	st->rei_reasm_len = 0;
-	st->rei_reasm_total = 0;
-	free(st->ce_reasm_buf);
-	st->ce_reasm_buf = NULL;
-	st->ce_reasm_cap = 0;
-	st->ce_reasm_len = 0;
-	st->ce_reasm_total = 0;
-	free(st->cd_reasm_buf);
-	st->cd_reasm_buf = NULL;
-	st->cd_reasm_cap = 0;
-	st->cd_reasm_len = 0;
-	st->cd_reasm_total = 0;
+	dvc_reasm_free(&st->gfx_reasm);
+	dvc_reasm_free(&st->ai_reasm);
+	dvc_reasm_free(&st->rei_reasm);
+	dvc_reasm_free(&st->ce_reasm);
+	dvc_reasm_free(&st->cd_reasm);
 }
