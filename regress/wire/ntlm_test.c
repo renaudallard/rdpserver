@@ -43,6 +43,22 @@
 	exit(1);                                       \
 } while (0)
 
+/* OpenSSL keeps the legacy provider and its fetched HMAC method for the
+ * life of the process; they are its allocations, not leaks of ours.  The
+ * suppressions match frames inside OpenSSL, so ask for full stacks. */
+const char *__asan_default_options(void);
+const char *__lsan_default_suppressions(void);
+const char *
+__asan_default_options(void)
+{
+	return "fast_unwind_on_malloc=0";
+}
+const char *
+__lsan_default_suppressions(void)
+{
+	return "leak:OSSL_PROVIDER_try_load_ex\nleak:HMAC\n";
+}
+
 static ssize_t
 unseal(const uint8_t key[16], const uint8_t sign[16], uint32_t seq,
 		const uint8_t *in, size_t in_len, uint8_t *out, size_t cap)
