@@ -673,6 +673,19 @@ fd_send_list(struct fuse_drive *fd, struct fd_node *n, uint64_t unique)
 {
 	struct rdp_be_fs_req req;
 	struct fd_inflight *f;
+	char pat[1024];
+	size_t plen;
+
+	/* The search path is device relative and names the directory: the
+	 * client joins it to its share root, not to the open handle, so a
+	 * bare "*" would list the root of the drive. */
+	plen = fd_node_path(fd, n, pat, sizeof pat - 2);
+	if (plen == (size_t)-1)
+		return -1;
+	if (pat[plen - 1] != '\\')
+		pat[plen++] = '\\';
+	pat[plen++] = '*';
+	pat[plen] = '\0';
 
 	f = fd_inflight_alloc(fd, RDP_FS_LIST, unique, n->nodeid, &req.req_id);
 	if (f == NULL)
@@ -685,9 +698,9 @@ fd_send_list(struct fuse_drive *fd, struct fd_node *n, uint64_t unique)
 	req.options = 0;
 	req.info_class = 0;
 	req.length = 0;
-	req.payload_len = 0;   /* empty pattern => "*" at the worker */
+	req.payload_len = (uint32_t)plen;
 	req.offset = 0;
-	return fd->send_fs_req(fd, &req, NULL, 0);
+	return fd->send_fs_req(fd, &req, pat, plen);
 }
 
 static void
