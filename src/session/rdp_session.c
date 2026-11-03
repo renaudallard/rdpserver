@@ -1301,6 +1301,28 @@ usage(const char *prog)
 /* Set the Xvfb keyboard layout for the client's LCID via setxkbmap.
  * Best-effort: on failure the session keeps the default us layout.
  * Must run before uni_init_spares snapshots the keymap. */
+/* Switch the Xvfb screen (DISPLAY is set) to a w x h mode through RANDR:
+ * add the mode, attach it to the output and select it.  The first two steps
+ * fail harmlessly once the mode exists, so only the switch is checked. */
+static void
+xvfb_set_mode(int w, int h)
+{
+	char mode[24], sw[8], sh[8];
+	const char *newmode[] = { "xrandr", "--newmode", mode, "0",
+	    sw, sw, sw, sw, sh, sh, sh, sh, NULL };
+	const char *addmode[] = { "xrandr", "--addmode", "screen", mode, NULL };
+	const char *output[] = { "xrandr", "--output", "screen", "--mode",
+	    mode, NULL };
+
+	(void)snprintf(mode, sizeof mode, "%dx%d", w, h);
+	(void)snprintf(sw, sizeof sw, "%d", w);
+	(void)snprintf(sh, sizeof sh, "%d", h);
+	(void)rdp_run("xrandr", newmode, NULL, 0);
+	(void)rdp_run("xrandr", addmode, NULL, 0);
+	if (rdp_run("xrandr", output, NULL, 0) < 0)
+		rdp_warn("xrandr: cannot switch to %s", mode);
+}
+
 static void
 set_keymap(int display_num, uint32_t lcid)
 {
@@ -1459,15 +1481,7 @@ main(int argc, char *argv[])
 	/* Set the initial mode down from the framebuffer to the client's
 	 * requested size via RANDR; later resizes can grow back up to the
 	 * framebuffer (fb_w x fb_h). */
-	{
-		char cmd[256];
-		(void)snprintf(cmd, sizeof cmd,
-			"xrandr --newmode \"%dx%d\" 0 %d %d %d %d %d %d %d %d 2>/dev/null; "
-			"xrandr --addmode screen %dx%d 2>/dev/null; "
-			"xrandr --output screen --mode %dx%d 2>/dev/null",
-			w, h, w, w, w, w, h, h, h, h, w, h, w, h);
-		(void)system(cmd);
-	}
+	xvfb_set_mode(w, h);
 
 	if (capture_init(&cap, dpy, w, h) != 0) {
 		rdp_err("capture_init");
@@ -1667,21 +1681,13 @@ main(int argc, char *argv[])
 				memcpy(&rs, buf, sizeof rs);
 				if (rs.width >= 200 && rs.height >= 200
 				    && rs.width <= fb_w && rs.height <= fb_h) {
-					char cmd[256];
 					rdp_info("resize: %ux%u -> %ux%u",
 						(unsigned)w, (unsigned)h,
 						(unsigned)rs.width,
 						(unsigned)rs.height);
 					w = rs.width;
 					h = rs.height;
-					(void)snprintf(cmd, sizeof cmd,
-						"xrandr --newmode \"%dx%d\" 0 "
-						"%d %d %d %d %d %d %d %d 2>/dev/null; "
-						"xrandr --addmode screen %dx%d 2>/dev/null; "
-						"xrandr --output screen --mode %dx%d 2>/dev/null",
-						w, h, w, w, w, w, h, h, h, h,
-						w, h, w, h);
-					(void)system(cmd);
+					xvfb_set_mode(w, h);
 					capture_close(&cap);
 					(void)capture_init(&cap, dpy, w, h);
 					if (dmg != None) {
