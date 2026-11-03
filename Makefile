@@ -121,6 +121,7 @@ REGRESS_PROGS = \
 	regress/wire/avc444_test \
 	regress/wire/tz_test \
 	regress/wire/cssp_test \
+	regress/wire/ntlm_test \
 	regress/wire/autodetect_test \
 	regress/wire/rdpei_test \
 	regress/wire/rail_test \
@@ -315,6 +316,14 @@ regress/wire/cssp_test: regress/wire/cssp_test.c src/sec/cssp.c \
 	$(CC) $(CFLAGS) $(TEST_SAN) -Isrc/include \
 		-o $@ regress/wire/cssp_test.c src/sec/cssp.c \
 		src/common/ber.c src/common/buf.c
+
+# NTLM unseal signature check and AUTHENTICATE MIC.  ntlm.c and
+# nla_crypto.c are recompiled with the test so $(TEST_SAN) covers them.
+NTLM_TEST_SRCS = src/sec/ntlm.c src/sec/nla_crypto.c src/common/buf.c \
+	src/common/utf16.c src/common/rand.c src/common/str.c src/common/log.c
+regress/wire/ntlm_test: regress/wire/ntlm_test.c $(NTLM_TEST_SRCS)
+	$(CC) $(CFLAGS) $(TEST_SAN) $(TLS_CFLAGS) -Isrc/include \
+		-o $@ regress/wire/ntlm_test.c $(NTLM_TEST_SRCS) $(TLS_LIBS)
 
 # Network auto-detection PDU build/parse.  autodetect.c is recompiled
 # with the test so $(TEST_SAN) covers the response parse bounds.

@@ -469,3 +469,95 @@ ntlm_seal_message(const uint8_t seal_key[16],
 	rdp_rc4_free(rc4);
 	return (ssize_t)(16 + msg_len);
 }
+
+ssize_t
+ntlm_unseal_message(struct rdp_rc4 *rc4, const uint8_t sign_key[16],
+		uint32_t seq_num, const uint8_t *in, size_t in_len,
+		uint8_t *out, size_t out_cap)
+{
+	uint8_t seq[4], mac[16], cksum[8];
+	size_t msg_len;
+	int bad;
+
+	if (in_len < 16 || in_len - 16 > out_cap)
+		return -1;
+	msg_len = in_len - 16;
+	/* The sender encrypted the message first and then the checksum, on
+	 * the same running RC4 stream (MS-NLMP 3.4.4.2), so decrypt in that
+	 * order to keep our stream in step with theirs. */
+	rdp_rc4_process(rc4, in + 16, out, msg_len);
+	rdp_rc4_process(rc4, in + 4, cksum, 8);
+	st_u32le(seq, seq_num);
+	if (rdp_hmac_md5_2(sign_key, 16, seq, sizeof seq, out, msg_len,
+	    mac) != 0)
+		return -1;
+	bad = ld_u32le(in) != 1 || ld_u32le(in + 12) != seq_num;
+	bad |= rdp_consttime_eq(mac, cksum, sizeof cksum);
+	explicit_bzero(mac, sizeof mac);
+	explicit_bzero(cksum, sizeof cksum);
+	return bad ? -1 : (ssize_t)msg_len;
+}
+
+/* NTLMv2_CLIENT_CHALLENGE: RespType, HiRespType, Reserved1(2), Reserved2(4),
+ * TimeStamp(8), ChallengeFromClient(8), Reserved3(4), then AV pairs. */
+#define NTLMV2_CLIENT_CHALLENGE_HDR 28
+#define MSV_AV_FLAG_MIC_PRESENT     0x00000002u
+#define NTLM_AUTH_MIC_OFFSET        72
+
+int
+ntlm_auth_has_mic(const struct ntlm_authenticate *auth)
+{
+	const uint8_t *p;
+	size_t left;
+
+	if (auth->nt_response_len < 16 + NTLMV2_CLIENT_CHALLENGE_HDR)
+		return 0;
+	p = auth->nt_response + 16 + NTLMV2_CLIENT_CHALLENGE_HDR;
+	left = auth->nt_response_len - 16 - NTLMV2_CLIENT_CHALLENGE_HDR;
+	while (left >= 4) {
+		uint16_t id = ld_u16le(p), len = ld_u16le(p + 2);
+
+		if (id == MSV_AV_EOL || len > left - 4)
+			break;
+		if (id == MSV_AV_FLAGS && len >= 4)
+			return (ld_u32le(p + 4) & MSV_AV_FLAG_MIC_PRESENT) != 0;
+		p += 4 + len;
+		left -= 4 + (size_t)len;
+	}
+	return 0;
+}
+
+int
+ntlm_verify_mic(const uint8_t exported_session_key[16],
+		const uint8_t *negotiate, size_t negotiate_len,
+		const uint8_t *challenge, size_t challenge_len,
+		const uint8_t *authenticate, size_t authenticate_len)
+{
+	uint8_t mic[16];
+	uint8_t *msgs, *am;
+	size_t total;
+	int rc = -1;
+
+	if (authenticate_len < NTLM_AUTH_MIC_OFFSET + sizeof mic
+	    || negotiate_len > SIZE_MAX / 4 || challenge_len > SIZE_MAX / 4
+	    || authenticate_len > SIZE_MAX / 4)
+		return -1;
+	/* MIC = HMAC_MD5(ExportedSessionKey, NEGOTIATE || CHALLENGE ||
+	 * AUTHENTICATE), with the AUTHENTICATE MIC field taken as zeroes. */
+	total = negotiate_len + challenge_len + authenticate_len;
+	msgs = malloc(total);
+	if (msgs == NULL)
+		return -1;
+	memcpy(msgs, negotiate, negotiate_len);
+	memcpy(msgs + negotiate_len, challenge, challenge_len);
+	am = msgs + negotiate_len + challenge_len;
+	memcpy(am, authenticate, authenticate_len);
+	memset(am + NTLM_AUTH_MIC_OFFSET, 0, sizeof mic);
+	if (rdp_hmac_md5(exported_session_key, 16, msgs, total, mic) == 0
+	    && rdp_consttime_eq(mic, authenticate + NTLM_AUTH_MIC_OFFSET,
+	    sizeof mic) == 0)
+		rc = 0;
+	explicit_bzero(mic, sizeof mic);
+	free(msgs);
+	return rc;
+}

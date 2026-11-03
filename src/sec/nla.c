@@ -34,8 +34,9 @@
  *   2. Send NTLMSSP_CHALLENGE
  *   3. Read NTLMSSP_AUTHENTICATE + pubKeyAuth
  *   4. Look up NT hash, verify NTLMv2, derive session key
- *   5. Send pubKeyAuth response (stub - not channel-bound)
- *   6. Read authInfo, decrypt with seal key
+ *   5. Verify the AUTHENTICATE MIC and the client's pubKeyAuth
+ *      channel binding, send our pubKeyAuth
+ *   6. Read authInfo, unseal and verify its signature
  *   7. Parse TSCredentials, extract plaintext user + password
  *
  * NT hashes are read from /etc/rdpserver/nthashes (format:
@@ -50,6 +51,7 @@
 
 #include "../include/compat.h"
 #include "../include/rdp_log.h"
+#include "../common/str.h"
 #include "../common/utf16.h"
 
 #include <openssl/evp.h>
@@ -61,6 +63,7 @@
 #include <string.h>
 
 #define NLA_MAX_TSREQ (16 * 1024)
+#define NLA_MAX_NEGOTIATE 1024
 #define NTHASH_PATH   "/etc/rdpserver/nthashes"
 
 static int
@@ -135,6 +138,62 @@ lookup_nthash(const char *user, uint8_t nthash[16])
 	return -1;
 }
 
+/* CredSSP v5+ binding hash: SHA-256(magic incl. NUL || nonce || pubkey). */
+static int
+binding_hash(const char *magic, size_t magic_len, const uint8_t nonce[32],
+		const uint8_t *pubkey, size_t pklen, uint8_t out[32])
+{
+	EVP_MD_CTX *sha;
+	unsigned int hlen = 32;
+	int rc = -1;
+
+	sha = EVP_MD_CTX_new();
+	if (sha == NULL)
+		return -1;
+	if (EVP_DigestInit_ex(sha, EVP_sha256(), NULL) == 1
+	    && EVP_DigestUpdate(sha, magic, magic_len) == 1
+	    && EVP_DigestUpdate(sha, nonce, 32) == 1
+	    && EVP_DigestUpdate(sha, pubkey, pklen) == 1
+	    && EVP_DigestFinal_ex(sha, out, &hlen) == 1 && hlen == 32)
+		rc = 0;
+	EVP_MD_CTX_free(sha);
+	return rc;
+}
+
+/* Check the client's pubKeyAuth (MS-CSSP 3.1.5): it must unseal, with
+ * sequence number 0, to SHA-256(client-to-server magic || nonce ||
+ * pubkey) for v5+, or to our public key itself for v2-4.  A mismatch
+ * means the client's TLS channel ends at someone other than us. */
+static int
+verify_client_binding(struct rdp_rc4 *rc4, const uint8_t sign_key[16],
+		uint32_t version, const uint8_t *pka, size_t pka_len,
+		const uint8_t *nonce, size_t nonce_len,
+		const uint8_t *pubkey, size_t pklen)
+{
+	static const char magic[] = "CredSSP Client-To-Server Binding Hash";
+	uint8_t got[2048], hash[32];
+	const uint8_t *want = pubkey;
+	size_t want_len = pklen;
+	ssize_t n;
+
+	if (pka == NULL)
+		return -1;
+	n = ntlm_unseal_message(rc4, sign_key, 0, pka, pka_len, got,
+		sizeof got);
+	if (n < 0)
+		return -1;
+	if (version >= 5 && nonce_len >= 32) {
+		if (binding_hash(magic, sizeof magic, nonce, pubkey, pklen,
+		    hash) != 0)
+			return -1;
+		want = hash;
+		want_len = sizeof hash;
+	}
+	if ((size_t)n != want_len || rdp_consttime_eq(got, want, want_len) != 0)
+		return -1;
+	return 0;
+}
+
 int
 rdp_nla_server(struct rdp_tls *t,
 		char *user, size_t user_size,
@@ -150,7 +209,14 @@ rdp_nla_server(struct rdp_tls *t,
 	uint8_t  session_base_key[16];
 	uint8_t  exported[16];
 	uint8_t  cts_seal[16];
+	uint8_t  cts_sign[16];
 	uint8_t  nthash[16];
+	uint8_t  neg_msg[NLA_MAX_NEGOTIATE];
+	size_t   neg_len = 0;
+	uint8_t  chal_buf[1024];
+	size_t   chal_len = 0;
+	uint8_t  pubkey[2048];
+	ssize_t  pklen;
 	char     user_utf8[256];
 	char     domain_utf8[256];
 	ssize_t  bn;
@@ -175,6 +241,14 @@ rdp_nla_server(struct rdp_tls *t,
 		rdp_warn("nla: bad NEGOTIATE");
 		goto out;
 	}
+	/* Keep the NEGOTIATE message for the AUTHENTICATE MIC; in_buf is
+	 * reused for the next TSRequest. */
+	if (req.nego_token_len > sizeof neg_msg) {
+		rdp_warn("nla: NEGOTIATE too large");
+		goto out;
+	}
+	memcpy(neg_msg, req.nego_token, req.nego_token_len);
+	neg_len = req.nego_token_len;
 	if (req.client_nonce != NULL && req.client_nonce_len >= 32) {
 		memcpy(saved_nonce, req.client_nonce, 32);
 		saved_nonce_len = 32;
@@ -185,10 +259,10 @@ rdp_nla_server(struct rdp_tls *t,
 
 	/* 2. Send CHALLENGE. */
 	{
-		uint8_t chal_buf[1024];
 		ssize_t cn = ntlm_build_challenge(chal_buf, sizeof chal_buf,
 			neg.flags, "rdpserver", server_challenge);
 		if (cn <= 0) goto out;
+		chal_len = (size_t)cn;
 		memset(&resp, 0, sizeof resp);
 		resp.version = req.version;
 		resp.nego_token = chal_buf;
@@ -252,26 +326,44 @@ rdp_nla_server(struct rdp_tls *t,
 		rdp_warn("nla: derive exported key failed");
 		goto out;
 	}
+	/* MS-NLMP 3.3.2: a client that flags a MIC in its AV pairs (they
+	 * are covered by the NTProofStr we just checked) must have it
+	 * verified, or the NEGOTIATE and CHALLENGE flags it saw could have
+	 * been altered in transit. */
+	if (!ntlm_auth_has_mic(&auth)) {
+		rdp_debug("nla: client sent no MIC");
+	} else if (ntlm_verify_mic(exported, neg_msg, neg_len, chal_buf,
+	    chal_len, req.nego_token, req.nego_token_len) != 0) {
+		rdp_warn("nla: AUTHENTICATE MIC mismatch for '%s'", user_utf8);
+		goto out;
+	} else {
+		rdp_debug("nla: AUTHENTICATE MIC verified");
+	}
 	ntlm_seal_key(1, exported, cts_seal);
+	ntlm_sign_key(1, exported, cts_sign);
 
-	/* Initialize the client-to-server RC4 state. The client's RC4
-	 * handle persists across messages, so we must advance ours past
-	 * the client's pubKeyAuth before we can decrypt authInfo. */
+	pklen = rdp_tls_get_server_pubkey(t, pubkey, sizeof pubkey);
+	if (pklen <= 0) {
+		rdp_warn("nla: cannot get server pubkey");
+		goto out;
+	}
+
+	/* The client-to-server RC4 stream runs across messages: pubKeyAuth
+	 * first, authInfo after it. */
 	cts_rc4 = rdp_rc4_new(cts_seal, 16);
 	if (cts_rc4 == NULL) goto out;
-	if (req.pub_key_auth != NULL && req.pub_key_auth_len > 16) {
-		uint8_t junk[2048];
-		size_t pka_msg_len = req.pub_key_auth_len - 16;
-		rdp_rc4_process(cts_rc4, req.pub_key_auth + 16, junk,
-		    pka_msg_len > sizeof junk ? sizeof junk : pka_msg_len);
-		rdp_rc4_process(cts_rc4, req.pub_key_auth + 4, junk, 8);
+	if (verify_client_binding(cts_rc4, cts_sign, req.version,
+	    req.pub_key_auth, req.pub_key_auth_len, saved_nonce,
+	    saved_nonce_len, pubkey, (size_t)pklen) != 0) {
+		rdp_warn("nla: client pubKeyAuth does not match our TLS key");
+		goto out;
 	}
+	rdp_debug("nla: client pubKeyAuth verified (CredSSP v%u)",
+		(unsigned)req.version);
 
 	/* 5. Send pubKeyAuth -- NTLM-seal the server cert public key
 	 * to prove we own the TLS certificate. */
 	{
-		uint8_t pubkey[2048];
-		ssize_t pklen;
 		uint8_t stsc_seal[16], stsc_sign[16];
 		uint8_t sealed[2048 + 16];
 		ssize_t sealed_len;
@@ -280,29 +372,16 @@ rdp_nla_server(struct rdp_tls *t,
 
 		ntlm_seal_key(0, exported, stsc_seal);
 		ntlm_sign_key(0, exported, stsc_sign);
-		pklen = rdp_tls_get_server_pubkey(t, pubkey, sizeof pubkey);
-		if (pklen <= 0) {
-			rdp_warn("nla: cannot get server pubkey");
-			goto out;
-		}
 		rdp_debug("nla: pubkey len=%zd first=%02x%02x%02x%02x ver=%u",
 			pklen, pubkey[0], pubkey[1], pubkey[2], pubkey[3],
 			req.version);
 		if (req.version >= 5 && saved_nonce_len >= 32) {
 			/* CredSSP v5+: seal SHA-256(magic + nonce + pubkey) */
-			static const uint8_t magic[] =
+			static const char magic[] =
 				"CredSSP Server-To-Client Binding Hash";
-			EVP_MD_CTX *sha = EVP_MD_CTX_new();
-			unsigned int hlen = 32;
-			uint8_t hash[32];
-			if (sha == NULL) goto out;
-			EVP_DigestInit_ex(sha, EVP_sha256(), NULL);
-			EVP_DigestUpdate(sha, magic, sizeof magic);
-			EVP_DigestUpdate(sha, saved_nonce, 32);
-			EVP_DigestUpdate(sha, pubkey, (size_t)pklen);
-			EVP_DigestFinal_ex(sha, hash, &hlen);
-			EVP_MD_CTX_free(sha);
-			memcpy(msg_to_seal, hash, 32);
+			if (binding_hash(magic, sizeof magic, saved_nonce,
+			    pubkey, (size_t)pklen, msg_to_seal) != 0)
+				goto out;
 			msg_len = 32;
 		} else {
 			/* CredSSP v2-4: seal pubkey with first byte + 1 */
@@ -367,11 +446,13 @@ rdp_nla_server(struct rdp_tls *t,
 		if (decrypted == NULL)
 			goto out;
 
-		/* Decrypt using the persisted RC4 state (message first) */
-		rdp_rc4_process(cts_rc4, req.auth_info + 16, decrypted, dec_len);
-		{
-			uint8_t skip[8];
-			rdp_rc4_process(cts_rc4, req.auth_info + 4, skip, 8);
+		/* The client's second sealed message: sequence number 1. */
+		if (ntlm_unseal_message(cts_rc4, cts_sign, 1, req.auth_info,
+		    req.auth_info_len, decrypted, dec_len) < 0) {
+			rdp_warn("nla: authInfo signature does not verify");
+			explicit_bzero(decrypted, dec_len);
+			free(decrypted);
+			goto out;
 		}
 		rdp_rc4_free(cts_rc4);
 		cts_rc4 = NULL;
@@ -407,5 +488,6 @@ out:
 	explicit_bzero(session_base_key, sizeof session_base_key);
 	explicit_bzero(exported, sizeof exported);
 	explicit_bzero(cts_seal, sizeof cts_seal);
+	explicit_bzero(cts_sign, sizeof cts_sign);
 	return rc;
 }

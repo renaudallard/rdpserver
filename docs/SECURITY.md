@@ -92,8 +92,8 @@ because there's no CI yet.
 
 | Item                                | Status                          |
 |-------------------------------------|---------------------------------|
-| NLA / CredSSP                       | wire only; no hash backend      |
-| TLS cert pinning / channel binding  | not enforced                    |
+| NLA / CredSSP                       | NTLMv2, MIC and binding checked |
+| TLS cert pinning                    | not enforced                    |
 | Rate-limited auth                   | per-source-IP, 5 fails / 60 s   |
 | Session resume / reconnect          | deferred to v1.1                |
 | seccomp-bpf (Linux)                 | detected, not wired             |
