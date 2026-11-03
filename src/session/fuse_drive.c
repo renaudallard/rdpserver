@@ -292,8 +292,9 @@ fd_child_make(struct fuse_drive *fd, uint64_t parent,
 /*
  * Build the RDPDR path of a node into buf (UTF-8, backslash separated,
  * leading backslash, e.g. "\dir\file.txt"; the drive root is "\").
- * Returns the length, or (size_t)-1 if it does not fit.  Walks parents
- * to the drive root, so it is bounded by the node-table depth.
+ * Returns the length, or (size_t)-1 if it does not fit or an ancestor
+ * node is gone. Walks parents to the drive root, so it is bounded by the
+ * node-table depth.
  */
 static size_t
 fd_node_path(struct fuse_drive *fd, const struct fd_node *n,
@@ -312,6 +313,11 @@ fd_node_path(struct fuse_drive *fd, const struct fd_node *n,
 		parts[depth++] = cur->name;
 		cur = fd_node_find(fd, cur->parent);
 	}
+	/* An ancestor that is gone (deleted, or its drive removed) leaves no
+	 * way to name this node; never return the shorter suffix, which
+	 * would address a different file on the share. */
+	if (cur == NULL)
+		return (size_t)-1;
 	if (depth == 0) {
 		if (cap < 2)
 			return (size_t)-1;
