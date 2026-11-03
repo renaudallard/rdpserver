@@ -213,23 +213,20 @@ rdp_pdu_build_save_session_info_arc(uint8_t *out, size_t cap,
 		uint16_t pdu_source, uint32_t share_id,
 		uint32_t logon_id, const uint8_t arc_random[16])
 {
-	/* Body layout after the share-data header:
-	 *   infoType     u32 = INFOTYPE_LOGON_EXTENDED (3)
-	 *   length       u16 = 2+4+28 = 34
-	 *   fieldPresent u32 = LOGON_EX_AUTORECONNECTCOOKIE
-	 *   ARC_SC_PRIVATE_PACKET:
-	 *     cbLen      u32 = 28
-	 *     version    u32 = 1
-	 *     logonId    u32
-	 *     ArcRandomBits u8[16]
-	 *   pad[570]  -- spec says pad to 583; we pad to fill.
-	 *
-	 * Total body = 4 + 2 + 4 + 28 = 38.
-	 * share-data header = 18.
-	 * total = 56 (without padding).
-	 *
-	 * mstsc expects some padding; keep it short for v1. */
-	uint16_t body_len = 38;
+	/* TS_LOGON_INFO_EXTENDED (MS-RDPBCGR 2.2.10.1.1.4) after the
+	 * share-data header:
+	 *   infoType      u32 = INFOTYPE_LOGON_EXTENDED (3)
+	 *   Length        u16 = 2+4+4+28 = 38, the structure up to the pad
+	 *   FieldsPresent u32 = LOGON_EX_AUTORECONNECTCOOKIE
+	 *   TS_LOGON_INFO_FIELD:
+	 *     cbFieldData u32 = 28
+	 *     ARC_SC_PRIVATE_PACKET:
+	 *       cbLen u32 = 28, Version u32 = 1, LogonId u32,
+	 *       ArcRandomBits u8[16]
+	 *   Pad           u8[570]
+	 * Body = 4 + 38 + 570 = 612 bytes. */
+	static const uint8_t pad[570];
+	uint16_t body_len = 4 + 38 + sizeof pad;
 	uint16_t total = 18 + body_len;
 	struct rdp_buf b;
 	ssize_t r;
@@ -241,19 +238,17 @@ rdp_pdu_build_save_session_info_arc(uint8_t *out, size_t cap,
 	if (r != 18) return -1;
 	(void)rdp_buf_skip(&b, 18);
 
-	/* infoType */
 	if (rdp_buf_put_u32le(&b, RDP_INFOTYPE_LOGON_EXTENDED) != 0)
 		return -1;
-	/* length of the remaining TS_LOGON_INFO_EXTENDED fields */
-	if (rdp_buf_put_u16le(&b, 4 + 28) != 0) return -1;
-	/* fieldPresent */
+	if (rdp_buf_put_u16le(&b, 38) != 0) return -1;      /* Length */
 	if (rdp_buf_put_u32le(&b, RDP_LOGON_EX_AUTORECONNECTCOOKIE) != 0)
 		return -1;
-	/* ARC_SC_PRIVATE_PACKET */
-	if (rdp_buf_put_u32le(&b, 28) != 0) return -1;  /* cbLen */
-	if (rdp_buf_put_u32le(&b, 1) != 0) return -1;   /* version */
+	if (rdp_buf_put_u32le(&b, 28) != 0) return -1;      /* cbFieldData */
+	if (rdp_buf_put_u32le(&b, 28) != 0) return -1;      /* cbLen */
+	if (rdp_buf_put_u32le(&b, 1) != 0) return -1;       /* Version */
 	if (rdp_buf_put_u32le(&b, logon_id) != 0) return -1;
 	if (rdp_buf_put(&b, arc_random, 16) != 0) return -1;
+	if (rdp_buf_put(&b, pad, sizeof pad) != 0) return -1;
 	return (ssize_t)rdp_buf_used(&b);
 }
 

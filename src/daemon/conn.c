@@ -4528,7 +4528,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 			logon_id = rdp_rand_u32();
 			rdp_rand_bytes(arc_random, sizeof arc_random);
 			{
-				uint8_t ssi[128];
+				uint8_t ssi[640];
 				ssize_t sn = rdp_pdu_build_save_session_info_arc(
 					ssi, sizeof ssi, user_id,
 					RDP_CONN_SHARE_ID,
@@ -4700,7 +4700,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 			logon_id = rdp_rand_u32();
 			rdp_rand_bytes(arc_random, sizeof arc_random);
 			{
-				uint8_t ssi[128];
+				uint8_t ssi[640];
 				ssize_t sn = rdp_pdu_build_save_session_info_arc(
 					ssi, sizeof ssi, user_id,
 					RDP_CONN_SHARE_ID,

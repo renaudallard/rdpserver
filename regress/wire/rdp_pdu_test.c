@@ -134,10 +134,42 @@ test_small_cap(void)
 	if (n != -1) FAIL("small cap should return -1, got %lld", (long long)n);
 }
 
+/* TS_LOGON_INFO_EXTENDED carrying the auto-reconnect cookie, laid out as
+ * MS-RDPBCGR 2.2.10.1.1.4 and as FreeRDP parses it: Length, FieldsPresent,
+ * cbFieldData, the 28-byte ARC_SC_PRIVATE_PACKET, then a 570-byte pad. */
+static void
+test_arc_cookie(void)
+{
+	uint8_t buf[1024], rnd[16];
+	ssize_t n;
+	size_t i;
+
+	for (i = 0; i < sizeof rnd; i++)
+		rnd[i] = (uint8_t)(0xa0 + i);
+	memset(buf, 0xee, sizeof buf);
+	n = rdp_pdu_build_save_session_info_arc(buf, sizeof buf, 0x3ea,
+	    0x000103ea, 0x11223344u, rnd);
+	if (n != 630) FAIL("arc pdu len %zd != 630", (ssize_t)n);
+	if (rd32(buf + 18) != 3) FAIL("arc infoType");
+	if (rd16(buf + 22) != 38) FAIL("arc Length %u", rd16(buf + 22));
+	if (rd32(buf + 24) != 1) FAIL("arc FieldsPresent");
+	if (rd32(buf + 28) != 28) FAIL("arc cbFieldData");
+	if (rd32(buf + 32) != 28) FAIL("arc cbLen");
+	if (rd32(buf + 36) != 1) FAIL("arc Version");
+	if (rd32(buf + 40) != 0x11223344u) FAIL("arc LogonId");
+	if (memcmp(buf + 44, rnd, sizeof rnd) != 0) FAIL("arc random");
+	for (i = 60; i < 630; i++)
+		if (buf[i] != 0) FAIL("arc pad byte %zu nonzero", i);
+	if (rdp_pdu_build_save_session_info_arc(buf, 629, 0x3ea, 0x000103ea,
+	    1, rnd) != -1)
+		FAIL("arc pdu should reject a short buffer");
+}
+
 int
 main(void)
 {
 	test_logon_v2();
+	test_arc_cookie();
 	test_truncation();
 	test_small_cap();
 	(void)printf("ok\n");
