@@ -203,7 +203,10 @@ fd_unix_to_filetime(uint64_t sec, uint32_t nsec)
 /* FILE_ATTRIBUTE_DIRECTORY (0x10) is defined alongside the dirent decoder. */
 
 /* Minimum lengths of the FSCC structures we decode/encode. */
-#define FSCC_STD_INFO_LEN    24u   /* FileStandardInformation */
+/* FileStandardInformation up to its Directory byte.  MS-RDPEFS clients
+ * send it without the 2 trailing reserved bytes of the MS-FSCC layout
+ * (FreeRDP: "Reserved(2), MUST NOT be added"), so 22 is the wire size. */
+#define FSCC_STD_INFO_LEN    22u
 #define FSCC_BASIC_INFO_LEN  36u   /* FileBasicInformation (fixed prefix) */
 #define FSCC_EOF_INFO_LEN     8u   /* FileEndOfFileInformation */
 #define FSCC_DISP_INFO_LEN    1u   /* FileDispositionInformation (DeletePending) */
