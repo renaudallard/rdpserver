@@ -170,6 +170,7 @@
 #define RDP_FS_WRITE       3u
 #define RDP_FS_CLOSE       4u
 #define RDP_FS_LIST        5u
+#define RDP_FS_LIST_CONTINUE 0x00000001u   /* LIST options: InitialQuery = 0 */
 #define RDP_FS_QUERY_INFO  6u
 #define RDP_FS_SET_INFO    7u
 
@@ -190,7 +191,10 @@
  *                     data (its length is payload_len, not `length`).
  *   RDP_FS_CLOSE      device_id, file_id; no payload.
  *   RDP_FS_LIST       device_id, file_id; payload = UTF-8 search
- *                     pattern (empty means "*").
+ *                     pattern (empty means "*").  options carries
+ *                     RDP_FS_LIST_CONTINUE to ask for the next entries
+ *                     of the same query; drive clients may return as
+ *                     little as one entry per request.
  *   RDP_FS_QUERY_INFO device_id, file_id, info_class; no payload.
  *   RDP_FS_SET_INFO   device_id, file_id, info_class; payload = the
  *                     MS-FSCC SetBuffer for info_class, forwarded

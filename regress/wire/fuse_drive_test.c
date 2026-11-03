@@ -609,6 +609,19 @@ test_readdir_drive(struct fuse_drive *fd)
 		fuse_drive_test_reset();
 		fuse_drive_handle_fs_rsp(fd, &rsp, pl, 4 + total);
 
+		/* Clients may return one entry per query, so a reply with
+		 * entries is followed by a continuation LIST; no-more-files
+		 * ends the listing and the READDIR is answered. */
+		if (!fuse_drive_test_have_req()
+		    || fuse_drive_test_req_op() != RDP_FS_LIST
+		    || fuse_drive_test_req_options() != RDP_FS_LIST_CONTINUE)
+			FAIL("drive READDIR did not continue the LIST");
+		memset(&rsp, 0, sizeof rsp);
+		rsp.req_id = fuse_drive_test_req_id();
+		rsp.status = STATUS_NO_MORE_FILES;
+		fuse_drive_test_reset();
+		fuse_drive_handle_fs_rsp(fd, &rsp, NULL, 0);
+
 		get_out(&oh);
 		if (oh.error != 0)
 			FAIL("drive READDIR reply error %d", oh.error);
@@ -649,6 +662,71 @@ test_readdir_drive(struct fuse_drive *fd)
 				fuse_drive_test_reply_writes());
 		printf("  readdir drive: decoded 'sub' (dir) + 'a.txt' "
 			"(file), skipped . / .. ok\n");
+	}
+
+	/* Later READDIRs page through the cached listing by entry index
+	 * without asking the client again, within the kernel's size. */
+	{
+		struct fuse_out_header oh;
+		struct fuse_dirent de;
+		const uint8_t *r;
+		size_t rlen;
+
+		memset(&ri, 0, sizeof ri);
+		ri.size = 4096;
+		ri.offset = 1;
+		fuse_drive_test_reset();
+		len = build_in(buf, FUSE_READDIR, 42, DRIVE_C_NODE, &ri,
+		    sizeof ri);
+		fuse_drive_test_dispatch(fd, buf, len);
+		if (fuse_drive_test_have_req())
+			FAIL("READDIR at offset 1 asked the client again");
+		get_out(&oh);
+		r = fuse_drive_test_reply(&rlen);
+		if (oh.error != 0 || rlen < sizeof oh + FUSE_NAME_OFFSET + 5)
+			FAIL("READDIR at offset 1 reply");
+		memcpy(&de, r + sizeof oh, FUSE_NAME_OFFSET);
+		if (de.namelen != 5 || memcmp(r + sizeof oh + FUSE_NAME_OFFSET,
+		    "a.txt", 5) != 0 || de.off != 2)
+			FAIL("READDIR at offset 1 did not resume at 'a.txt'");
+		if (rlen != sizeof oh + FUSE_DIRENT_ALIGN(FUSE_NAME_OFFSET + 5))
+			FAIL("READDIR at offset 1 returned extra entries");
+
+		ri.offset = 0;
+		ri.size = FUSE_DIRENT_ALIGN(FUSE_NAME_OFFSET + 3);
+		fuse_drive_test_reset();
+		len = build_in(buf, FUSE_READDIR, 43, DRIVE_C_NODE, &ri,
+		    sizeof ri);
+		fuse_drive_test_dispatch(fd, buf, len);
+		/* Offset 0 lists afresh: answer the two queries. */
+		{
+			uint8_t pl[4 + 512];
+			uint8_t fscc[512];
+			size_t fo = 0;
+			struct rdp_be_fs_rsp rsp;
+
+			fo += build_fdi(fscc + fo, (uint32_t)(93 + 6), 0x10,
+			    "sub");
+			fo += build_fdi(fscc + fo, 0, 0x20, "a.txt");
+			put32le(pl, (uint32_t)fo);
+			memcpy(pl + 4, fscc, fo);
+			memset(&rsp, 0, sizeof rsp);
+			rsp.req_id = fuse_drive_test_req_id();
+			rsp.status = STATUS_SUCCESS;
+			fuse_drive_test_reset();
+			fuse_drive_handle_fs_rsp(fd, &rsp, pl, 4 + fo);
+			memset(&rsp, 0, sizeof rsp);
+			rsp.req_id = fuse_drive_test_req_id();
+			rsp.status = STATUS_NO_MORE_FILES;
+			fuse_drive_test_reset();
+			fuse_drive_handle_fs_rsp(fd, &rsp, NULL, 0);
+		}
+		get_out(&oh);
+		r = fuse_drive_test_reply(&rlen);
+		if (oh.error != 0 || rlen != sizeof oh + ri.size)
+			FAIL("small READDIR exceeded the kernel's size (%zu)",
+			    rlen);
+		printf("  readdir drive: paged by offset and kernel size ok\n");
 	}
 }
 

@@ -668,8 +668,15 @@ fd_send_write(struct fuse_drive *fd, struct fd_node *n, uint64_t unique,
 	return fd->send_fs_req(fd, &req, data, size);
 }
 
+/*
+ * Send one LIST for node n.  A continuation asks the client for the next
+ * entries of the query begun by the first LIST.  list_off and slot ride on
+ * the in-flight record so the completion knows which READDIR to answer and
+ * which listing cache it is filling.
+ */
 static int
-fd_send_list(struct fuse_drive *fd, struct fd_node *n, uint64_t unique)
+fd_send_list(struct fuse_drive *fd, struct fd_node *n, uint64_t unique,
+		int cont, uint64_t list_off, uint32_t size, int slot)
 {
 	struct rdp_be_fs_req req;
 	struct fd_inflight *f;
@@ -690,12 +697,15 @@ fd_send_list(struct fuse_drive *fd, struct fd_node *n, uint64_t unique)
 	f = fd_inflight_alloc(fd, RDP_FS_LIST, unique, n->nodeid, &req.req_id);
 	if (f == NULL)
 		return -1;
+	f->list_off = list_off;
+	f->read_size = size;
+	f->dircache = slot;
 	req.op = RDP_FS_LIST;
 	req.device_id = n->device_id;
 	req.file_id = n->file_id;
 	req.desired_access = 0;
 	req.disposition = 0;
-	req.options = 0;
+	req.options = cont ? RDP_FS_LIST_CONTINUE : 0;
 	req.info_class = 0;
 	req.length = 0;
 	req.payload_len = (uint32_t)plen;
@@ -895,6 +905,151 @@ fd_op_opendir(struct fuse_drive *fd, const struct fd_request *req)
 }
 
 /*
+ * Directory listing cache.  Drive clients answer a query-directory request
+ * with as little as one entry, so a listing costs one round trip per entry.
+ * It is built once, on READDIR at offset 0, and the kernel's follow-up
+ * READDIRs page through it.  A few slots let concurrent listings coexist;
+ * the oldest finished one is reused.
+ */
+#define FD_DIR_MAX_ENTRIES 65536u
+#define FD_DIR_MAX_NAMES   (4u * 1024u * 1024u)
+
+static void
+fd_dircache_release(struct fd_dircache *c)
+{
+	free(c->ents);
+	free(c->names);
+	memset(c, 0, sizeof *c);
+}
+
+/* Most recent finished listing of nodeid, or NULL. */
+static struct fd_dircache *
+fd_dircache_find(struct fuse_drive *fd, uint64_t nodeid)
+{
+	struct fd_dircache *best = NULL;
+	int i;
+
+	for (i = 0; i < FD_DIRCACHE_SLOTS; i++) {
+		struct fd_dircache *c = &fd->dircache[i];
+		if (c->in_use && !c->filling && c->nodeid == nodeid
+		    && (best == NULL || c->stamp > best->stamp))
+			best = c;
+	}
+	if (best != NULL)
+		best->stamp = ++fd->dircache_clock;
+	return best;
+}
+
+/* Take a slot to fill a fresh listing of nodeid: a free one, else the
+ * least recently used finished one.  Returns -1 if every slot is busy
+ * filling. */
+static int
+fd_dircache_claim(struct fuse_drive *fd, uint64_t nodeid)
+{
+	int i, pick = -1;
+
+	for (i = 0; i < FD_DIRCACHE_SLOTS; i++) {
+		struct fd_dircache *c = &fd->dircache[i];
+		if (!c->in_use) {
+			pick = i;
+			break;
+		}
+		if (!c->filling && (pick < 0
+		    || c->stamp < fd->dircache[pick].stamp))
+			pick = i;
+	}
+	if (pick < 0)
+		return -1;
+	fd_dircache_release(&fd->dircache[pick]);
+	fd->dircache[pick].in_use = 1;
+	fd->dircache[pick].filling = 1;
+	fd->dircache[pick].nodeid = nodeid;
+	fd->dircache[pick].stamp = ++fd->dircache_clock;
+	return pick;
+}
+
+/* Drop the finished listings of nodeid; its directory handle closed. */
+static void
+fd_dircache_drop(struct fuse_drive *fd, uint64_t nodeid)
+{
+	int i;
+
+	for (i = 0; i < FD_DIRCACHE_SLOTS; i++) {
+		struct fd_dircache *c = &fd->dircache[i];
+		if (c->in_use && !c->filling && c->nodeid == nodeid)
+			fd_dircache_release(c);
+	}
+}
+
+/* Append one entry; returns -1 once the listing hits its bounds. */
+static int
+fd_dircache_add(struct fd_dircache *c, uint64_t ino, const char *name,
+		size_t name_len, int is_dir)
+{
+	if (c->count >= FD_DIR_MAX_ENTRIES
+	    || name_len > FD_DIR_MAX_NAMES - c->names_len)
+		return -1;
+	if (c->count == c->cap) {
+		size_t ncap = c->cap ? c->cap * 2 : 64;
+		struct fd_dircache_ent *ne = reallocarray(c->ents, ncap,
+		    sizeof *ne);
+		if (ne == NULL)
+			return -1;
+		c->ents = ne;
+		c->cap = ncap;
+	}
+	if (name_len > c->names_cap - c->names_len) {
+		size_t ncap = c->names_cap ? c->names_cap : 4096;
+		char *nn;
+		while (ncap - c->names_len < name_len)
+			ncap *= 2;
+		nn = realloc(c->names, ncap);
+		if (nn == NULL)
+			return -1;
+		c->names = nn;
+		c->names_cap = ncap;
+	}
+	memcpy(c->names + c->names_len, name, name_len);
+	c->ents[c->count].ino = ino;
+	c->ents[c->count].name_off = (uint32_t)c->names_len;
+	c->ents[c->count].name_len = (uint16_t)name_len;
+	c->ents[c->count].is_dir = is_dir ? 1 : 0;
+	c->names_len += name_len;
+	c->count++;
+	return 0;
+}
+
+/* Answer a READDIR with the entries of c from index off on; a NULL c or an
+ * offset past the end is end of directory. */
+static void
+fd_dircache_serve(struct fuse_drive *fd, struct fd_dircache *c,
+		uint64_t unique, uint64_t off, uint32_t size)
+{
+	struct fd_dirent *ents;
+	size_t i, n;
+
+	if (c == NULL || off >= c->count) {
+		fd->backend->emit_dirent_batch(fd, unique, NULL, 0, 0, 0);
+		return;
+	}
+	n = c->count - (size_t)off;
+	ents = reallocarray(NULL, n, sizeof *ents);
+	if (ents == NULL) {
+		fd_reply_error(fd, unique, -ENOMEM);
+		return;
+	}
+	for (i = 0; i < n; i++) {
+		const struct fd_dircache_ent *e = &c->ents[off + i];
+		ents[i].ino = e->ino;
+		ents[i].name = c->names + e->name_off;
+		ents[i].name_len = e->name_len;
+		ents[i].is_dir = e->is_dir;
+	}
+	fd->backend->emit_dirent_batch(fd, unique, ents, n, off, size);
+	free(ents);
+}
+
+/*
  * Collect the dirents of the synthetic root (one per announced drive)
  * into ents and emit them through the backend.  A non-zero offset means
  * the kernel already consumed our single batch.
@@ -907,7 +1062,7 @@ fd_op_readdir_root(struct fuse_drive *fd, const struct fd_request *req)
 	int i;
 
 	if (req->offset != 0) {
-		fd->backend->emit_dirent_batch(fd, req->unique, NULL, 0, 0);
+		fd->backend->emit_dirent_batch(fd, req->unique, NULL, 0, 0, 0);
 		return;
 	}
 	for (i = 0; i < FD_MAX_NODES; i++) {
@@ -920,7 +1075,7 @@ fd_op_readdir_root(struct fuse_drive *fd, const struct fd_request *req)
 		ents[n].is_dir = 1;
 		n++;
 	}
-	fd->backend->emit_dirent_batch(fd, req->unique, ents, n, req->size);
+	fd->backend->emit_dirent_batch(fd, req->unique, ents, n, 0, req->size);
 }
 
 static void
@@ -938,20 +1093,37 @@ fd_op_readdir(struct fuse_drive *fd, const struct fd_request *req)
 		return;
 	}
 
-	/* A real drive directory.  We list it in one shot; a non-zero offset
-	 * means the kernel wants more after our single batch, which we do not
-	 * paginate yet, so return EOF.  Known limitation: directories whose
-	 * full listing exceeds one batch are truncated to the first batch. */
+	/* A real drive directory.  READDIR at offset 0 lists it afresh with
+	 * as many LIST round trips as the client needs; later offsets page
+	 * through that cached listing.  A backend whose offsets are not
+	 * entry indexes only ever gets the listing from its start. */
 	if (req->offset != 0) {
-		fd->backend->emit_dirent_batch(fd, req->unique, NULL, 0, 0);
-		return;
+		struct fd_dircache *c = fd->backend->index_offsets
+		    ? fd_dircache_find(fd, n->nodeid) : NULL;
+		if (c != NULL || !fd->backend->index_offsets) {
+			fd_dircache_serve(fd, c, req->unique, req->offset,
+			    req->size);
+			return;
+		}
+		/* The listing was evicted: build it again and answer from
+		 * the requested offset. */
 	}
 	if (!n->have_open) {
 		fd_reply_error(fd, req->unique, -EBADF);
 		return;
 	}
-	if (fd_send_list(fd, n, req->unique) != 0)
-		fd_reply_error(fd, req->unique, -ENOMEM);
+	{
+		int slot = fd_dircache_claim(fd, n->nodeid);
+		if (slot < 0) {
+			fd_reply_error(fd, req->unique, -EAGAIN);
+			return;
+		}
+		if (fd_send_list(fd, n, req->unique, 0, req->offset, req->size,
+		    slot) != 0) {
+			fd_dircache_release(&fd->dircache[slot]);
+			fd_reply_error(fd, req->unique, -ENOMEM);
+		}
+	}
 }
 
 /* Map the open(2) access mode to an NT DesiredAccess.  O_RDONLY grants
@@ -1524,8 +1696,10 @@ fd_op_release(struct fuse_drive *fd, const struct fd_request *req)
 	if (n != NULL) {
 		if (n->open_refs > 0)
 			n->open_refs--;
-		if (n->open_refs == 0)
+		if (n->open_refs == 0) {
 			fd_send_close(fd, n);
+			fd_dircache_drop(fd, n->nodeid);
+		}
 	}
 	fd->backend->emit_ok(fd, req->unique);   /* success, no body */
 }
@@ -1659,17 +1833,21 @@ fd_dispatch(struct fuse_drive *fd, const struct fd_request *req)
 #define FDI_FIXED 93u
 #define FILE_ATTRIBUTE_DIRECTORY 0x00000010u
 
+/*
+ * Decode one FILE_BOTH_DIR_INFORMATION record into the listing c, skipping
+ * "." and "..".  *records counts every record seen, so a reply that yields
+ * none ends the listing; *full is set once c reaches its bounds.  Returns
+ * the bytes to advance, or 0 to stop.
+ */
 static size_t
 fd_decode_one_dirent(struct fuse_drive *fd, const uint8_t *fdi, size_t avail,
-		uint32_t device_id, uint64_t parent,
-		struct fd_dirent *ents, size_t *count, size_t cap,
-		char (*names)[FD_NAME_MAX + 1])
+		uint32_t device_id, uint64_t parent, struct fd_dircache *c,
+		size_t *records, int *full)
 {
 	uint32_t next, name_bytes, attrs;
 	size_t name_chars, i;
 	struct fd_node *child;
-	int is_dir;
-	char *name;
+	char name[FD_NAME_MAX + 1];
 
 	if (avail < FDI_FIXED)
 		return 0;
@@ -1682,26 +1860,21 @@ fd_decode_one_dirent(struct fuse_drive *fd, const uint8_t *fdi, size_t avail,
 	name_chars = name_bytes / 2;   /* UTF-16LE; we keep the low byte */
 	if (name_chars > FD_NAME_MAX)
 		name_chars = FD_NAME_MAX;
-	if (*count >= cap)
-		return 0;   /* dirent array full: stop without overflowing */
-	name = names[*count];
 	for (i = 0; i < name_chars; i++)
 		name[i] = (char)fdi[FDI_FIXED + i * 2];
 	name[name_chars] = '\0';
+	(*records)++;
 
 	/* Skip the "." and ".." pseudo-entries; the kernel synthesizes them. */
-	if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+	if (name_chars == 0 || strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
 		goto advance;
-	if (name_chars == 0)
-		goto advance;
-
-	is_dir = (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
-	child = fd_child_make(fd, parent, name, name_chars, device_id, is_dir);
-	ents[*count].ino = child != NULL ? child->nodeid : 0;
-	ents[*count].name = name;
-	ents[*count].name_len = name_chars;
-	ents[*count].is_dir = is_dir;
-	(*count)++;
+	child = fd_child_make(fd, parent, name, name_chars, device_id,
+	    (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0);
+	if (fd_dircache_add(c, child != NULL ? child->nodeid : 0,
+	    name, name_chars, (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0) != 0) {
+		*full = 1;
+		return 0;
+	}
 
 advance:
 	/* NextEntryOffset of 0 marks the final record. */
@@ -1712,63 +1885,77 @@ advance:
 	return next;
 }
 
+/*
+ * One LIST reply.  Add its entries to the listing and ask for more until
+ * the client says STATUS_NO_MORE_FILES, a reply adds nothing, or the
+ * listing is full; then answer the READDIR that started it.
+ */
 static void
 fd_complete_list(struct fuse_drive *fd, struct fd_inflight *f, uint32_t status,
 		const uint8_t *payload, size_t payload_len)
 {
-	struct fd_node *n = fd_node_find(fd, f->nodeid);
-	/* Decoded entries and a backing name store, sized to the directory
-	 * batch.  The backend lays the entries out into its wire dirents and
-	 * decides how many fit in the kernel's requested size. */
-	static struct fd_dirent ents[FD_MAX_NODES];
-	static char names[FD_MAX_NODES][FD_NAME_MAX + 1];
-	size_t count = 0;
-	const uint8_t *fdi;
-	size_t avail;
-	uint32_t fscc_len;
+	/* f was released before dispatch and the next fd_send_list may reuse
+	 * it, so take what is needed first. */
+	uint64_t unique = f->fuse_unique, nodeid = f->nodeid;
+	uint64_t off = f->list_off;
+	uint32_t size = f->read_size;
+	int slot = f->dircache;
+	struct fd_node *n = fd_node_find(fd, nodeid);
+	struct fd_dircache *c;
+	size_t records = 0;
+	int full = 0;
 
+	if (slot < 0 || slot >= FD_DIRCACHE_SLOTS
+	    || !fd->dircache[slot].in_use || !fd->dircache[slot].filling
+	    || fd->dircache[slot].nodeid != nodeid) {
+		fd_reply_error(fd, unique, -EIO);
+		return;
+	}
+	c = &fd->dircache[slot];
 	if (n == NULL) {
-		fd_reply_error(fd, f->fuse_unique, -ENOENT);
+		fd_dircache_release(c);
+		fd_reply_error(fd, unique, -ENOENT);
 		return;
 	}
 	if (status != STATUS_SUCCESS) {
-		/* No-more-files on the very first query is an empty dir. */
-		if (status == STATUS_NO_MORE_FILES)
-			fd->backend->emit_dirent_batch(fd, f->fuse_unique,
-				NULL, 0, 0);
-		else
-			fd_reply_error(fd, f->fuse_unique,
-				-fd_status_to_errno(status));
-		return;
+		/* No-more-files ends any listing.  Another error before the
+		 * first entry fails the READDIR; after it, what was listed
+		 * stands. */
+		if (status != STATUS_NO_MORE_FILES && c->count == 0) {
+			fd_dircache_release(c);
+			fd_reply_error(fd, unique, -fd_status_to_errno(status));
+			return;
+		}
+		goto done;
 	}
 	/* The LIST payload is Length(u32) + FileBothDirectoryInformation
 	 * buffer (the worker forwards the DR_DRIVE_QUERY_DIRECTORY_RSP body
 	 * verbatim).  Bound the inner length against what we actually got. */
-	if (payload_len < 4) {
-		fd->backend->emit_dirent_batch(fd, f->fuse_unique, NULL, 0, 0);
-		return;
-	}
-	fscc_len = fd_ld32(payload);
-	fdi = payload + 4;
-	avail = payload_len - 4;
-	if (fscc_len < avail)
-		avail = fscc_len;
+	if (payload_len >= 4) {
+		const uint8_t *fdi = payload + 4;
+		size_t avail = payload_len - 4;
+		uint32_t fscc_len = fd_ld32(payload);
 
-	while (avail >= FDI_FIXED && count < FD_MAX_NODES) {
-		size_t used = fd_decode_one_dirent(fd, fdi, avail,
-			n->device_id, n->nodeid, ents, &count, FD_MAX_NODES,
-			names);
-		if (used == 0 || used > avail)
-			break;
-		fdi += used;
-		avail -= used;
+		if (fscc_len < avail)
+			avail = fscc_len;
+		while (avail >= FDI_FIXED && !full) {
+			size_t used = fd_decode_one_dirent(fd, fdi, avail,
+				n->device_id, nodeid, c, &records, &full);
+			if (used == 0 || used > avail)
+				break;
+			fdi += used;
+			avail -= used;
+		}
 	}
-	/* Emit the batch.  The directory is listed in one shot; the backend
-	 * trims the records to its own reply-buffer cap (FD_OUT_BUF_SZ).
-	 * Passing that cap reproduces the original "fill the whole buffer"
-	 * behavior (LIST never carried the kernel's requested size). */
-	fd->backend->emit_dirent_batch(fd, f->fuse_unique, ents, count,
-		FD_OUT_BUF_SZ);
+	if (full)
+		rdp_warn("fuse drive: listing of node %llu stopped at %zu "
+		    "entries", (unsigned long long)nodeid, c->count);
+	if (records > 0 && !full
+	    && fd_send_list(fd, n, unique, 1, off, size, slot) == 0)
+		return;
+done:
+	c->filling = 0;
+	fd_dircache_serve(fd, c, unique, off, size);
 }
 
 static void
@@ -2437,6 +2624,12 @@ fuse_drive_init(int fuse_fd, int be_fd)
 void
 fuse_drive_free(struct fuse_drive *fd)
 {
+	int i;
+
+	if (fd == NULL)
+		return;
+	for (i = 0; i < FD_DIRCACHE_SLOTS; i++)
+		fd_dircache_release(&fd->dircache[i]);
 	free(fd);
 }
 

@@ -449,7 +449,8 @@ fd_obsd_dirsiz(size_t namelen)
  */
 static size_t
 obsd_emit_dirent_batch(struct fuse_drive *fd, uint64_t unique,
-		const struct fd_dirent *ents, size_t n, uint32_t maxbytes)
+		const struct fd_dirent *ents, size_t n, uint64_t first_off,
+		uint32_t maxbytes)
 {
 	struct fd_obsd_slot *s = fd_obsd_slot_find(unique);
 	uint8_t hdr[FD_FB_HDRLEN];
@@ -458,6 +459,9 @@ obsd_emit_dirent_batch(struct fuse_drive *fd, uint64_t unique,
 	size_t want;
 	size_t i;
 
+	/* d_off here is a byte cursor within this batch, so the core only
+	 * ever asks for the listing from its start. */
+	(void)first_off;
 	if (s == NULL)
 		return 0;
 
@@ -900,7 +904,8 @@ const struct fd_backend fd_backend_obsd = {
 	obsd_emit_write,
 	obsd_emit_dirent_batch,
 	obsd_emit_ok,
-	obsd_emit_error
+	obsd_emit_error,
+	0
 };
 
 #endif /* HAVE_OBSD_FUSE */

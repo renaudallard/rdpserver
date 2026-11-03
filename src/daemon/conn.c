@@ -3859,7 +3859,8 @@ run_proxy(struct rdp_tls *t, int be_fd,
 					    freq.device_id, freq.file_id,
 					    payload_len > 0
 					    ? (const char *)payload : "*",
-					    1, &cid);
+					    !(freq.options & RDP_FS_LIST_CONTINUE),
+					    &cid);
 					break;
 				case RDP_FS_QUERY_INFO:
 					in = rdp_rdpdr_build_irp_query_info(

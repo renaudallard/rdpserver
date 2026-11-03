@@ -251,7 +251,8 @@ ln_emit_write(struct fuse_drive *fd, uint64_t unique, uint32_t count)
  */
 static size_t
 ln_emit_dirent_batch(struct fuse_drive *fd, uint64_t unique,
-		const struct fd_dirent *ents, size_t n, uint32_t maxbytes)
+		const struct fd_dirent *ents, size_t n, uint64_t first_off,
+		uint32_t maxbytes)
 {
 	uint8_t out[FD_OUT_BUF_SZ];
 	struct fuse_out_header oh;
@@ -263,7 +264,9 @@ ln_emit_dirent_batch(struct fuse_drive *fd, uint64_t unique,
 	size_t hdr = sizeof oh;
 	size_t off = hdr;
 	size_t want = maxbytes < sizeof out - hdr ? maxbytes : sizeof out - hdr;
-	uint64_t doff = 0;
+	/* d_off is the index of the next entry, which the kernel sends back
+	 * as the offset of its next READDIR. */
+	uint64_t doff = first_off;
 	size_t i;
 
 	want += hdr;   /* off is measured from the buffer start, header included */
@@ -740,7 +743,8 @@ const struct fd_backend fd_backend_linux = {
 	ln_emit_write,
 	ln_emit_dirent_batch,
 	ln_emit_ok,
-	ln_emit_error
+	ln_emit_error,
+	1
 };
 
 #endif /* HAVE_FUSE */

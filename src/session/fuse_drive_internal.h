@@ -57,6 +57,8 @@
 #define FD_MAX_NODES         512
 #define FD_INFLIGHT_MAX      RDPDR_MAX_PENDING   /* 64 */
 #define FD_NAME_MAX          255
+/* Directory listings cached between READDIR calls. */
+#define FD_DIRCACHE_SLOTS    4
 
 /*
  * OS neutral op codes.  A backend->recv parses its wire request into one
@@ -232,6 +234,8 @@ struct fd_inflight {
 	uint32_t reply_op;     /* getattr chain: FD_OP_LOOKUP -> entry, else attr */
 	enum fd_phase phase;   /* getattr/setattr chain step */
 	struct fd_attr_acc acc;/* accumulated attrs for the getattr chain */
+	uint64_t list_off;     /* LIST: READDIR offset to answer from */
+	int      dircache;     /* LIST: listing cache slot being filled */
 	struct fd_time_set time_set; /* pending time set for combined SETATTR */
 	/* RENAME: the destination device-relative path (UTF-8) carried across
 	 * the source OPEN completion, plus the destination parent nodeid so the
@@ -243,6 +247,26 @@ struct fd_inflight {
 
 struct fd_backend;
 
+/* One directory listing, built over as many query-directory round trips as
+ * the client needs and paged out to the kernel by READDIR offset. */
+struct fd_dircache_ent {
+	uint64_t ino;
+	uint32_t name_off;     /* into fd_dircache.names */
+	uint16_t name_len;
+	uint8_t  is_dir;
+};
+
+struct fd_dircache {
+	int      in_use;
+	int      filling;      /* a LIST chain is still adding entries */
+	uint64_t nodeid;
+	uint64_t stamp;        /* last use, for eviction */
+	struct fd_dircache_ent *ents;
+	size_t   count, cap;
+	char    *names;
+	size_t   names_len, names_cap;
+};
+
 struct fuse_drive {
 	int      fuse_fd;
 	int      be_fd;
@@ -250,6 +274,8 @@ struct fuse_drive {
 	uint64_t next_nodeid;
 	struct fd_node nodes[FD_MAX_NODES];
 	struct fd_inflight inflight[FD_INFLIGHT_MAX];
+	struct fd_dircache dircache[FD_DIRCACHE_SLOTS];
+	uint64_t dircache_clock;
 
 	/* The wire backend selected at init.  Its recv parses one request
 	 * into struct fd_request; its emit_* turn the core's OS neutral
@@ -288,9 +314,14 @@ struct fd_backend {
 	void (*emit_write)(struct fuse_drive *fd, uint64_t unique,
 		uint32_t count);
 	size_t (*emit_dirent_batch)(struct fuse_drive *fd, uint64_t unique,
-		const struct fd_dirent *ents, size_t n, uint32_t maxbytes);
+		const struct fd_dirent *ents, size_t n, uint64_t first_off,
+		uint32_t maxbytes);
 	void (*emit_ok)(struct fuse_drive *fd, uint64_t unique);
 	void (*emit_error)(struct fuse_drive *fd, uint64_t unique, int error);
+	/* Non-zero when READDIR offsets are entry indexes, as the d_off this
+	 * backend writes; zero when they are opaque to the core, in which
+	 * case only offset 0 is served. */
+	int  index_offsets;
 };
 
 /* The Linux raw /dev/fuse backend (defined in fuse_drive_linux.c). */
