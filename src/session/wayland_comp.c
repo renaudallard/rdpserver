@@ -54,6 +54,7 @@
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/log.h>
 
+#include <drm/drm_fourcc.h>
 #include <linux/input-event-codes.h>
 #include <pixman.h>
 #include <stdlib.h>
@@ -173,6 +174,17 @@ render_surface(struct rdp_wl_comp *c, struct rdp_wl_toplevel *tl)
 		int buf_h = (int)cbuf->base.height;
 		int dst_x = 0, dst_y = 0;
 		int copy_w, copy_h, row;
+
+		/* The framebuffer is XRGB8888 and the copy below moves four
+		 * bytes a pixel.  A client may commit a 16 or 24-bit shm
+		 * format, which would make it read past the end of the
+		 * client's buffer, so skip anything else. */
+		if ((fmt != DRM_FORMAT_XRGB8888 && fmt != DRM_FORMAT_ARGB8888)
+		    || buf_w <= 0 || stride / 4 < (size_t)buf_w) {
+			rdp_debug("wayland: skipping buffer format 0x%08x "
+			    "stride %zu", fmt, stride);
+			goto out_release;
+		}
 
 		if (c->rail_mode) {
 			/* Place the window at its cascade origin and clip to
