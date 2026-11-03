@@ -154,6 +154,8 @@ rdp_nla_server(struct rdp_tls *t,
 	char     user_utf8[256];
 	char     domain_utf8[256];
 	ssize_t  bn;
+	struct rdp_rc4 *cts_rc4 = NULL;
+	int      rc = -1;
 
 	memset(user, 0, user_size);
 	memset(pass, 0, pass_size);
@@ -164,14 +166,14 @@ rdp_nla_server(struct rdp_tls *t,
 
 	if (read_tsrequest(t, in_buf, sizeof in_buf, &in_len) != 0) {
 		rdp_warn("nla: read NEGOTIATE failed");
-		return -1;
+		goto out;
 	}
 	if (rdp_cssp_parse(in_buf, in_len, &req) != 0
 	    || req.nego_token == NULL
 	    || ntlm_parse_negotiate(req.nego_token, req.nego_token_len,
 		&neg) != 0) {
 		rdp_warn("nla: bad NEGOTIATE");
-		return -1;
+		goto out;
 	}
 	if (req.client_nonce != NULL && req.client_nonce_len >= 32) {
 		memcpy(saved_nonce, req.client_nonce, 32);
@@ -186,28 +188,28 @@ rdp_nla_server(struct rdp_tls *t,
 		uint8_t chal_buf[1024];
 		ssize_t cn = ntlm_build_challenge(chal_buf, sizeof chal_buf,
 			neg.flags, "rdpserver", server_challenge);
-		if (cn <= 0) return -1;
+		if (cn <= 0) goto out;
 		memset(&resp, 0, sizeof resp);
 		resp.version = req.version;
 		resp.nego_token = chal_buf;
 		resp.nego_token_len = (size_t)cn;
 		bn = rdp_cssp_build(out_buf, sizeof out_buf, &resp);
-		if (bn <= 0) return -1;
+		if (bn <= 0) goto out;
 		if (rdp_tls_write_full(t, out_buf, (size_t)bn)
-		    != (ssize_t)bn) return -1;
+		    != (ssize_t)bn) goto out;
 	}
 
 	/* 3. Read AUTHENTICATE. */
 	if (read_tsrequest(t, in_buf, sizeof in_buf, &in_len) != 0) {
 		rdp_warn("nla: read AUTHENTICATE failed");
-		return -1;
+		goto out;
 	}
 	if (rdp_cssp_parse(in_buf, in_len, &req) != 0
 	    || req.nego_token == NULL
 	    || ntlm_parse_authenticate(req.nego_token, req.nego_token_len,
 		&auth) != 0) {
 		rdp_warn("nla: bad AUTHENTICATE");
-		return -1;
+		goto out;
 	}
 
 	{
@@ -235,28 +237,28 @@ rdp_nla_server(struct rdp_tls *t,
 	if (lookup_nthash(user_utf8, nthash) != 0) {
 		rdp_warn("nla: no NT hash for user '%s' in %s",
 			user_utf8, NTHASH_PATH);
-		return -1;
+		goto out;
 	}
 
 	if (ntlm_verify_ntlmv2_hash(server_challenge, &auth,
 		nthash, session_base_key) != 0) {
 		rdp_warn("nla: NTLMv2 verification failed for '%s'",
 			user_utf8);
-		return -1;
+		goto out;
 	}
 	rdp_info("nla: NTLMv2 verified for '%s'", user_utf8);
 
 	if (ntlm_derive_exported_key(&auth, session_base_key, exported) != 0) {
 		rdp_warn("nla: derive exported key failed");
-		return -1;
+		goto out;
 	}
 	ntlm_seal_key(1, exported, cts_seal);
 
 	/* Initialize the client-to-server RC4 state. The client's RC4
 	 * handle persists across messages, so we must advance ours past
 	 * the client's pubKeyAuth before we can decrypt authInfo. */
-	struct rdp_rc4 *cts_rc4 = rdp_rc4_new(cts_seal, 16);
-	if (cts_rc4 == NULL) return -1;
+	cts_rc4 = rdp_rc4_new(cts_seal, 16);
+	if (cts_rc4 == NULL) goto out;
 	if (req.pub_key_auth != NULL && req.pub_key_auth_len > 16) {
 		uint8_t junk[2048];
 		size_t pka_msg_len = req.pub_key_auth_len - 16;
@@ -281,7 +283,7 @@ rdp_nla_server(struct rdp_tls *t,
 		pklen = rdp_tls_get_server_pubkey(t, pubkey, sizeof pubkey);
 		if (pklen <= 0) {
 			rdp_warn("nla: cannot get server pubkey");
-			return -1;
+			goto out;
 		}
 		rdp_debug("nla: pubkey len=%zd first=%02x%02x%02x%02x ver=%u",
 			pklen, pubkey[0], pubkey[1], pubkey[2], pubkey[3],
@@ -293,7 +295,7 @@ rdp_nla_server(struct rdp_tls *t,
 			EVP_MD_CTX *sha = EVP_MD_CTX_new();
 			unsigned int hlen = 32;
 			uint8_t hash[32];
-			if (sha == NULL) return -1;
+			if (sha == NULL) goto out;
 			EVP_DigestInit_ex(sha, EVP_sha256(), NULL);
 			EVP_DigestUpdate(sha, magic, sizeof magic);
 			EVP_DigestUpdate(sha, saved_nonce, 32);
@@ -319,7 +321,7 @@ rdp_nla_server(struct rdp_tls *t,
 			msg_to_seal, msg_len, sealed, sizeof sealed);
 		if (sealed_len <= 0) {
 			rdp_warn("nla: seal pubKeyAuth failed (%zd)", sealed_len);
-			return -1;
+			goto out;
 		}
 		rdp_debug("nla: sealed len=%zd first=%02x%02x%02x%02x",
 			sealed_len, sealed[0], sealed[1],
@@ -330,12 +332,12 @@ rdp_nla_server(struct rdp_tls *t,
 		resp.pub_key_auth = sealed;
 		resp.pub_key_auth_len = (size_t)sealed_len;
 		bn = rdp_cssp_build(out_buf, sizeof out_buf, &resp);
-		if (bn <= 0) return -1;
+		if (bn <= 0) goto out;
 		rdp_debug("nla: TSReq %zd: %02x%02x%02x%02x %02x%02x%02x%02x",
 			bn, out_buf[0], out_buf[1], out_buf[2], out_buf[3],
 			out_buf[4], out_buf[5], out_buf[6], out_buf[7]);
 		if (rdp_tls_write_full(t, out_buf, (size_t)bn)
-		    != (ssize_t)bn) return -1;
+		    != (ssize_t)bn) goto out;
 		explicit_bzero(stsc_seal, sizeof stsc_seal);
 		explicit_bzero(stsc_sign, sizeof stsc_sign);
 	}
@@ -343,30 +345,27 @@ rdp_nla_server(struct rdp_tls *t,
 	/* 6. Read authInfo and decrypt. */
 	if (read_tsrequest(t, in_buf, sizeof in_buf, &in_len) != 0) {
 		rdp_warn("nla: read authInfo failed");
-		return -1;
+		goto out;
 	}
 	if (rdp_cssp_parse(in_buf, in_len, &req) != 0
 	    || req.auth_info == NULL || req.auth_info_len == 0) {
 		rdp_warn("nla: missing authInfo");
-		return -1;
+		goto out;
 	}
 
 	{
 		uint8_t *decrypted;
 		size_t dec_len;
-		struct rdp_rc4 *rc4;
 		struct rdp_tscredentials tc;
 
 		if (req.auth_info_len < 16) {
 			rdp_warn("nla: authInfo too short");
-			return -1;
+			goto out;
 		}
 		dec_len = req.auth_info_len - 16;
 		decrypted = malloc(dec_len);
-		if (decrypted == NULL) {
-			rdp_rc4_free(cts_rc4);
-			return -1;
-		}
+		if (decrypted == NULL)
+			goto out;
 
 		/* Decrypt using the persisted RC4 state (message first) */
 		rdp_rc4_process(cts_rc4, req.auth_info + 16, decrypted, dec_len);
@@ -375,12 +374,13 @@ rdp_nla_server(struct rdp_tls *t,
 			rdp_rc4_process(cts_rc4, req.auth_info + 4, skip, 8);
 		}
 		rdp_rc4_free(cts_rc4);
+		cts_rc4 = NULL;
 
 		if (rdp_cssp_parse_tscredentials(decrypted, dec_len, &tc) != 0) {
 			rdp_warn("nla: TSCredentials parse failed");
 			explicit_bzero(decrypted, dec_len);
 			free(decrypted);
-			return -1;
+			goto out;
 		}
 
 		{
@@ -400,9 +400,12 @@ rdp_nla_server(struct rdp_tls *t,
 	}
 
 	rdp_info("nla: credentials extracted for '%s'", user);
+	rc = 0;
+out:
+	rdp_rc4_free(cts_rc4);
 	explicit_bzero(nthash, sizeof nthash);
 	explicit_bzero(session_base_key, sizeof session_base_key);
 	explicit_bzero(exported, sizeof exported);
 	explicit_bzero(cts_seal, sizeof cts_seal);
-	return 0;
+	return rc;
 }
