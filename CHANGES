@@ -1,6 +1,48 @@
 rdpserver release notes
 
 Unreleased (0.0.9, Phase J)
+	Security fixes from a whole-tree review.  The NLA token
+	auto-login is gone: after an NLA login the next plain-TLS
+	connection, from anyone, got that user's desktop without
+	credentials.  CredSSP context-tag lengths are now bounded by the
+	received bytes, so a pre-auth TSRequest can no longer make the
+	NTLM parser read past its buffer.  The greeter clips its repaint
+	to the framebuffer, which a narrow desktop let it read before,
+	and the requested desktop is clamped to 200..8192 per side.  The
+	server now verifies the client's CredSSP pubKeyAuth binding, the
+	NTLM MIC and the authInfo signature.  PAM logins open a real PAM
+	session in a per-session root monitor, the session runtime
+	directory is private instead of /tmp, the NT hash cache is
+	written 0600 from the start, and BER, TSRequest and RDPDR name
+	length checks no longer wrap.
+
+	Auto-reconnect works.  The cookie PDU was laid out wrongly and
+	FreeRDP dropped every greeter login on it; the verifier check
+	compared the wrong values and destroyed the suspended session on
+	every attempt.  The session manager now checks the verifier and
+	keeps the session suspended on a mismatch.  After a greeter login
+	the channels also start at once instead of after ten input PDUs.
+
+	Drive redirection works against real clients.  CREATE and
+	QUERY_DIRECTORY requests had the wrong layout, completions were
+	framed so they desynchronised the session's backend stream,
+	chunked RDPDR PDUs were not reassembled, directory records and
+	FileStandardInformation were decoded at MS-FSCC rather than
+	MS-RDPEFS sizes, listings only ever held one entry and always
+	the share root, and the reported modes made the mount read-only.
+	Verified with xfreerdp 3.26: a 600-entry directory lists in full,
+	a 200 KB file reads back byte for byte, and create, write, mkdir,
+	directory rename, rmdir and unlink work.
+
+	Smaller fixes: GFX CapsConfirm echoes the client's capset flags;
+	printer queues are tracked and removed again; an oversize X
+	selection is refused instead of sent truncated; TIMESTAMP
+	selection requests succeed; only the session's own PulseAudio
+	sink is unloaded; Wayland buffers other than 32-bit are skipped;
+	DDX damage regions are composed into whole frames for GFX; the
+	bitmap cache fits the client's cell sizes; and the build is free
+	of warnings.
+
 	Dynamic-resize reactivation is now skipped when the client's
 	monitor-layout request matches the current desktop size.  A no-op
 	Deactivate-All / re-Demand-Active cycle is not just wasted work:
