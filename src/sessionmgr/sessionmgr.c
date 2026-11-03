@@ -1458,8 +1458,11 @@ handle_suspend(int cfd, const uint8_t *req, size_t req_len, int recvd_fd)
 	uint32_t logon_id;
 	int i, slot = -1;
 
-	if (req_len < 24 || recvd_fd < 0)
+	if (req_len < 24 || recvd_fd < 0) {
+		if (recvd_fd >= 0)
+			(void)close(recvd_fd);
 		return reply(cfd, RDP_SESSMGR_FAIL, -1);
+	}
 	logon_id = (uint32_t)req[4] | ((uint32_t)req[5] << 8)
 		| ((uint32_t)req[6] << 16) | ((uint32_t)req[7] << 24);
 	sweep_expired();
