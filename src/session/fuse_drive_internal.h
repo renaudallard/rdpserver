@@ -57,6 +57,8 @@
 #define FD_MAX_NODES         512
 #define FD_INFLIGHT_MAX      RDPDR_MAX_PENDING   /* 64 */
 #define FD_NAME_MAX          255
+/* A listed entry with no node yet; libfuse uses the same value. */
+#define FD_UNKNOWN_INO       0xffffffffu
 /* Directory listings cached between READDIR calls. */
 #define FD_DIRCACHE_SLOTS    4
 

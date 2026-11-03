@@ -1837,12 +1837,14 @@ fd_dispatch(struct fuse_drive *fd, const struct fd_request *req)
  * Decode one FILE_BOTH_DIR_INFORMATION record into the listing c, skipping
  * "." and "..".  *records counts every record seen, so a reply that yields
  * none ends the listing; *full is set once c reaches its bounds.  Returns
- * the bytes to advance, or 0 to stop.
+ * the bytes to advance, or 0 to stop.  Listed entries take no node: the
+ * kernel only FORGETs nodes it got from LOOKUP, so a node made here would
+ * never be freed.
  */
 static size_t
 fd_decode_one_dirent(struct fuse_drive *fd, const uint8_t *fdi, size_t avail,
-		uint32_t device_id, uint64_t parent, struct fd_dircache *c,
-		size_t *records, int *full)
+		uint64_t parent, struct fd_dircache *c, size_t *records,
+		int *full)
 {
 	uint32_t next, name_bytes, attrs;
 	size_t name_chars, i;
@@ -1868,9 +1870,8 @@ fd_decode_one_dirent(struct fuse_drive *fd, const uint8_t *fdi, size_t avail,
 	/* Skip the "." and ".." pseudo-entries; the kernel synthesizes them. */
 	if (name_chars == 0 || strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
 		goto advance;
-	child = fd_child_make(fd, parent, name, name_chars, device_id,
-	    (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0);
-	if (fd_dircache_add(c, child != NULL ? child->nodeid : 0,
+	child = fd_child_find(fd, parent, name, name_chars);
+	if (fd_dircache_add(c, child != NULL ? child->nodeid : FD_UNKNOWN_INO,
 	    name, name_chars, (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0) != 0) {
 		*full = 1;
 		return 0;
@@ -1940,7 +1941,7 @@ fd_complete_list(struct fuse_drive *fd, struct fd_inflight *f, uint32_t status,
 			avail = fscc_len;
 		while (avail >= FDI_FIXED && !full) {
 			size_t used = fd_decode_one_dirent(fd, fdi, avail,
-				n->device_id, nodeid, c, &records, &full);
+				nodeid, c, &records, &full);
 			if (used == 0 || used > avail)
 				break;
 			fdi += used;
