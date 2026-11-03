@@ -55,11 +55,6 @@
 #include "../common/utf16.h"
 #include "../sec/nla_crypto.h"
 
-#include <openssl/evp.h>
-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
-#include <openssl/provider.h>
-#endif
-
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -1201,53 +1196,41 @@ spawn_session(struct passwd *pw, struct rdp_auth *auth, uint16_t w,
 static void
 cache_nthash(const char *user, const char *pass)
 {
-	uint8_t pw16[512], hash[16];
+	uint8_t pw16[512], hash[RDP_MD4_LEN];
 	size_t pw16_len;
 	char line[512], tmp[512];
 	FILE *out, *in;
-	int found = 0;
+	int fd, found = 0, i;
 
+	/* One "user:hash" line per user, so a name that could break the
+	 * line format is never written. */
+	if (user[0] == '\0' || strpbrk(user, ":\r\n") != NULL)
+		return;
 	pw16_len = rdp_utf8_to_utf16le(pw16, sizeof pw16,
 		pass, strlen(pass));
-	if (pw16_len == (size_t)-1)
+	if (pw16_len == (size_t)-1 || pw16_len > sizeof pw16) {
+		explicit_bzero(pw16, sizeof pw16);
 		return;
-
-	{
-		EVP_MD_CTX *ctx = EVP_MD_CTX_new();
-		const EVP_MD *md4 = EVP_md4();
-		unsigned int hlen = 16;
-		if (ctx == NULL || md4 == NULL) {
-			EVP_MD_CTX_free(ctx);
-			explicit_bzero(pw16, sizeof pw16);
-			return;
-		}
-		if (EVP_DigestInit_ex(ctx, md4, NULL) != 1) {
-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
-			OSSL_PROVIDER_load(NULL, "legacy");
-			OSSL_PROVIDER_load(NULL, "default");
-			if (EVP_DigestInit_ex(ctx, md4, NULL) != 1) {
-				EVP_MD_CTX_free(ctx);
-				explicit_bzero(pw16, sizeof pw16);
-				return;
-			}
-#else
-			EVP_MD_CTX_free(ctx);
-			explicit_bzero(pw16, sizeof pw16);
-			return;
-#endif
-		}
-		EVP_DigestUpdate(ctx, pw16, pw16_len);
-		EVP_DigestFinal_ex(ctx, hash, &hlen);
-		EVP_MD_CTX_free(ctx);
 	}
+	i = rdp_md4(pw16, pw16_len, hash);
 	explicit_bzero(pw16, sizeof pw16);
+	if (i != 0)
+		return;
 
 	(void)mkdir(NTHASH_DIR, 0700);
-	snprintf(tmp, sizeof tmp, "%s.tmp", NTHASH_PATH);
-	out = fopen(tmp, "w");
-	if (out == NULL)
+	(void)snprintf(tmp, sizeof tmp, "%s.tmp", NTHASH_PATH);
+	/* Create the temp file fresh with mode 0600, so the hashes are
+	 * never readable by others, not even for the moment fopen("w")
+	 * plus fchmod used to leave open, and never through a symlink. */
+	(void)unlink(tmp);
+	fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+		0600);
+	if (fd < 0 || (out = fdopen(fd, "w")) == NULL) {
+		if (fd >= 0)
+			(void)close(fd);
+		explicit_bzero(hash, sizeof hash);
 		return;
-	(void)fchmod(fileno(out), 0600);
+	}
 
 	in = fopen(NTHASH_PATH, "r");
 	if (in != NULL) {
@@ -1258,24 +1241,33 @@ cache_nthash(const char *user, const char *pass)
 			    && strncmp(line, user, strlen(user)) == 0) {
 				found = 1;
 				fprintf(out, "%s:", user);
-				for (int i = 0; i < 16; i++)
+				for (i = 0; i < RDP_MD4_LEN; i++)
 					fprintf(out, "%02x", hash[i]);
 				fprintf(out, "\n");
 			} else {
 				fputs(line, out);
 			}
 		}
+		explicit_bzero(line, sizeof line);
 		fclose(in);
 	}
 	if (!found) {
 		fprintf(out, "%s:", user);
-		for (int i = 0; i < 16; i++)
+		for (i = 0; i < RDP_MD4_LEN; i++)
 			fprintf(out, "%02x", hash[i]);
 		fprintf(out, "\n");
 	}
-	fclose(out);
-	(void)rename(tmp, NTHASH_PATH);
 	explicit_bzero(hash, sizeof hash);
+	/* Only replace the live file with a complete copy. */
+	if (fflush(out) != 0 || ferror(out) != 0 || fsync(fileno(out)) != 0) {
+		(void)fclose(out);
+		(void)unlink(tmp);
+		return;
+	}
+	if (fclose(out) != 0 || rename(tmp, NTHASH_PATH) != 0) {
+		(void)unlink(tmp);
+		return;
+	}
 	rdp_info("cached NT hash for '%s'", user);
 }
 
