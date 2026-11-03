@@ -164,7 +164,7 @@ rdp_h264_force_idr(struct rdp_h264 *e)
  * planes size exactly and there is no overrun; src_w is only the
  * source row stride and may be larger or odd, so reads stay in bounds
  * (we copy ew <= src_w columns and eh <= src_h rows). */
-static void
+static int
 bgr_to_yuv420(struct rdp_h264 *e, const uint8_t *bgr, int src_w)
 {
 	int x, y;
@@ -177,7 +177,7 @@ bgr_to_yuv420(struct rdp_h264 *e, const uint8_t *bgr, int src_w)
 
 	if (e->yuv_buf == NULL) {
 		e->yuv_buf = malloc(ysz + uvsz * 2);
-		if (e->yuv_buf == NULL) return;
+		if (e->yuv_buf == NULL) return -1;
 	}
 	e->pic_in.img.plane[0] = e->yuv_buf;
 	Y = e->yuv_buf;
@@ -207,6 +207,7 @@ bgr_to_yuv420(struct rdp_h264 *e, const uint8_t *bgr, int src_w)
 			}
 		}
 	}
+	return 0;
 }
 
 /* Encode the already-populated e->pic_in and concatenate the resulting
@@ -240,10 +241,13 @@ encode_pic(struct rdp_h264 *e,
 	for (i = 0; i < i_nals; i++)
 		total += (size_t)nals[i].i_payload;
 	if (total > e->nal_cap) {
+		/* Swap in the larger buffer only once it exists, so a failed
+		 * allocation leaves the old buffer and its size consistent. */
+		uint8_t *nb = malloc(total);
+		if (nb == NULL) return -1;
 		free(e->nal_buf);
-		e->nal_buf = malloc(total);
+		e->nal_buf = nb;
 		e->nal_cap = total;
-		if (e->nal_buf == NULL) return -1;
 	}
 	{
 		size_t off = 0;
@@ -266,7 +270,7 @@ rdp_h264_encode(struct rdp_h264 *e,
 		int *is_keyframe)
 {
 	if (width < e->width || height < e->height) return -1;
-	bgr_to_yuv420(e, bgr, width);
+	if (bgr_to_yuv420(e, bgr, width) != 0) return -1;
 	return encode_pic(e, out_buf, out_len, is_keyframe);
 }
 
