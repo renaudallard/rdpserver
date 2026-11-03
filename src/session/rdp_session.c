@@ -815,7 +815,7 @@ run_ddx_mode(int w, int h)
 {
 	int sv[2];
 	int display_num;
-	pid_t xorg_pid, xterm_pid;
+	pid_t xorg_pid, xterm_pid = -1;
 	int shm_fd = -1;
 	uint8_t *fb = NULL;
 	uint16_t fb_w = 0, fb_h = 0;
