@@ -64,7 +64,8 @@ GREETER_LIB = src/greeter/libgreeter.a
 # Sessionmgr backend object is chosen by configure (writes SESSMGR_AUTH_OBJ
 # into config.mk based on whether PAM or bsd_auth was detected).
 SESSMGR_CLIENT_OBJ = src/sessionmgr/client.o
-SESSMGR_DAEMON_OBJ = src/sessionmgr/sessionmgr.o $(SESSMGR_AUTH_OBJ)
+SESSMGR_DAEMON_OBJ = src/sessionmgr/sessionmgr.o $(SESSMGR_AUTH_OBJ) \
+	src/sec/nla_crypto.o
 
 # Static virtual channels.
 CHANNELS_OBJS = src/channels/cliprdr.o src/channels/drdynvc.o src/channels/rdpsnd.o \

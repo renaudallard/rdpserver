@@ -112,8 +112,11 @@
  *   u8  reserved
  *   u16 reserved
  *   u32 logonId
- * RESUME reply (24 bytes): status(8) + arc_random(16). On success,
- *   the backend fd is returned via SCM_RIGHTS.
+ *   u8  securityVerifier[16]   from the client's ARC_CS_PRIVATE_PACKET
+ * RESUME reply: status byte (8 bytes).  sessmgr checks the verifier
+ *   against the suspended session's ArcRandomBits and only then hands
+ *   the backend fd over via SCM_RIGHTS; on a mismatch the session stays
+ *   suspended.
  */
 
 #define RDP_SESSMGR_SUSPEND_MAX     16

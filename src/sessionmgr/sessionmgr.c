@@ -51,7 +51,9 @@
 #include "auth.h"
 #include "protocol.h"
 #include "../common/rand.h"
+#include "../common/str.h"
 #include "../common/utf16.h"
+#include "../sec/nla_crypto.h"
 
 #include <openssl/evp.h>
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
@@ -1481,13 +1483,18 @@ handle_suspend(int cfd, const uint8_t *req, size_t req_len, int recvd_fd)
 
 static int resume_fail_count;
 
+/* Under Enhanced RDP Security (TLS or CredSSP) there is no client random;
+ * MS-RDPBCGR 5.5 computes the reconnect verifier over 32 zero bytes. */
+static const uint8_t arc_client_random[32];
+
 static int
 handle_resume(int cfd, const uint8_t *req, size_t req_len)
 {
+	uint8_t expected[RDP_MD5_LEN];
 	uint32_t logon_id;
-	int i;
+	int i, fd, rc;
 
-	if (req_len < 8) return reply(cfd, RDP_SESSMGR_FAIL, -1);
+	if (req_len < 24) return reply(cfd, RDP_SESSMGR_FAIL, -1);
 	if (resume_fail_count > 5) {
 		usleep(500000);
 		resume_fail_count = 0;
@@ -1496,57 +1503,41 @@ handle_resume(int cfd, const uint8_t *req, size_t req_len)
 		| ((uint32_t)req[6] << 16) | ((uint32_t)req[7] << 24);
 	sweep_expired();
 	for (i = 0; i < RDP_SESSMGR_SUSPEND_MAX; i++) {
-		if (suspended[i].in_use
-		    && suspended[i].logon_id == logon_id) {
-			int fd = suspended[i].be_fd;
-			suspended[i].in_use = 0;
-			if (!fd_alive(fd)) {
-				rdp_warn("RESUME: logonId %u fd dead",
-					(unsigned)logon_id);
-				(void)close(fd);
-				return reply(cfd, RDP_SESSMGR_FAIL, -1);
-			}
-			rdp_info("RESUME: logonId %u from slot %d",
-				(unsigned)logon_id, i);
-			{
-				uint8_t rbuf[24];
-				struct msghdr rmsg;
-				struct iovec riov;
-				char rcb[CMSG_SPACE(sizeof(int))];
-				struct cmsghdr *rc;
-				ssize_t rr;
-
-				memset(rbuf, 0, 8);
-				rbuf[0] = RDP_SESSMGR_OK;
-				memcpy(rbuf + 8,
-				    suspended[i].arc_random, 16);
-				memset(&rmsg, 0, sizeof rmsg);
-				riov.iov_base = rbuf;
-				riov.iov_len = sizeof rbuf;
-				rmsg.msg_iov = &riov;
-				rmsg.msg_iovlen = 1;
-				memset(rcb, 0, sizeof rcb);
-				rmsg.msg_control = rcb;
-				rmsg.msg_controllen = sizeof rcb;
-				rc = CMSG_FIRSTHDR(&rmsg);
-				rc->cmsg_level = SOL_SOCKET;
-				rc->cmsg_type = SCM_RIGHTS;
-				rc->cmsg_len = CMSG_LEN(sizeof(int));
-				memcpy(CMSG_DATA(rc), &fd, sizeof(int));
-				do { rr = sendmsg(cfd, &rmsg, 0); }
-				while (rr < 0 && errno == EINTR);
-				if (rr < 0) {
-					(void)close(fd);
-					return -1;
-				}
-			}
-			(void)close(fd);
-			return 0;
-		}
+		if (suspended[i].in_use && suspended[i].logon_id == logon_id)
+			break;
 	}
-	rdp_debug("RESUME: logonId %u not found", (unsigned)logon_id);
-	resume_fail_count++;
-	return reply(cfd, RDP_SESSMGR_FAIL, -1);
+	if (i == RDP_SESSMGR_SUSPEND_MAX) {
+		rdp_debug("RESUME: logonId %u not found", (unsigned)logon_id);
+		resume_fail_count++;
+		return reply(cfd, RDP_SESSMGR_FAIL, -1);
+	}
+	/* Check the client's SecurityVerifier, HMAC_MD5(ArcRandomBits,
+	 * ClientRandom), before touching the slot, so a wrong cookie leaves
+	 * the suspended session in place for its owner. */
+	if (rdp_hmac_md5(suspended[i].arc_random,
+	    sizeof suspended[i].arc_random, arc_client_random,
+	    sizeof arc_client_random, expected) != 0
+	    || rdp_consttime_eq(expected, req + 8, sizeof expected) != 0) {
+		rdp_warn("RESUME: logonId %u verifier mismatch",
+			(unsigned)logon_id);
+		explicit_bzero(expected, sizeof expected);
+		resume_fail_count++;
+		return reply(cfd, RDP_SESSMGR_FAIL, -1);
+	}
+	explicit_bzero(expected, sizeof expected);
+	fd = suspended[i].be_fd;
+	suspended[i].in_use = 0;
+	explicit_bzero(suspended[i].arc_random,
+		sizeof suspended[i].arc_random);
+	if (!fd_alive(fd)) {
+		rdp_warn("RESUME: logonId %u fd dead", (unsigned)logon_id);
+		(void)close(fd);
+		return reply(cfd, RDP_SESSMGR_FAIL, -1);
+	}
+	rdp_info("RESUME: logonId %u from slot %d", (unsigned)logon_id, i);
+	rc = reply(cfd, RDP_SESSMGR_OK, fd);
+	(void)close(fd);
+	return rc;
 }
 
 static void

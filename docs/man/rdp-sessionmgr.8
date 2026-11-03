@@ -72,10 +72,17 @@ request carrying the backend file descriptor via
 .Dv SCM_RIGHTS .
 .Nm
 stores the descriptor in a suspend slot tagged with the session's
-logon ID.  When a new worker presents a
+logon ID and the random bits of the auto-reconnect cookie sent to the
+client.
+When a new worker presents a
 .Sy RESUME
-request with a matching logon ID, the stored descriptor is returned
-so the session continues without restarting.
+request, it carries the logon ID and the security verifier from the
+client's reconnect cookie.
+.Nm
+recomputes the verifier as an HMAC-MD5 of the stored random bits and
+returns the stored descriptor only when it matches, so the session
+continues without restarting.
+A wrong verifier leaves the session suspended for its owner.
 .Pp
 If the worker process dies before issuing
 .Sy SUSPEND ,

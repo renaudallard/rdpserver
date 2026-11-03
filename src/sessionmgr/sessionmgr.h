@@ -79,10 +79,10 @@ int rdp_sessmgr_suspend(const char *sock_path,
 		uint32_t logon_id, const uint8_t arc_random[16],
 		int be_fd);
 
-/* RESUME: new worker presents a logonId; sessmgr returns the
- * matching backend fd if the session is still alive. */
+/* RESUME: new worker presents the client's logonId and securityVerifier;
+ * sessmgr checks the verifier and returns the matching backend fd if
+ * the session is still alive. */
 int rdp_sessmgr_resume(const char *sock_path,
-		uint32_t logon_id, int *fd_out,
-		uint8_t arc_random_out[16]);
+		uint32_t logon_id, const uint8_t verifier[16], int *fd_out);
 
 #endif /* RDP_SESSIONMGR_H */

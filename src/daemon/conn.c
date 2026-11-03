@@ -4505,22 +4505,13 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 	if (client_info.have_arc
 	    && cfg->sessmgr_sock != NULL && cfg->sessmgr_sock[0] != '\0') {
 		int be_fd = -1;
-		uint8_t stored_arc[16];
 		rdp_info("conn[%s]: reconnect attempt logonId=%u",
 			peer, (unsigned)client_info.arc_logon_id);
+		/* sessmgr verifies the cookie and only hands the session
+		 * over when it matches. */
 		if (rdp_sessmgr_resume(cfg->sessmgr_sock,
-			client_info.arc_logon_id, &be_fd, stored_arc) == 0) {
-			uint8_t expected_verifier[16];
-			rdp_hmac_md5(stored_arc, 16,
-				client_info.arc_security_verifier, 16,
-				expected_verifier);
-			if (rdp_consttime_eq(expected_verifier,
-			    client_info.arc_security_verifier, 16) != 0) {
-				rdp_warn("conn[%s]: ARC verifier mismatch",
-					peer);
-				(void)close(be_fd);
-				goto done;
-			}
+			client_info.arc_logon_id,
+			client_info.arc_security_verifier, &be_fd) == 0) {
 			rdp_info("conn[%s]: resumed backend fd %d",
 				peer, be_fd);
 			/* Generate a fresh ARC cookie for the next
