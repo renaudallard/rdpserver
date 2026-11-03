@@ -1048,6 +1048,49 @@ out:
 	free(buf);
 }
 
+/* With clip owning CLIPBOARD (after an RDP -> X case), an ICCCM TIMESTAMP
+ * conversion must succeed: the reply has to name the property it set. */
+static void
+test_timestamp(const char *name)
+{
+	long deadline = now_ms() + 5000;
+	pid_t pid;
+	int st = 0, done = 0;
+
+	(void)printf("%s: TIMESTAMP conversion\n", name);
+	pid = fork();
+	if (pid < 0) {
+		FAILF("fork xclip: %s", strerror(errno));
+		return;
+	}
+	if (pid == 0) {
+		int dn = open("/dev/null", O_WRONLY);
+		if (dn >= 0) {
+			(void)dup2(dn, STDOUT_FILENO);
+			(void)dup2(dn, STDERR_FILENO);
+		}
+		execl("/usr/bin/xclip", "xclip", "-display", g_display,
+			"-selection", "clipboard", "-t", "TIMESTAMP", "-o",
+			(char *)NULL);
+		_exit(127);
+	}
+	while (!done && now_ms() < deadline) {
+		pump_once();
+		done = waitpid(pid, &st, WNOHANG) == pid;
+		if (!done)
+			(void)poll(NULL, 0, 20);
+	}
+	if (!done) {
+		(void)kill(pid, SIGTERM);
+		(void)waitpid(pid, &st, 0);
+		FAILF("xclip -t TIMESTAMP did not finish");
+	} else if (!WIFEXITED(st) || WEXITSTATUS(st) != 0)
+		FAILF("TIMESTAMP conversion refused (xclip status %d)",
+		    WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+	else
+		(void)printf("  TIMESTAMP answered ok\n");
+}
+
 /* X -> RDP via a forced INCR transfer.  Uses our own INCR selection owner
  * (xclip will not use INCR on this server even at 1 MiB) so the INCR reader
  * in clip_x11.c is exercised across several chunks.  `data` uses a position
@@ -2978,6 +3021,7 @@ main(void)
 	/* C: RDP -> X, small. */
 	test_rdp_to_x("C", (const uint8_t *)"from rdp side",
 		strlen("from rdp side"));
+	test_timestamp("C2");
 
 	/* D: RDP -> X, large (~1 MiB). */
 	test_rdp_to_x("D", big, BIG_LEN);

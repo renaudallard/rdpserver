@@ -752,9 +752,8 @@ put_property_chunked(struct rdp_clip *c, Window win, Atom prop, Atom type,
 }
 
 static void
-answer_selection_request(struct rdp_clip *c, Window requestor,
-		Atom property, Atom selection, Atom target, Time t,
-		const void *data, size_t len)
+notify_selection(struct rdp_clip *c, Window requestor, Atom property,
+		Atom selection, Atom target, Time t)
 {
 	XEvent ev;
 	memset(&ev, 0, sizeof ev);
@@ -763,15 +762,23 @@ answer_selection_request(struct rdp_clip *c, Window requestor,
 	ev.xselection.selection = selection;
 	ev.xselection.target    = target;
 	ev.xselection.time      = t;
+	ev.xselection.property  = property;
+	XSendEvent(c->dpy, requestor, False, NoEventMask, &ev);
+	XFlush(c->dpy);
+}
+
+static void
+answer_selection_request(struct rdp_clip *c, Window requestor,
+		Atom property, Atom selection, Atom target, Time t,
+		const void *data, size_t len)
+{
 	if (data != NULL && len > 0) {
 		put_property_chunked(c, requestor, property, target,
 			(const unsigned char *)data, len);
-		ev.xselection.property = property;
+		notify_selection(c, requestor, property, selection, target, t);
 	} else {
-		ev.xselection.property = None;
+		notify_selection(c, requestor, None, selection, target, t);
 	}
-	XSendEvent(c->dpy, requestor, False, NoEventMask, &ev);
-	XFlush(c->dpy);
 }
 
 /* --- RDP -> X file paste: download client files into a temp dir --- */
@@ -1340,9 +1347,10 @@ on_selection_request(struct rdp_clip *c, XEvent *ev)
 		XChangeProperty(c->dpy, re->requestor, re->property,
 			XA_INTEGER, 32, PropModeReplace,
 			(unsigned char *)&tt, 1);
-		answer_selection_request(c, re->requestor,
-			re->property, re->selection, re->target,
-			re->time, NULL, 0);
+		/* The property holds the answer; name it in the notify, or
+		 * the requestor reads the conversion as refused. */
+		notify_selection(c, re->requestor, re->property,
+			re->selection, re->target, re->time);
 		return;
 	}
 	fmt = fmt_for_target(c, re->target);
