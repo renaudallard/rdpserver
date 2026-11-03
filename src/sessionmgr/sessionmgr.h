@@ -62,15 +62,6 @@ int rdp_sessmgr_open_auth(struct rdp_sessmgr *out,
 		const char *user, const char *pass,
 		const char *client_ip);
 
-int rdp_sessmgr_open_nla(struct rdp_sessmgr *out,
-		const char *sock_path, const char *user,
-		const uint8_t nonce[16]);
-
-/* Register a nonce for a future NLA_AUTH request.  Called by the
- * worker that performed NLA authentication via password. */
-int rdp_sessmgr_nla_store(const char *sock_path,
-		const char *user, const uint8_t nonce[16]);
-
 /* SPAWN: ask sessmgr to fork+setuid+exec rdp-session as the
  * authenticated user.  tz is the client's POSIX TZ string (may be NULL
  * or empty for the server's zone).  Returns the backend socket fd (one

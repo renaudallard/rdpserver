@@ -310,7 +310,7 @@ main(int argc, char *argv[])
 				extern void rdp_nla_crypto_init(void);
 				rdp_nla_crypto_init();
 			}
-			if (pledge("stdio inet unix rpath wpath cpath sendfd recvfd", NULL) != 0)
+			if (pledge("stdio inet unix rpath sendfd recvfd", NULL) != 0)
 				rdp_warn("pledge worker: %s", strerror(errno));
 			rdp_sandbox_worker();
 			rdp_conn_run(cfd, &ccfg, peer);

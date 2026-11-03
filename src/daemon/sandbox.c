@@ -93,8 +93,6 @@ rdp_sandbox_worker(void)
 		SC_ALLOW(__NR_fstat),
 #endif
 		SC_ALLOW(__NR_openat),
-		SC_ALLOW(__NR_unlinkat),
-		SC_ALLOW(__NR_renameat),
 		SC_ALLOW(__NR_getpid),
 		SC_ALLOW(__NR_gettid),
 		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & 0x7FFF)),

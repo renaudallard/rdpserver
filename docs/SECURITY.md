@@ -29,7 +29,7 @@ network-facing surface separate from the credential-handling
 surface.  On OpenBSD, each binary calls `pledge(2)` after init to
 drop unneeded promises:
 
-- `rdpd` worker: `stdio inet unix`
+- `rdpd` worker: `stdio inet unix rpath sendfd recvfd`
 - `rdp-sessionmgr`: `stdio rpath wpath cpath unix proc exec id getpw dpath fattr`
 - `rdp-session`: `stdio rpath wpath cpath unix proc`
 

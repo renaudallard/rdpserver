@@ -4532,33 +4532,6 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 			if (rdp_sessmgr_spawn(&sm, desktop_w, desktop_h,
 			    client_lcid, client_info.timezone,
 			    &be_fd) == 0 && be_fd >= 0) {
-				/* Write a .tok file with a nonce so the next
-				 * SSL connection can auto-login via NLA_AUTH. */
-				{
-					uint8_t nonce[16];
-					int tokfd;
-					rdp_rand_bytes(nonce, sizeof nonce);
-					tokfd = open(NTHASH_PATH ".tok",
-						O_WRONLY | O_CREAT | O_EXCL, 0600);
-					if (tokfd >= 0) {
-						char tokbuf[512];
-						int toklen;
-						toklen = snprintf(tokbuf, sizeof tokbuf,
-							"%s\n", nla_user);
-						for (int i = 0; i < 16; i++)
-							toklen += snprintf(tokbuf + toklen,
-								sizeof tokbuf - toklen,
-								"%02x", nonce[i]);
-						toklen += snprintf(tokbuf + toklen,
-							sizeof tokbuf - toklen, "\n");
-						(void)rdp_write_full(tokfd, tokbuf, toklen);
-						(void)close(tokfd);
-						(void)rdp_sessmgr_nla_store(
-							cfg->sessmgr_sock,
-							nla_user, nonce);
-					}
-					explicit_bzero(nonce, sizeof nonce);
-				}
 				explicit_bzero(nla_pass, sizeof nla_pass);
 				rdp_sessmgr_close(&sm);
 				rdp_info("conn[%s]: backend fd %d", peer, be_fd);
@@ -4590,85 +4563,6 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 		send_error_info(t, user_id, io_channel,
 			ERRINFO_SERVER_DENIED_CONNECTION);
 		goto done;
-	}
-
-	/* Token-based auto-login: NLA verified the user on a prior
-	 * connection. Open and unlink atomically to prevent a
-	 * second worker from reading the same token. */
-	if (!use_nla && cfg->sessmgr_sock != NULL
-	    && cfg->sessmgr_sock[0] != '\0') {
-		char tok_user[256] = {0};
-		uint8_t tok_nonce[16] = {0};
-		int _tfd = open(NTHASH_PATH ".tok", O_RDONLY);
-		if (_tfd >= 0) {
-			char tokbuf[512] = {0};
-			ssize_t _tr;
-			(void)unlink(NTHASH_PATH ".tok");
-			_tr = read(_tfd, tokbuf, sizeof tokbuf - 1);
-			(void)close(_tfd);
-			if (_tr > 0) {
-				char *nl, *nonce_line;
-				tokbuf[_tr] = '\0';
-				nl = strchr(tokbuf, '\n');
-				if (nl != NULL) {
-					*nl = '\0';
-					(void)strlcpy(tok_user, tokbuf,
-						sizeof tok_user);
-					nonce_line = nl + 1;
-					/* Parse hex nonce */
-					for (int i = 0; i < 16
-					    && nonce_line[i * 2]
-					    && nonce_line[i * 2 + 1]; i++) {
-						unsigned int b;
-						if (sscanf(nonce_line + i * 2,
-						    "%2x", &b) == 1)
-							tok_nonce[i] = (uint8_t)b;
-					}
-				}
-			}
-			if (tok_user[0] != '\0') {
-				struct rdp_sessmgr sm = { -1, {0} };
-				rdp_info("conn[%s]: NLA-verified login as %s",
-					peer, tok_user);
-				if (rdp_sessmgr_open_nla(&sm,
-				    cfg->sessmgr_sock, tok_user,
-				    tok_nonce) == 0) {
-					int be_fd = -1;
-					if (rdp_sessmgr_spawn(&sm,
-					    desktop_w, desktop_h,
-					    client_lcid, client_info.timezone,
-					    &be_fd) == 0
-					    && be_fd >= 0) {
-						rdp_sessmgr_close(&sm);
-						rdp_info("conn[%s]: backend fd %d",
-							peer, be_fd);
-						{
-							uint8_t li[1200];
-							ssize_t ln = rdp_pdu_build_save_session_logon_v2(
-								li, sizeof li, user_id,
-								RDP_CONN_SHARE_ID,
-								"", tok_user, 0);
-							if (ln > 0)
-								(void)send_send_data(t,
-									user_id, io_channel,
-									li, (size_t)ln);
-						}
-						run_proxy(t, be_fd, &clip,
-							&dynvc, &snd, &devr,
-							user_id, io_channel,
-							desktop_w, desktop_h,
-							client_max_request,
-							client_color_ptr,
-							client_large_ptr,
-							client_pointer_cache_size,
-							peer);
-						(void)close(be_fd);
-						goto send_disconnect;
-					}
-					rdp_sessmgr_close(&sm);
-				}
-			}
-		}
 	}
 
 	/* Auto-login: if the client provided credentials in Client Info,

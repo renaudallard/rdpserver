@@ -62,7 +62,7 @@ sends fast-path bitmap updates).
 - **RemoteApp / seamless windows (MS-RDPERP / RAIL)** — when a client connects in RemoteApp mode (xfreerdp `/app:...`, mstsc `remoteapplicationmode:i:1`) it sets the `INFO_RAIL` flag in the Client Info PDU, and the server advertises the RAIL and WINDOW capability sets, opens the `rail` static virtual channel, completes the `TS_RAIL_ORDER` handshake, answers the client status, and acknowledges Execute requests with an Execute Result.  Each session window is then reported to the client as a Window Information Order (new, size/position update, delete) so the client paints it as a borderless seamless window on its own desktop instead of a full remote desktop.  On the Wayland backend (`rdp-session -W`) each xdg_shell toplevel keeps its natural size and a cascade position and is tracked as its own RAIL window; on the Xvfb backend the session is presented as a single whole-desktop seamless window.  The window-order byte layout is validated against the FreeRDP decoder by the `rail` regress test.
 - **Clean disconnect** — properly framed MCS Disconnect Provider Ultimatum (X.224 DT + TPKT, no Send-Data nesting), Shutdown Request answered with Shutdown Denied so clients send a graceful MCS Disconnect, `SO_KEEPALIVE` + `TCP_KEEPIDLE/INTVL/CNT` on accepted sockets so half-open TCP is detected within ~2 minutes.
 - **Hardened build** — `-Werror -Wall -Wextra -Wshadow -Wstrict-prototypes -Wpointer-arith -Wcast-qual -Wundef -Wformat=2 -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIE -pie -Wl,-z,relro,-z,now,-z,noexecstack` by default.  `./configure --enable-sanitizers` swaps in `-fsanitize=address,undefined`.  An in-tree fuzzer (`make fuzz`) drives 10 parsers with random bytes under ASan + UBSan, zero crashes, zero UB; the original nine saw 2.1 million iterations across three seeds, and the GFX caps-advertise parser four million more across four seeds.
-- **OpenBSD `pledge(2)`** — `rdpd` worker pledges `stdio inet unix rpath wpath cpath sendfd recvfd`; `rdp-sessionmgr` pledges `stdio rpath wpath cpath unix sendfd recvfd proc exec id getpw dpath fattr`; `rdp-session` pledges `stdio rpath wpath cpath unix proc`.  On non-OpenBSD the calls compile to a no-op via the `compat.h` shim.  Linux seccomp-bpf sandbox is wired and allowlists the required syscalls.
+- **OpenBSD `pledge(2)`** — `rdpd` worker pledges `stdio inet unix rpath sendfd recvfd`; `rdp-sessionmgr` pledges `stdio rpath wpath cpath unix sendfd recvfd proc exec id getpw dpath fattr`; `rdp-session` pledges `stdio rpath wpath cpath unix proc`.  On non-OpenBSD the calls compile to a no-op via the `compat.h` shim.  Linux seccomp-bpf sandbox is wired and allowlists the required syscalls.
 - **One configure script, two OSes** — hand-rolled POSIX `sh` (no autotools, no CMake).  Probes for libtls or OpenSSL, PAM or bsd_auth, getrandom or arc4random, epoll or kqueue, pledge / unveil / capsicum / seccomp, X11 dev libs, `Xvfb` path.  Builds clean under both bmake and GNU make.
 
 ## What works today vs not yet
@@ -284,13 +284,13 @@ See [`docs/SECURITY.md`](./docs/SECURITY.md) for the trust model,
 process layout, `pledge` promise sets, and the explanation of why NLA
 is currently a framework-only feature.
 
-The NLA token file (`.tok`) is opened with `O_EXCL` to prevent
-creation races, unlinked immediately after open to prevent a second
-worker from reading the same token, and protected by a random 16-byte
-nonce that must be presented with the `NLA_AUTH` session manager
-command. The NTLM challenge timestamp is written in little-endian
-byte order for correctness on big-endian hosts. The seccomp-bpf
-sandbox allowlists `unlinkat` and `renameat` for token file cleanup.
+A session is only ever spawned for the credentials of the connection
+that presented them: an NLA login spawns directly from the
+CredSSP-delivered credentials, and nothing is carried over to a later
+connection. The NTLM challenge timestamp is written in little-endian
+byte order for correctness on big-endian hosts. The worker's
+seccomp-bpf sandbox and `pledge` promises grant no filesystem write,
+create or unlink access.
 AV pair construction and sealed-message buffers are bounds-checked
 to prevent stack overflows.
 
