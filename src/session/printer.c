@@ -411,7 +411,7 @@ forward_job(struct rdp_printer *p, uint32_t device_id, const uint8_t *spool,
 static int
 peer_uid(int fd, uid_t *uid)
 {
-#if defined(SO_PEERCRED)
+#if defined(__linux__) && defined(SO_PEERCRED)
 	struct ucred uc;
 	socklen_t l = sizeof uc;
 	if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &uc, &l) != 0)
