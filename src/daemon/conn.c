@@ -2448,6 +2448,77 @@ send_error_info(struct rdp_tls *t, uint16_t user_id, uint16_t io_channel,
 		(void)send_send_data(t, user_id, io_channel, ei, (size_t)en);
 }
 
+/* Read the client's half of connection finalization (Synchronize, two
+ * Controls, the optional Persistent Key List, Font List) and answer the
+ * Font List with a Font Map.  Runs once, right after activation, so the
+ * greeter, which reads input before any session exists, never swallows
+ * these PDUs and the proxy loop never mistakes input for them. */
+static void
+read_client_finalization(struct rdp_tls *t, uint16_t user_id,
+		uint16_t io_channel, const char *peer)
+{
+	uint8_t fbuf[0x4000];
+	int i;
+
+	for (i = 0; i < 10; i++) {
+		int fk = 0;
+		ssize_t fr = read_one_rdp_pdu(t, fbuf, sizeof fbuf, &fk);
+		if (fr <= 0) break;
+		if (fk == 1) {
+			const uint8_t *mp;
+			size_t ml;
+			uint16_t fuid, fcid;
+			const uint8_t *fp;
+			size_t fl;
+			if (strip_tpkt_x224(fbuf, (size_t)fr,
+			    &mp, &ml) == 0
+			    && mp[0] == RDP_MCS_TYPE_SEND_DATA_REQ
+			    && rdp_mcs_parse_send_data_request(
+				mp, ml, &fuid, &fcid, &fp, &fl) >= 0
+			    && fl >= 18) {
+				uint16_t pt = (uint16_t)(fp[2]
+					| (fp[3] << 8));
+				if ((pt & 0x0f) == RDP_PDU_TYPE_DATA
+				    && fp[14] ==
+				    RDP_PDU2_BITMAPCACHE_PERSISTENT_LIST
+				    && fl > 18) {
+					/* The client lists the cached tiles it
+					 * already holds on disk from a prior
+					 * session; load them so they are recalled
+					 * with MemBlt instead of re-sent.  This PDU
+					 * arrives in the finalization stream, before
+					 * the Font List, so it is ingested here. */
+					size_t nk = 0; int pf = 0, pl = 0;
+					(void)rdp_bmpcache_parse_persistent_list(
+						fp + 18, fl - 18, NULL, 0,
+						&nk, &pf, &pl);
+					if (g_bmpcache != NULL)
+						(void)rdp_bmpcache_ingest_persistent(
+							g_bmpcache, fp + 18, fl - 18);
+					rdp_debug("conn[%s]: persistent key list: "
+						"%zu keys (first=%d last=%d)",
+						peer, nk, pf, pl);
+				}
+				if ((pt & 0x0f) == RDP_PDU_TYPE_DATA
+				    && fp[14] == RDP_PDU2_FONTLIST) {
+					ssize_t fn =
+						rdp_pdu_build_font_map(
+						fbuf, sizeof fbuf,
+						user_id,
+						RDP_CONN_SHARE_ID);
+					if (fn > 0)
+						(void)send_send_data(t,
+							user_id,
+							io_channel,
+							fbuf,
+							(size_t)fn);
+					break;
+				}
+			}
+		}
+	}
+}
+
 static void
 run_proxy(struct rdp_tls *t, int be_fd,
 		struct clip_state *cs, struct dynvc_state *dv,
@@ -2500,70 +2571,6 @@ run_proxy(struct rdp_tls *t, int be_fd,
 	gfx.frame_id = 0;
 	gfx.desktop_w = desktop_w;
 	gfx.desktop_h = desktop_h;
-
-	/* Read client finalization (Sync, Control, Control, FontList)
-	 * before initializing channels. */
-	{
-		uint8_t fbuf[0x4000];
-		int _fi;
-		for (_fi = 0; _fi < 10; _fi++) {
-			int fk = 0;
-			ssize_t fr = read_one_rdp_pdu(t, fbuf, sizeof fbuf, &fk);
-			if (fr <= 0) break;
-			if (fk == 1) {
-				const uint8_t *mp;
-				size_t ml;
-				uint16_t fuid, fcid;
-				const uint8_t *fp;
-				size_t fl;
-				if (strip_tpkt_x224(fbuf, (size_t)fr,
-				    &mp, &ml) == 0
-				    && mp[0] == RDP_MCS_TYPE_SEND_DATA_REQ
-				    && rdp_mcs_parse_send_data_request(
-					mp, ml, &fuid, &fcid, &fp, &fl) >= 0
-				    && fl >= 18) {
-					uint16_t pt = (uint16_t)(fp[2]
-						| (fp[3] << 8));
-					if ((pt & 0x0f) == RDP_PDU_TYPE_DATA
-					    && fp[14] ==
-					    RDP_PDU2_BITMAPCACHE_PERSISTENT_LIST
-					    && fl > 18) {
-						/* The client lists the cached tiles it
-						 * already holds on disk from a prior
-						 * session; load them so they are recalled
-						 * with MemBlt instead of re-sent.  This PDU
-						 * arrives in the finalization stream, before
-						 * the Font List, so it is ingested here. */
-						size_t nk = 0; int pf = 0, pl = 0;
-						(void)rdp_bmpcache_parse_persistent_list(
-							fp + 18, fl - 18, NULL, 0,
-							&nk, &pf, &pl);
-						if (g_bmpcache != NULL)
-							(void)rdp_bmpcache_ingest_persistent(
-								g_bmpcache, fp + 18, fl - 18);
-						rdp_debug("conn[%s]: persistent key list: "
-							"%zu keys (first=%d last=%d)",
-							peer, nk, pf, pl);
-					}
-					if ((pt & 0x0f) == RDP_PDU_TYPE_DATA
-					    && fp[14] == RDP_PDU2_FONTLIST) {
-						ssize_t fn =
-							rdp_pdu_build_font_map(
-							fbuf, sizeof fbuf,
-							user_id,
-							RDP_CONN_SHARE_ID);
-						if (fn > 0)
-							(void)send_send_data(t,
-								user_id,
-								io_channel,
-								fbuf,
-								(size_t)fn);
-						break;
-					}
-				}
-			}
-		}
-	}
 
 	if (cs->enabled) {
 		if (clip_send_monitor_ready_and_caps(t, cs) != 0)
@@ -4484,6 +4491,7 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 	}
 
 	rdp_info("conn[%s]: activated %ux%u", peer, desktop_w, desktop_h);
+	read_client_finalization(t, user_id, io_channel, peer);
 
 	/* 10. Phase B/D: send a Synchronize + System Pointer, then hand
 	 * the connection to the greeter for the login dialog.  If the
