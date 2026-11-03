@@ -101,6 +101,10 @@ rev2_cap(uint8_t *p)
 	p[0] = RDP_CAP_BITMAPCACHE_REV2 & 0xff;
 	p[1] = RDP_CAP_BITMAPCACHE_REV2 >> 8;
 	p[2] = 40; p[3] = 0;
+	p[4 + 3] = 2;                          /* NumCellCaches */
+	p[8] = 0x58; p[9] = 0x02;              /* cell 0: 600 entries */
+	p[11] = 0x80;                          /*   persistent bit */
+	p[12] = 50;                            /* cell 1: 50 entries */
 	return 40;
 }
 
@@ -134,8 +138,14 @@ test_parse_confirm_active(void)
 	cl += rev2_cap(caps + cl);
 	n = build_confirm(buf, caps, cl, 2);
 	ok = -1;
-	if (rdp_capset_parse_confirm_active(buf, n, NULL, NULL, NULL, NULL,
-	    NULL, &ok) != 0) FAIL("parse memblt+rev2");
+	{
+		uint32_t cells[RDP_CAPSET_CACHE_CELLS];
+		if (rdp_capset_parse_confirm_active(buf, n, NULL, NULL, NULL,
+		    NULL, NULL, &ok, cells) != 0) FAIL("parse memblt+rev2");
+		if (cells[0] != 600 || cells[1] != 50 || cells[2] != 0)
+			FAIL("rev2 cells %u/%u/%u", cells[0], cells[1],
+			    cells[2]);
+	}
 	if (ok != 1) FAIL("memblt+rev2 -> ok=%d", ok);
 
 	/* MemBlt but no Rev2 cap (cache disabled) -> orders must not be used. */
@@ -143,7 +153,7 @@ test_parse_confirm_active(void)
 	n = build_confirm(buf, caps, cl, 1);
 	ok = -1;
 	if (rdp_capset_parse_confirm_active(buf, n, NULL, NULL, NULL, NULL,
-	    NULL, &ok) != 0) FAIL("parse memblt-only");
+	    NULL, &ok, NULL) != 0) FAIL("parse memblt-only");
 	if (ok != 0) FAIL("memblt-only -> ok=%d", ok);
 
 	/* Rev2 cap but MemBlt slot zero -> orders must not be used. */
@@ -152,7 +162,7 @@ test_parse_confirm_active(void)
 	n = build_confirm(buf, caps, cl, 2);
 	ok = -1;
 	if (rdp_capset_parse_confirm_active(buf, n, NULL, NULL, NULL, NULL,
-	    NULL, &ok) != 0) FAIL("parse rev2-no-memblt");
+	    NULL, &ok, NULL) != 0) FAIL("parse rev2-no-memblt");
 	if (ok != 0) FAIL("rev2-no-memblt -> ok=%d", ok);
 }
 

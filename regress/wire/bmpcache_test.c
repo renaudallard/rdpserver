@@ -67,6 +67,7 @@ build(uint8_t *out, const uint64_t *keys, uint16_t count, uint8_t mask)
 }
 
 static void test_manager(void);
+static void test_fit(void);
 
 int
 main(void)
@@ -119,6 +120,7 @@ main(void)
 	if (n != 0 || !first || last) FAIL("empty fields");
 
 	test_manager();
+	test_fit();
 	(void)printf("bmpcache_test: all ok\n");
 	return 0;
 }
@@ -210,5 +212,31 @@ test_manager(void)
 		if (rdp_bmpcache_lookup(c, 0x3000000ULL, &xid, &xidx) != 0)
 			FAIL("full miss");
 	}
+	rdp_bmpcache_destroy(c);
+}
+
+/* Cells fitted to a client that allocated 50, 0 and 1000 entries: every slot
+ * handed out stays inside what the client has, cell 1 is never used, and a
+ * client with no cells leaves nothing usable. */
+static void
+test_fit(void)
+{
+	struct rdp_bmpcache *c = rdp_bmpcache_create();
+	const uint32_t cells[RDP_BMPCACHE_NUM_CELLS] = { 50, 0, 1000 };
+	const uint32_t none[RDP_BMPCACHE_NUM_CELLS] = { 0, 0, 0 };
+	uint8_t id;
+	uint16_t idx;
+	uint64_t k;
+
+	if (c == NULL) FAIL("create");
+	if (rdp_bmpcache_fit(c, cells) != 50 + 336)
+		FAIL("fit total");
+	for (k = 1; k <= 2000; k++) {
+		(void)rdp_bmpcache_lookup(c, k, &id, &idx);
+		if (id == 1 || id > 2) FAIL("slot in cell %u", id);
+		if (id == 0 && idx >= 50) FAIL("cell 0 index %u", idx);
+		if (id == 2 && idx >= 336) FAIL("cell 2 index %u", idx);
+	}
+	if (rdp_bmpcache_fit(c, none) != 0) FAIL("fit none");
 	rdp_bmpcache_destroy(c);
 }

@@ -61,6 +61,13 @@ int rdp_bmpcache_parse_persistent_list(const uint8_t *p, size_t len,
 struct rdp_bmpcache;
 
 struct rdp_bmpcache *rdp_bmpcache_create(void);
+
+/* Shrink the cells to the entry counts the client advertised in its Bitmap
+ * Cache Rev2 cap, so no cacheIndex we send is outside a cell it allocated.
+ * Empties the cache; call before any lookup or ingest.  Returns the slots
+ * left, 0 meaning the cache cannot be used. */
+size_t rdp_bmpcache_fit(struct rdp_bmpcache *c,
+    const uint32_t client_cells[RDP_BMPCACHE_NUM_CELLS]);
 void rdp_bmpcache_destroy(struct rdp_bmpcache *c);
 
 /* The deterministic 64-bit cache key of a tile's raw pixel bytes. */

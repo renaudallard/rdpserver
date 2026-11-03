@@ -118,9 +118,13 @@ ssize_t rdp_capset_build_demand_active(uint8_t *out, size_t cap,
  * be NULL.  max_request_size_out, color_ptr_out, large_ptr_flags_out,
  * pointer_cache_size_out and bitmap_cache_ok_out default to 0 when absent.
  * Returns 0 on success. */
+/* Bitmap cache cells whose sizes the Confirm Active parse reports. */
+#define RDP_CAPSET_CACHE_CELLS 3
+
 int rdp_capset_parse_confirm_active(const uint8_t *p, size_t len,
 		uint16_t *bpp_out, uint32_t *max_request_size_out,
 		uint16_t *color_ptr_out, uint16_t *large_ptr_flags_out,
-		uint16_t *pointer_cache_size_out, int *bitmap_cache_ok_out);
+		uint16_t *pointer_cache_size_out, int *bitmap_cache_ok_out,
+		uint32_t cache_cells_out[RDP_CAPSET_CACHE_CELLS]);
 
 #endif /* RDP_CAPSET_H */

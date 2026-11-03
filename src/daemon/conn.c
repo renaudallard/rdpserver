@@ -117,6 +117,10 @@ ld32_safe(const uint8_t *p)
  * desktopWidth/Height range; 8192 matches the DisplayControl resize limit
  * and the largest session rdp-sessionmgr will run, and bounds the greeter
  * framebuffer an unauthenticated client can make us allocate. */
+#if RDP_CAPSET_CACHE_CELLS != RDP_BMPCACHE_NUM_CELLS
+#error "capset and bmpcache disagree on the number of cache cells"
+#endif
+
 #define RDP_DESKTOP_MIN    200
 #define RDP_DESKTOP_MAX    8192
 #define NTHASH_PATH        "/etc/rdpserver/nthashes"
@@ -4519,10 +4523,17 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 		if (payload_len > 6) {
 			uint32_t mrq = 0;
 			uint16_t cptr = 0, lptr = 0, pcache = 0, cbpp = 24;
+			uint32_t cells[RDP_CAPSET_CACHE_CELLS];
 			int cache_ok = 0;
 			if (rdp_capset_parse_confirm_active(payload + 6,
 				payload_len - 6, &cbpp, &mrq, &cptr, &lptr,
-				&pcache, &cache_ok) == 0) {
+				&pcache, &cache_ok, cells) == 0) {
+				/* Keep every cacheIndex inside the cells the
+				 * client allocated; no room at all means no
+				 * orders. */
+				if (cache_ok && g_bmpcache != NULL
+				    && rdp_bmpcache_fit(g_bmpcache, cells) == 0)
+					cache_ok = 0;
 				client_max_request = mrq;
 				client_color_ptr = cptr;
 				client_large_ptr = lptr;

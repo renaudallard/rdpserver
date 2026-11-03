@@ -107,25 +107,50 @@ struct cache_slot {
 struct rdp_bmpcache {
 	struct cache_slot slot[120 + 120 + 336];   /* 576 = sum(cell_slots) */
 	size_t   total;
+	size_t   cells[RDP_BMPCACHE_NUM_CELLS];     /* slots per cell */
 	size_t   offset[RDP_BMPCACHE_NUM_CELLS];    /* first slot of each cell */
 	size_t   next;                              /* round-robin allocator */
 	size_t   used;                              /* occupied slot count */
 	size_t   ingest[RDP_BMPCACHE_NUM_CELLS];    /* persistent fill cursor */
 };
 
+/* Lay the cells out with at most max[i] slots each and empty the cache. */
+static void
+layout_cells(struct rdp_bmpcache *c, const uint32_t *max)
+{
+	size_t i, off = 0;
+
+	memset(c->slot, 0, sizeof c->slot);
+	c->next = 0;
+	c->used = 0;
+	for (i = 0; i < RDP_BMPCACHE_NUM_CELLS; i++) {
+		c->cells[i] = cell_slots[i];
+		if (max != NULL && max[i] < c->cells[i])
+			c->cells[i] = max[i];
+		c->offset[i] = off;
+		c->ingest[i] = 0;
+		off += c->cells[i];
+	}
+	c->total = off;
+}
+
 struct rdp_bmpcache *
 rdp_bmpcache_create(void)
 {
 	struct rdp_bmpcache *c = calloc(1, sizeof *c);
-	size_t i, off = 0;
 
 	if (c == NULL) return NULL;
-	for (i = 0; i < RDP_BMPCACHE_NUM_CELLS; i++) {
-		c->offset[i] = off;
-		off += cell_slots[i];
-	}
-	c->total = off;
+	layout_cells(c, NULL);
 	return c;
+}
+
+size_t
+rdp_bmpcache_fit(struct rdp_bmpcache *c,
+    const uint32_t client_cells[RDP_BMPCACHE_NUM_CELLS])
+{
+	if (c == NULL) return 0;
+	layout_cells(c, client_cells);
+	return c->total;
 }
 
 void
@@ -158,7 +183,7 @@ slot_to_cell(const struct rdp_bmpcache *c, size_t pool, uint8_t *id,
 	size_t i;
 
 	for (i = 0; i < RDP_BMPCACHE_NUM_CELLS; i++) {
-		if (pool < c->offset[i] + cell_slots[i]) { cell = i; break; }
+		if (pool < c->offset[i] + c->cells[i]) { cell = i; break; }
 	}
 	*id = (uint8_t)cell;
 	*idx = (uint16_t)(pool - c->offset[cell]);
@@ -187,7 +212,7 @@ rdp_bmpcache_ingest_persistent(struct rdp_bmpcache *c, const uint8_t *p,
 			uint64_t key = ld64(p + off);
 			if (cell >= RDP_BMPCACHE_NUM_CELLS)
 				continue;
-			if (c->ingest[cell] >= cell_slots[cell])
+			if (c->ingest[cell] >= c->cells[cell])
 				continue;          /* more keys than slots */
 			{
 				size_t pool = c->offset[cell] + c->ingest[cell];
@@ -208,7 +233,7 @@ rdp_bmpcache_lookup(struct rdp_bmpcache *c, uint64_t key, uint8_t *cache_id,
 {
 	size_t i, pool;
 
-	if (c == NULL) return 0;
+	if (c == NULL || c->total == 0) return 0;
 	for (i = 0; i < c->total; i++) {
 		if (c->slot[i].occupied && c->slot[i].key == key) {
 			slot_to_cell(c, i, cache_id, cache_index);
