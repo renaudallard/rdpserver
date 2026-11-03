@@ -112,6 +112,13 @@ ld32_safe(const uint8_t *p)
 
 #define RDP_CONN_BUF       0x4000
 #define RDP_CONN_SHARE_ID  0x000103EAu
+
+/* Desktop size limits.  MS-RDPBCGR puts 200 at the bottom of the client's
+ * desktopWidth/Height range; 8192 matches the DisplayControl resize limit
+ * and the largest session rdp-sessionmgr will run, and bounds the greeter
+ * framebuffer an unauthenticated client can make us allocate. */
+#define RDP_DESKTOP_MIN    200
+#define RDP_DESKTOP_MAX    8192
 #define NTHASH_PATH        "/etc/rdpserver/nthashes"
 
 /* Read one TPKT frame from the raw socket (pre-TLS). */
@@ -4120,8 +4127,9 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 		client_early_caps = ci.early_capability_flags;
 
 		if (ci.monitor_count > 1) {
-			int32_t min_x = 0, min_y = 0;
-			int32_t max_x = 0, max_y = 0;
+			int64_t min_x = 0, min_y = 0;
+			int64_t max_x = 0, max_y = 0;
+			int64_t bw, bh;
 			uint32_t mi;
 			for (mi = 0; mi < ci.monitor_count; mi++) {
 				if (mi == 0 || ci.monitors[mi].left < min_x)
@@ -4133,10 +4141,35 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 				if (mi == 0 || ci.monitors[mi].bottom > max_y)
 					max_y = ci.monitors[mi].bottom;
 			}
-			desktop_w = (uint16_t)(max_x - min_x + 1);
-			desktop_h = (uint16_t)(max_y - min_y + 1);
+			/* Monitor edges are inclusive.  64-bit so hostile
+			 * coordinates cannot overflow; a degenerate box keeps
+			 * the core desktop size. */
+			bw = max_x - min_x + 1;
+			bh = max_y - min_y + 1;
+			if (bw > 0 && bh > 0) {
+				desktop_w = (uint16_t)(bw > UINT16_MAX
+				    ? UINT16_MAX : bw);
+				desktop_h = (uint16_t)(bh > UINT16_MAX
+				    ? UINT16_MAX : bh);
+			}
 			rdp_info("conn[%s]: %u monitors, bounding box %ux%u",
 				peer, ci.monitor_count,
+				(unsigned)desktop_w, (unsigned)desktop_h);
+		}
+		if (desktop_w < RDP_DESKTOP_MIN || desktop_w > RDP_DESKTOP_MAX
+		    || desktop_h < RDP_DESKTOP_MIN
+		    || desktop_h > RDP_DESKTOP_MAX) {
+			uint16_t req_w = desktop_w, req_h = desktop_h;
+			if (desktop_w < RDP_DESKTOP_MIN)
+				desktop_w = RDP_DESKTOP_MIN;
+			if (desktop_w > RDP_DESKTOP_MAX)
+				desktop_w = RDP_DESKTOP_MAX;
+			if (desktop_h < RDP_DESKTOP_MIN)
+				desktop_h = RDP_DESKTOP_MIN;
+			if (desktop_h > RDP_DESKTOP_MAX)
+				desktop_h = RDP_DESKTOP_MAX;
+			rdp_info("conn[%s]: desktop %ux%u clamped to %ux%u",
+				peer, (unsigned)req_w, (unsigned)req_h,
 				(unsigned)desktop_w, (unsigned)desktop_h);
 		}
 
