@@ -389,9 +389,12 @@ fd_status_to_errno(uint32_t status)
 /* reply emit (OS neutral, routed through the backend) */
 
 /*
- * Fill an OS neutral attr for a node.  Directories report mode 0500
- * (browse), files 0400 (read), 0600 when write access has been granted.
- * When acc is non-NULL the size and times come from a QUERY_INFO chain;
+ * Fill an OS neutral attr for a node.  The mount uses default_permissions,
+ * so these modes are what the kernel checks before a request reaches us:
+ * drive directories report 0700 and files 0600, or 0400 when the client
+ * marks the file read-only, and the client still enforces its own access
+ * on every IRP.  The synthetic root that holds the drives is 0500, since
+ * nothing can be created there.  When acc is non-NULL the size and times come from a QUERY_INFO chain;
  * otherwise they are synthetic (size 0, zeroed times).  The backend turns
  * the FD_S_IF* type bits into its own and adds any OS specific fields.
  */
@@ -406,17 +409,15 @@ fd_node_to_attr(const struct fd_node *n, struct fd_attr *a,
 	if (acc != NULL)
 		is_dir = acc->is_dir;
 	if (is_dir) {
-		a->mode = FD_S_IFDIR | 0500;
+		a->mode = FD_S_IFDIR | (n->nodeid == FD_ROOT_ID ? 0500 : 0700);
 		a->nlink = 2;
 		a->size = acc != NULL ? acc->size : 0;
 	} else {
-		a->mode = FD_S_IFREG | 0400;
+		a->mode = FD_S_IFREG | 0600;
 		a->nlink = 1;
 		a->size = acc != NULL ? acc->size : 0;
-		/* Reflect a writable handle, unless the file is read-only. */
-		if (n->have_open && (n->access & FILE_WRITE_DATA)
-		    && (acc == NULL || !acc->readonly))
-			a->mode |= 0200;
+		if (acc != NULL && acc->readonly)
+			a->mode &= ~0200u;
 	}
 	if (acc != NULL) {
 		a->mtime = acc->mtime;
