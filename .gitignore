@@ -2,6 +2,7 @@
 *.o
 *.a
 *.d
+!contrib/pam.d/
 config.mk
 src/include/config.h
 
