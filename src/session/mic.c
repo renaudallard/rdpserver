@@ -97,12 +97,6 @@ rdp_mic_parse_index(const char *out, size_t len)
 #include <stdio.h>
 #include <unistd.h>
 
-/* Path to pactl.  A fixed path keeps us from running an attacker planted
- * pactl found via $PATH; PipeWire and PulseAudio both install it here. */
-#ifndef RDP_PACTL_PATH
-# define RDP_PACTL_PATH "/usr/bin/pactl"
-#endif
-
 /* The source name applications select as their input device. */
 #define RDP_MIC_SOURCE_NAME "rdp_microphone"
 

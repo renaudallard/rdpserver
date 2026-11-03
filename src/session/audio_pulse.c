@@ -35,6 +35,7 @@
  */
 
 #include "audio.h"
+#include "run.h"
 
 #include "../include/compat.h"
 #include "../include/rdp_log.h"
@@ -51,7 +52,41 @@
 
 struct rdp_audio {
 	pa_simple *pa;
+	long       module;   /* our null sink's module index, or -1 */
 };
+
+/* Load this session's null sink and return the module index pactl
+ * prints, or -1. */
+static long
+load_null_sink(const char *sink_name)
+{
+	char arg[96], out[32], *end;
+	const char *av[] = { "pactl", "load-module", "module-null-sink", arg,
+	    "sink_properties=device.description=rdpserver", NULL };
+	long idx;
+
+	(void)snprintf(arg, sizeof arg, "sink_name=%s", sink_name);
+	if (rdp_run(RDP_PACTL_PATH, av, out, sizeof out) <= 0)
+		return -1;
+	idx = strtol(out, &end, 10);
+	if (end == out || idx < 0)
+		return -1;
+	return idx;
+}
+
+/* Unload one module by index.  Unloading by module name, as before, took
+ * down every null sink of the user, other sessions' included. */
+static void
+unload_module(long idx)
+{
+	char num[24];
+	const char *av[] = { "pactl", "unload-module", num, NULL };
+
+	if (idx < 0)
+		return;
+	(void)snprintf(num, sizeof num, "%ld", idx);
+	(void)rdp_run(RDP_PACTL_PATH, av, NULL, 0);
+}
 
 struct rdp_audio *
 rdp_audio_open(void)
@@ -62,15 +97,11 @@ rdp_audio_open(void)
 	int err;
 	char sink_name[64];
 	char monitor[80];
-	char cmd[256];
+	long module;
 
 	(void)snprintf(sink_name, sizeof sink_name,
 	    "rdpserver_%d", (int)getpid());
-	(void)snprintf(cmd, sizeof cmd,
-	    "pactl load-module module-null-sink "
-	    "sink_name=%s sink_properties=device.description=rdpserver "
-	    ">/dev/null 2>&1", sink_name);
-	(void)system(cmd);
+	module = load_null_sink(sink_name);
 
 	(void)snprintf(monitor, sizeof monitor, "%s.monitor", sink_name);
 
@@ -83,12 +114,17 @@ rdp_audio_open(void)
 	ba.fragsize = 4410 * 4;
 
 	a = calloc(1, sizeof *a);
-	if (a == NULL) return NULL;
+	if (a == NULL) {
+		unload_module(module);
+		return NULL;
+	}
+	a->module = module;
 
 	a->pa = pa_simple_new(NULL, "rdpserver", PA_STREAM_RECORD,
 	    monitor, "RDP audio", &ss, NULL, &ba, &err);
 	if (a->pa == NULL) {
 		rdp_warn("pulse: %s", pa_strerror(err));
+		unload_module(module);
 		free(a);
 		return NULL;
 	}
@@ -118,13 +154,10 @@ rdp_audio_read(struct rdp_audio *a, void *buf, size_t len)
 void
 rdp_audio_close(struct rdp_audio *a)
 {
-	char cmd[128];
 	if (a == NULL) return;
 	if (a->pa != NULL) pa_simple_drain(a->pa, NULL);
 	if (a->pa != NULL) pa_simple_free(a->pa);
-	(void)snprintf(cmd, sizeof cmd,
-	    "pactl unload-module module-null-sink 2>/dev/null");
-	(void)system(cmd);
+	unload_module(a->module);
 	free(a);
 }
 

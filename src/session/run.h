@@ -50,4 +50,10 @@
 ssize_t rdp_run(const char *path, const char *const argv[], char *out,
 		size_t outsz);
 
+/* Path to pactl.  A fixed path keeps us from running an attacker planted
+ * pactl found via $PATH; PipeWire and PulseAudio both install it here. */
+#ifndef RDP_PACTL_PATH
+# define RDP_PACTL_PATH "/usr/bin/pactl"
+#endif
+
 #endif /* RDP_RUN_H */
