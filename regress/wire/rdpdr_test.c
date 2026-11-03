@@ -278,7 +278,7 @@ test_completion_bounds(void)
 static size_t
 conn_irp_cap(size_t payload_len)
 {
-	return (size_t)IRP_HDR_SIZE + 32 + (payload_len + 1) * 2;
+	return (size_t)IRP_HDR_SIZE + 32 + (payload_len + 2) * 2;
 }
 
 static void
@@ -311,6 +311,72 @@ test_irp_cap_sizing(void)
 			FAIL("LIST rejected at conn cap for pattern len %zu",
 			    pl);
 	}
+}
+
+static uint32_t
+ld32(const uint8_t *p)
+{
+	return (uint32_t)p[0] | ((uint32_t)p[1] << 8)
+	    | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/* DR_CREATE_REQ layout: DesiredAccess, AllocationSize(8), FileAttributes,
+ * SharedAccess, CreateDisposition, CreateOptions, PathLength, then the
+ * UTF-16LE path with its NUL. */
+static void
+test_create_layout(void)
+{
+	struct rdpdr_state st;
+	uint8_t buf[256];
+	uint32_t cid = 0;
+	const uint32_t h = IRP_HDR_SIZE;
+	ssize_t n;
+
+	memset(&st, 0, sizeof st);
+	memset(buf, 0xee, sizeof buf);
+	n = rdp_rdpdr_build_irp_create(&st, buf, sizeof buf, 0x11, "\\a",
+	    0x00120089u, FILE_OPEN, 0x40u, &cid);
+	if (n != (ssize_t)(h + 32 + 6))
+		FAIL("create len %zd", (ssize_t)n);
+	if (ld32(buf + h) != 0x00120089u) FAIL("create DesiredAccess");
+	if (ld32(buf + h + 4) != 0 || ld32(buf + h + 8) != 0)
+		FAIL("create AllocationSize");
+	if (ld32(buf + h + 12) != 0) FAIL("create FileAttributes");
+	if (ld32(buf + h + 16) != 0x07) FAIL("create SharedAccess");
+	if (ld32(buf + h + 20) != FILE_OPEN) FAIL("create CreateDisposition");
+	if (ld32(buf + h + 24) != 0x40u) FAIL("create CreateOptions");
+	if (ld32(buf + h + 28) != 6) FAIL("create PathLength");
+	if (buf[h + 32] != '\\' || buf[h + 34] != 'a' || buf[h + 36] != 0
+	    || buf[h + 37] != 0)
+		FAIL("create Path");
+}
+
+/* DR_DRIVE_QUERY_DIRECTORY_REQ layout: FsInformationClass, InitialQuery,
+ * PathLength, 23 bytes of padding, then the UTF-16LE path with its NUL. */
+static void
+test_query_dir_layout(void)
+{
+	struct rdpdr_state st;
+	uint8_t buf[256];
+	uint32_t cid = 0;
+	ssize_t n;
+	size_t i;
+
+	memset(&st, 0, sizeof st);
+	memset(buf, 0xee, sizeof buf);
+	n = rdp_rdpdr_build_irp_query_dir(&st, buf, sizeof buf, 0x11, 0x22,
+	    "*", 1, &cid);
+	if (n != IRP_HDR_SIZE + 32 + 4)
+		FAIL("query dir len %zd", (ssize_t)n);
+	if (ld32(buf + IRP_HDR_SIZE) != FileBothDirectoryInformation)
+		FAIL("query dir FsInformationClass");
+	if (buf[IRP_HDR_SIZE + 4] != 1) FAIL("query dir InitialQuery");
+	if (ld32(buf + IRP_HDR_SIZE + 5) != 4) FAIL("query dir PathLength");
+	for (i = IRP_HDR_SIZE + 9; i < IRP_HDR_SIZE + 32; i++)
+		if (buf[i] != 0) FAIL("query dir pad byte %zu", i);
+	if (buf[IRP_HDR_SIZE + 32] != '*' || buf[IRP_HDR_SIZE + 33] != 0
+	    || buf[IRP_HDR_SIZE + 34] != 0 || buf[IRP_HDR_SIZE + 35] != 0)
+		FAIL("query dir path");
 }
 
 static void
@@ -526,6 +592,8 @@ main(void)
 	test_set_info();
 	test_completion_bounds();
 	test_irp_cap_sizing();
+	test_query_dir_layout();
+	test_create_layout();
 	test_printer_announce();
 	test_printer_announce_bounds();
 	test_print_job_sequence();

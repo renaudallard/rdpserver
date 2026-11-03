@@ -3808,11 +3808,12 @@ run_proxy(struct rdp_tls *t, int be_fd,
 				}
 				/* OPEN and LIST expand the UTF-8 path/pattern
 				 * to UTF-16LE plus a NUL, so reserve room for
-				 * the doubled size; this also covers the
-				 * verbatim WRITE/SET_INFO payloads since
-				 * (payload_len+1)*2 >= payload_len. */
+				 * the doubled size, one character more for the
+				 * "*" LIST uses when the pattern is empty; this
+				 * also covers the verbatim WRITE/SET_INFO
+				 * payloads since (payload_len+2)*2 >= payload_len. */
 				irp_cap = (size_t)IRP_HDR_SIZE + 32
-				    + ((size_t)payload_len + 1) * 2;
+				    + ((size_t)payload_len + 2) * 2;
 				irp = malloc(irp_cap);
 				if (irp == NULL) {
 					free(payload);

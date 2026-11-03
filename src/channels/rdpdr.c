@@ -413,14 +413,17 @@ rdp_rdpdr_build_irp_create(struct rdpdr_state *st,
 
 	memset(out, 0, total);
 	put_irp_header(out, device_id, 0, cid, IRP_MJ_CREATE, 0);
+	/* DR_CREATE_REQ (MS-RDPEFS 2.2.1.4.1): DesiredAccess(4)
+	 * AllocationSize(8) FileAttributes(4) SharedAccess(4)
+	 * CreateDisposition(4) CreateOptions(4) PathLength(4) Path. */
 	off = IRP_HDR_SIZE;
 	st32(out + off, desired_access); off += 4;
-	st32(out + off, 0); off += 4; st32(out + off, 0); off += 4;
-	st32(out + off, 0x07); off += 4;
+	off += 8;                                   /* AllocationSize = 0 */
+	off += 4;                                   /* FileAttributes = 0 */
+	st32(out + off, 0x07); off += 4;            /* share read|write|delete */
 	st32(out + off, disposition); off += 4;
 	st32(out + off, options); off += 4;
 	st32(out + off, (uint32_t)upath_len); off += 4;
-	st32(out + off, 0); off += 4;
 	for (i = 0; i < path_len; i++) {
 		out[off + i * 2] = (uint8_t)path[i];
 		out[off + i * 2 + 1] = 0;
@@ -480,7 +483,10 @@ rdp_rdpdr_build_irp_query_dir(struct rdpdr_state *st,
 	uint32_t cid;
 	size_t plen = pattern ? strlen(pattern) : 0;
 	size_t ulen = (plen + 1) * 2;
-	size_t total = IRP_HDR_SIZE + 1 + 4 + ulen + 24;
+	/* DR_DRIVE_QUERY_DIRECTORY_REQ (MS-RDPEFS 2.2.3.3.10):
+	 * FsInformationClass(4) InitialQuery(1) PathLength(4) Padding(23)
+	 * Path. */
+	size_t total = IRP_HDR_SIZE + 4 + 1 + 4 + 23 + ulen;
 	size_t off, i;
 
 	if (cap < total) return -1;
@@ -495,7 +501,7 @@ rdp_rdpdr_build_irp_query_dir(struct rdpdr_state *st,
 	st32(out + off, FileBothDirectoryInformation); off += 4;
 	out[off] = initial ? 1 : 0; off += 1;
 	st32(out + off, (uint32_t)ulen); off += 4;
-	memset(out + off, 0, 20); off += 20;
+	off += 23;                                  /* Padding, zeroed above */
 	for (i = 0; i < plen; i++) {
 		out[off + i * 2] = (uint8_t)pattern[i];
 		out[off + i * 2 + 1] = 0;
