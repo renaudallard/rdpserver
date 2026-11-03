@@ -1985,23 +1985,35 @@ maybe_dispatch_clip(struct rdp_tls *t, int be_fd,
 				print_job_on_completion(t, uid, dr,
 				    &compl_info);
 			} else if (rc == 1 && be_fd >= 0) {
+				/* One FS_RSP frame: the header, then for every
+				 * IRP but CREATE the completion body (FSCC
+				 * Length plus data), which the session reads as
+				 * the frame payload. */
 				struct rdp_be_fs_rsp rsp;
+				size_t body = 0;
+				uint8_t *rspbuf;
+
 				rsp.req_id = compl_info.be_req_id;
 				rsp.status = compl_info.io_status;
 				rsp.file_id = 0;
 				rsp.length = (uint32_t)compl_info.data_len;
-				if (compl_info.major_function == IRP_MJ_CREATE
-				    && compl_info.data_len >= 4)
-					rsp.file_id = ld32_safe(
-					    compl_info.data);
-				if (rdp_be_send(be_fd, RDP_BE_FS_RSP,
-				    &rsp, sizeof rsp) == 0
-				    && compl_info.data_len > 0
-				    && compl_info.major_function
-				    != IRP_MJ_CREATE)
-					(void)rdp_write_full(be_fd,
-					    compl_info.data,
-					    compl_info.data_len);
+				if (compl_info.major_function == IRP_MJ_CREATE) {
+					if (compl_info.data_len >= 4)
+						rsp.file_id = ld32_safe(
+						    compl_info.data);
+				} else {
+					body = compl_info.data_len;
+				}
+				rspbuf = malloc(sizeof rsp + body);
+				if (rspbuf != NULL) {
+					memcpy(rspbuf, &rsp, sizeof rsp);
+					if (body > 0)
+						memcpy(rspbuf + sizeof rsp,
+						    compl_info.data, body);
+					(void)rdp_be_send(be_fd, RDP_BE_FS_RSP,
+					    rspbuf, sizeof rsp + body);
+					free(rspbuf);
+				}
 			}
 			/* Announce any newly enumerated drives and printers to
 			 * the session.  The device list is parsed inside
