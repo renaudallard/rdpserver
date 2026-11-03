@@ -252,16 +252,16 @@ build_fdi(uint8_t *buf, uint32_t next, uint32_t attrs, uint64_t size,
 {
 	size_t nlen = strlen(name);
 	size_t i;
-	memset(buf, 0, 94);
+	memset(buf, 0, 93);
 	put32le(buf + 0, next);
 	put64le(buf + 40, size);                          /* EndOfFile */
 	put32le(buf + 56, attrs);                         /* FileAttributes */
 	put32le(buf + 60, (uint32_t)(nlen * 2));          /* FileNameLength */
 	for (i = 0; i < nlen; i++) {
-		buf[94 + i * 2] = (uint8_t)name[i];
-		buf[94 + i * 2 + 1] = 0;
+		buf[93 + i * 2] = (uint8_t)name[i];
+		buf[93 + i * 2 + 1] = 0;
 	}
-	return 94 + nlen * 2;
+	return 93 + nlen * 2;
 }
 
 /* Answer one queued FS_REQ with a canned FS_RSP. */
@@ -332,9 +332,9 @@ mock_answer(struct fuse_drive *fd, struct mock_req *m)
 		 * hello.txt and sub.  Emit ".", "..", then the two entries. */
 		uint8_t fscc[512];
 		size_t off = 0, hello_sz = strlen(HELLO_CONTENTS);
-		off += build_fdi(fscc + off, 94 + 2, 0x10, 0, ".");
-		off += build_fdi(fscc + off, 94 + 4, 0x10, 0, "..");
-		off += build_fdi(fscc + off, (uint32_t)(94 + 6), 0x10, 0, "sub");
+		off += build_fdi(fscc + off, 93 + 2, 0x10, 0, ".");
+		off += build_fdi(fscc + off, 93 + 4, 0x10, 0, "..");
+		off += build_fdi(fscc + off, (uint32_t)(93 + 6), 0x10, 0, "sub");
 		off += build_fdi(fscc + off, 0, 0x20, hello_sz, "hello.txt");
 		put32le(pl, (uint32_t)off);
 		memcpy(pl + 4, fscc, off);

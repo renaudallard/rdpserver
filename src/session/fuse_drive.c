@@ -1625,7 +1625,9 @@ fd_dispatch(struct fuse_drive *fd, const struct fd_request *req)
  * the last record), or 0 to stop.  Every field is bounds checked against
  * avail before use.
  *
- * FILE_BOTH_DIR_INFORMATION layout (MS-FSCC 2.4.8):
+ * FILE_BOTH_DIR_INFORMATION as drive clients send it.  MS-RDPEFS drops
+ * the 1-byte Reserved field MS-FSCC 2.4.8 has after ShortNameLength
+ * (FreeRDP: "Reserved(1), MUST NOT be added"), so the name starts at 93:
  *   0  NextEntryOffset  u32
  *   4  FileIndex        u32
  *   8  CreationTime     u64
@@ -1638,11 +1640,10 @@ fd_dispatch(struct fuse_drive *fd, const struct fd_request *req)
  *   60 FileNameLength   u32   (bytes, UTF-16LE)
  *   64 EaSize           u32
  *   68 ShortNameLength  u8
- *   69 Reserved         u8
- *   70 ShortName        24 bytes
- *   94 FileName         FileNameLength bytes
+ *   69 ShortName        24 bytes
+ *   93 FileName         FileNameLength bytes
  */
-#define FDI_FIXED 94u
+#define FDI_FIXED 93u
 #define FILE_ATTRIBUTE_DIRECTORY 0x00000010u
 
 static size_t
