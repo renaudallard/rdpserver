@@ -272,11 +272,12 @@ fd_child_make(struct fuse_drive *fd, uint64_t parent,
 	struct fd_node *n;
 	if (namelen > FD_NAME_MAX)
 		return NULL;
+	/* An existing node keeps what it knows: LOOKUP and RENAME pass a
+	 * guess of 0, which must not turn a known directory into a file.
+	 * The getattr chain and MKDIR set is_dir from the client. */
 	n = fd_child_find(fd, parent, name, namelen);
-	if (n != NULL) {
-		n->is_dir = is_dir;
+	if (n != NULL)
 		return n;
-	}
 	n = fd_node_alloc(fd);
 	if (n == NULL)
 		return NULL;
