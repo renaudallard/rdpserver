@@ -42,6 +42,7 @@
 #include "../include/rdp_log.h"
 
 #include "../common/io.h"
+#include "../sec/nla_crypto.h"
 #include "../sec/tls.h"
 #include "conn.h"
 #include "sandbox.h"
@@ -306,10 +307,7 @@ main(int argc, char *argv[])
 			 * listener).  On non-OpenBSD this is a no-op. */
 			/* Load OpenSSL legacy provider (MD4, RC4) before
 			 * sandboxing, since dlopen is blocked after. */
-			{
-				extern void rdp_nla_crypto_init(void);
-				rdp_nla_crypto_init();
-			}
+			rdp_nla_crypto_init();
 			if (pledge("stdio inet unix rpath sendfd recvfd", NULL) != 0)
 				rdp_warn("pledge worker: %s", strerror(errno));
 			rdp_sandbox_worker();

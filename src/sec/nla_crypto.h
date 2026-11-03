@@ -47,6 +47,10 @@
 #define RDP_MD4_LEN 16
 #define RDP_MD5_LEN 16
 
+/* Load the OpenSSL providers MD4 and RC4 need; call before sandboxing,
+ * since loading them later is blocked. */
+void rdp_nla_crypto_init(void);
+
 int rdp_md4(const void *data, size_t len, uint8_t out[RDP_MD4_LEN]);
 
 int rdp_hmac_md5(const void *key, size_t key_len,

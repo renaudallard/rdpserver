@@ -35,6 +35,7 @@
  */
 
 #include "proto.h"
+#include "proto_api.h"
 
 #include "../common/io.h"
 

@@ -186,23 +186,6 @@ ctrl_write_full(int fd, const void *buf, size_t len)
 }
 
 static int
-ctrl_send_msg(int fd, uint32_t type, const void *payload, uint32_t len)
-{
-	uint8_t hdr[DDX_PROTO_HEADER];
-	hdr[0] = (uint8_t)(type & 0xff);
-	hdr[1] = (uint8_t)((type >> 8) & 0xff);
-	hdr[2] = (uint8_t)((type >> 16) & 0xff);
-	hdr[3] = (uint8_t)((type >> 24) & 0xff);
-	hdr[4] = (uint8_t)(len & 0xff);
-	hdr[5] = (uint8_t)((len >> 8) & 0xff);
-	hdr[6] = (uint8_t)((len >> 16) & 0xff);
-	hdr[7] = (uint8_t)((len >> 24) & 0xff);
-	if (ctrl_write_full(fd, hdr, sizeof hdr) < 0) return -1;
-	if (len > 0 && ctrl_write_full(fd, payload, len) < 0) return -1;
-	return 0;
-}
-
-static int
 ctrl_send_shm_ready(int ctrl_fd, int shm_fd,
     uint16_t w, uint16_t h, uint32_t stride, uint32_t sz)
 {

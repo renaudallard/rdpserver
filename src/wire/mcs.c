@@ -48,21 +48,6 @@
 
 #include <string.h>
 
-/* GCC Conference Create Response fixed prefix used by RDP.  This is
- * the canonical byte sequence emitted by Windows servers and xrdp
- * for the response envelope, up to (but not including) the H.221
- * key "McDn" and the user-data length determinant.  The trailing
- * variable bits (length + server data blocks) are appended at run
- * time. */
-static const uint8_t GCC_CR_PREFIX[] = {
-	/* T.124 object identifier (PER), nodeID (16-bit), tag
-	 * (16-bit), result (3-bit choice 0 = success, padded), and
-	 * the user-data sequence-of envelope. */
-	0x00, 0x05, 0x00, 0x14, 0x7c, 0x00, 0x01,
-	0x2a, 0x14, 0x76, 0x0a, 0x01, 0x01, 0x00, 0x01,
-	0xc0, 0x00,
-};
-
 /* Compute the encoded size of a PER length field. */
 static size_t
 per_len_size(size_t v)

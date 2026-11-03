@@ -695,10 +695,12 @@ rdp_rdpdr_handle(struct rdpdr_state *st,
 			rdp_debug("rdpdr: device list remove");
 			break;
 		case PAKID_CORE_DEVICE_IOCOMPLETION: {
-			uint32_t did, cid, ios;
+			uint32_t cid, ios;
 			int i;
 			if (len < 4 + 12) break;
-			did = ld32(pdu + 4);
+			/* The client's DeviceId (pdu + 4) is not used: the
+			 * completion is routed by the device recorded with
+			 * the pending IRP. */
 			cid = ld32(pdu + 8);
 			ios = ld32(pdu + 12);
 			for (i = 0; i < RDPDR_MAX_PENDING; i++) {

@@ -116,7 +116,7 @@ test_reserve(void)
 static void
 test_skip(void)
 {
-	uint8_t s[8] = "ABCDEFGH";
+	uint8_t s[8] = { 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H' };
 	struct rdp_buf b;
 	uint8_t v;
 
