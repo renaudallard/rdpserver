@@ -201,8 +201,10 @@ handle_client_name(struct rdpdr_state *st,
 	if (blen < 12) return -1;
 	unicode = ld32(body);
 	name_len = ld32(body + 8);
-	if (12 + name_len > blen)
-		name_len = (uint32_t)(blen > 12 ? blen - 12 : 0);
+	/* Subtraction form: 12 + name_len wraps for a name_len near 2^32
+	 * and would skip this clamp. */
+	if (name_len > blen - 12)
+		name_len = (uint32_t)(blen - 12);
 	if (name_len > sizeof st->client_name - 1)
 		name_len = sizeof st->client_name - 1;
 	if (unicode) {

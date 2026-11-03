@@ -320,6 +320,33 @@ ld32(const uint8_t *p)
 	    | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
+/* A CLIENT_NAME whose ComputerNameLen is near 2^32 must not wrap the
+ * bounds check and read the name from past the PDU (ASan guard). */
+static void
+test_client_name_wrap(void)
+{
+	struct rdpdr_state st;
+	struct rdpdr_completion comp;
+	uint8_t out[64];
+	size_t out_len = 0;
+	uint8_t *pdu = malloc(16);
+
+	if (pdu == NULL) FAIL("malloc");
+	memset(&st, 0, sizeof st);
+	memset(pdu, 0, 16);
+	pdu[0] = RDPDR_CTYP_CORE & 0xff;
+	pdu[1] = RDPDR_CTYP_CORE >> 8;
+	pdu[2] = PAKID_CORE_CLIENT_NAME & 0xff;
+	pdu[3] = PAKID_CORE_CLIENT_NAME >> 8;
+	/* UnicodeFlag 0, CodePage 0, ComputerNameLen 0xFFFFFFF4, no name */
+	pdu[12] = 0xf4; pdu[13] = 0xff; pdu[14] = 0xff; pdu[15] = 0xff;
+	(void)rdp_rdpdr_handle(&st, pdu, 16, out, sizeof out, &out_len,
+	    &comp);
+	if (st.client_name[0] != '\0')
+		FAIL("wrapped name length read past the PDU");
+	free(pdu);
+}
+
 /* DR_CREATE_REQ layout: DesiredAccess, AllocationSize(8), FileAttributes,
  * SharedAccess, CreateDisposition, CreateOptions, PathLength, then the
  * UTF-16LE path with its NUL. */
@@ -594,6 +621,7 @@ main(void)
 	test_irp_cap_sizing();
 	test_query_dir_layout();
 	test_create_layout();
+	test_client_name_wrap();
 	test_printer_announce();
 	test_printer_announce_bounds();
 	test_print_job_sequence();
