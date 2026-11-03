@@ -229,7 +229,7 @@ struct rdp_clip_filedesc {
 	uint32_t attrs;     /* Windows file attributes (FILE_ATTRIBUTE_*) */
 	uint64_t size;      /* file size in bytes */
 	uint64_t mtime;     /* last write time as a Windows FILETIME */
-	char     name[780]; /* UTF-8 (<= 3 bytes per UTF-16 unit) + NUL */
+	char     name[780]; /* UTF-8, truncated to fit, NUL terminated */
 };
 
 /* The wire size of one CLIPRDR_FILEDESCRIPTOR. */

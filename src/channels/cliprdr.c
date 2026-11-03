@@ -605,8 +605,13 @@ rdp_cliprdr_parse_file_list(const uint8_t *p, size_t len,
 		nlen = utf16le_byte_len(d + FDW_NAME, FDW_NAME_LEN);
 		got = rdp_utf16le_to_utf8(f->name, sizeof f->name - 1,
 			d + FDW_NAME, nlen);
+		/* The converter returns the full length even when it stopped
+		 * writing at the end of name; 260 three-byte characters come
+		 * to 780, one past the last byte. */
 		if (got == (size_t)-1)
 			got = 0;
+		else if (got > sizeof f->name - 1)
+			got = sizeof f->name - 1;
 		f->name[got] = '\0';
 		stored++;
 	}

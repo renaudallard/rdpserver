@@ -462,6 +462,26 @@ test_file_list_bounds(void)
 	if (rdp_cliprdr_parse_file_list(buf, 100, out, &n) != 0 || n != 0)
 		FAIL("truncated not clamped to 0 (n=%zu)", n);
 	printf("  file list bounds: over-count clamped, truncation safe ok\n");
+
+	/* A full 260-unit name of three-byte UTF-8 characters converts to
+	 * 780 bytes; it must be cut at whole characters inside name[]. */
+	{
+		size_t i;
+		memset(buf, 0, sizeof buf);
+		put_le32(buf, 1);
+		for (i = 0; i < 260; i++) {
+			buf[4 + 72 + i * 2] = 0x2d;       /* U+4E2D */
+			buf[4 + 72 + i * 2 + 1] = 0x4e;
+		}
+		n = 1;
+		if (rdp_cliprdr_parse_file_list(buf, sizeof buf, out, &n) != 0
+		    || n != 1)
+			FAIL("long name parse");
+		if (strlen(out[0].name) != 777)
+			FAIL("long name length %zu, want 777",
+			    strlen(out[0].name));
+	}
+	printf("  file list: over-long name cut inside the field ok\n");
 }
 
 /* The FILECONTENTS request and response round-trip. */
