@@ -312,6 +312,11 @@ rdp_pdu_build_save_session_logon_v2(uint8_t *out, size_t cap,
 
 	if (domain == NULL) domain = "";
 	if (username == NULL) username = "";
+	/* The converter skips a character that does not fit but still
+	 * counts it, so a clamped length can cover bytes it never wrote;
+	 * start from zeroes so none of the stack goes on the wire. */
+	memset(dom16, 0, sizeof dom16);
+	memset(usr16, 0, sizeof usr16);
 
 	dw = rdp_utf8_to_utf16le(dom16, sizeof dom16 - 2, domain, strlen(domain));
 	if (dw == (size_t)-1 || dw > sizeof dom16 - 2)

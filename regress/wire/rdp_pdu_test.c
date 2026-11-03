@@ -165,10 +165,35 @@ test_arc_cookie(void)
 		FAIL("arc pdu should reject a short buffer");
 }
 
+/* A domain whose last character does not fit the 50-byte field: the
+ * skipped character's bytes must go out as zeroes, not stack contents. */
+static void
+test_logon_v2_partial_char(void)
+{
+	/* 24 ASCII characters (48 bytes) then U+1F600, which needs 4 bytes */
+	static const char dom[] = "abcdefghijklmnopqrstuvwx\xf0\x9f\x98\x80";
+	uint8_t buf[2048];
+	ssize_t n;
+	size_t dom_off;
+
+	memset(buf, 0, sizeof buf);
+	n = rdp_pdu_build_save_session_logon_v2(buf, sizeof buf, 0x3ea,
+	    0x000103ea, dom, "u", 0);
+	if (n <= 0) FAIL("partial char build");
+	if (rd32(buf + 18 + 4 + 2 + 4 + 4) != 52) FAIL("partial cbDomain");
+	/* Domain follows the 18-byte header, infoType, the 18-byte logon
+	 * header and the 558-byte pad. */
+	dom_off = 18 + 4 + 18 + 558;
+	if (buf[dom_off + 48] != 0 || buf[dom_off + 49] != 0)
+		FAIL("unwritten domain bytes 0x%02x 0x%02x",
+		    buf[dom_off + 48], buf[dom_off + 49]);
+}
+
 int
 main(void)
 {
 	test_logon_v2();
+	test_logon_v2_partial_char();
 	test_arc_cookie();
 	test_truncation();
 	test_small_cap();
