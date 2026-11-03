@@ -62,6 +62,7 @@
 #define RDP_CLIPRDR_H
 
 #include "../include/compat.h"
+#include "vchan.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -127,11 +128,6 @@
 
 /* The one Windows file attribute we act on. */
 #define FILE_ATTRIBUTE_DIRECTORY  0x00000010u
-
-/* Channel PDU header flags (MS-RDPBCGR 2.2.6.1.1). */
-#define CHANNEL_FLAG_FIRST           0x00000001
-#define CHANNEL_FLAG_LAST            0x00000002
-#define CHANNEL_FLAG_SHOW_PROTOCOL   0x00000010
 
 #define RDP_CLIPRDR_HDR_LEN 8
 
@@ -269,38 +265,5 @@ int rdp_cliprdr_parse_filecontents_response(const uint8_t *p, size_t len,
  * format id. */
 int rdp_cliprdr_parse_format_data_request(const uint8_t *p, size_t len,
 		uint32_t *format_id_out);
-
-/*
- * Inbound virtual-channel reassembly (MS-RDPBCGR 2.2.6.1).  A CLIPRDR PDU
- * larger than one MCS Send Data payload arrives as a run of fragments,
- * each prefixed by a CHANNEL_PDU_HEADER carrying the total PDU length and
- * the CHANNEL_FLAG_FIRST / CHANNEL_FLAG_LAST bits.  Feed each fragment's
- * body; a complete PDU is returned for dispatch.  max_pdu bounds the
- * accumulator so a hostile peer cannot drive unbounded allocation.
- */
-struct rdp_cliprdr_reasm {
-	uint8_t *buf;
-	size_t   cap;
-	size_t   len;
-	size_t   max_pdu;
-	int      active;
-};
-
-void rdp_cliprdr_reasm_init(struct rdp_cliprdr_reasm *r, size_t max_pdu);
-void rdp_cliprdr_reasm_reset(struct rdp_cliprdr_reasm *r);
-
-/*
- * Feed one fragment body.  `total` is the CHANNEL_PDU_HEADER length field
- * (present on every fragment), `flags` its FIRST/LAST bits.  On a complete
- * PDU, sets *pdu / *pdu_len (valid until the next feed or reset) and
- * returns 1; the caller dispatches then calls reset.  Returns 0 when more
- * fragments are needed, or -1 on a malformed or oversize stream (the
- * accumulator is reset).  A single FIRST|LAST fragment is returned in
- * place with no copy.
- */
-int rdp_cliprdr_reasm_feed(struct rdp_cliprdr_reasm *r,
-		const uint8_t *frag, size_t frag_len,
-		uint32_t total, uint32_t flags,
-		const uint8_t **pdu, size_t *pdu_len);
 
 #endif /* RDP_CLIPRDR_H */

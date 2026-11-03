@@ -240,10 +240,10 @@ fuzz_cliprdr(size_t iters)
 		 * derived from the random buffer: each record is a flags
 		 * byte, a 4-byte declared total, then a variable body. */
 		{
-			struct rdp_cliprdr_reasm r;
+			struct rdp_vc_reasm r;
 			const uint8_t *pdu;
 			size_t pdu_len, off = 0;
-			rdp_cliprdr_reasm_init(&r, 1u << 20);
+			rdp_vc_reasm_init(&r, 1u << 20);
 			while (off + 5 <= len) {
 				uint32_t flags = buf[off] & 0x3u;
 				uint32_t total = (uint32_t)buf[off + 1]
@@ -253,12 +253,12 @@ fuzz_cliprdr(size_t iters)
 				size_t avail = len - (off + 5);
 				size_t frag_len = avail ? (buf[off] % (avail + 1)) : 0;
 				off += 5;
-				if (rdp_cliprdr_reasm_feed(&r, buf + off, frag_len,
+				if (rdp_vc_reasm_feed(&r, buf + off, frag_len,
 					total, flags, &pdu, &pdu_len) == 1)
-					rdp_cliprdr_reasm_reset(&r);
+					rdp_vc_reasm_reset(&r);
 				off += frag_len;
 			}
-			rdp_cliprdr_reasm_reset(&r);
+			rdp_vc_reasm_reset(&r);
 		}
 	}
 }

@@ -438,7 +438,7 @@ struct clip_state {
 
 	/* Inbound CLIPRDR channel fragment reassembly (CHANNEL_PDU_HEADER
 	 * FIRST..LAST), bounded by CLIP_MAX_PDU. */
-	struct rdp_cliprdr_reasm reasm;
+	struct rdp_vc_reasm reasm;
 };
 
 /* Map a CLIPRDR format id the client advertised or requested to one of our
@@ -1490,9 +1490,15 @@ struct print_job {
 	size_t   off;         /* bytes already written */
 };
 
+/* Largest reassembled inbound RDPDR PDU.  The session reads at most 128 KiB
+ * per IRP and device lists are a few KiB, so 1 MiB leaves ample room while
+ * bounding what a client can make us buffer. */
+#define RDPDR_MAX_PDU (1024u * 1024u)
+
 struct dr_state {
 	int      enabled;
 	uint16_t channel_id;
+	struct rdp_vc_reasm reasm;   /* inbound CHANNEL_PDU_HEADER chunks */
 	struct rdpdr_state dr;
 	struct print_job jobs[RDPDR_MAX_PRINT_JOBS];
 };
@@ -1760,22 +1766,13 @@ maybe_dispatch_clip(struct rdp_tls *t, int be_fd,
 	 * full PDU length and FIRST/LAST flags; a single-fragment PDU (the
 	 * common case) is dispatched in place without a copy. */
 	if (cs->enabled && cid == cs->channel_id) {
-		uint32_t total, cflags;
 		const uint8_t *pdu;
 		size_t pdu_len;
 
-		if (payload_len < 8) return 1;
-		total = (uint32_t)payload[0] | ((uint32_t)payload[1] << 8)
-			| ((uint32_t)payload[2] << 16)
-			| ((uint32_t)payload[3] << 24);
-		cflags = (uint32_t)payload[4] | ((uint32_t)payload[5] << 8)
-			| ((uint32_t)payload[6] << 16)
-			| ((uint32_t)payload[7] << 24);
-
-		if (rdp_cliprdr_reasm_feed(&cs->reasm, payload + 8,
-			payload_len - 8, total, cflags, &pdu, &pdu_len) == 1) {
+		if (rdp_vc_reasm_feed_payload(&cs->reasm, payload, payload_len,
+		    &pdu, &pdu_len) == 1) {
 			(void)clip_handle_pdu(t, be_fd, cs, pdu, pdu_len);
-			rdp_cliprdr_reasm_reset(&cs->reasm);
+			rdp_vc_reasm_reset(&cs->reasm);
 		}
 		return 1;
 	}
@@ -1940,17 +1937,24 @@ maybe_dispatch_clip(struct rdp_tls *t, int be_fd,
 		return 1;
 	}
 
-	/* RDPDR channel: device redirection. */
+	/* RDPDR channel: device redirection.  A read completion or a device
+	 * list larger than the channel chunk size arrives in several chunks
+	 * (clients split at the VCChunkSize we advertise), so reassemble the
+	 * whole PDU before parsing it. */
 	if (dr->enabled && cid == dr->channel_id) {
-		if (payload_len < 8) return 1;
+		const uint8_t *drpdu;
+		size_t drpdu_len;
+
+		if (rdp_vc_reasm_feed_payload(&dr->reasm, payload, payload_len,
+		    &drpdu, &drpdu_len) != 1)
+			return 1;
 		{
 			uint8_t resp[4096];
 			size_t resp_len = 0;
 			struct rdpdr_completion compl_info;
 			int rc;
 			memset(&compl_info, 0, sizeof compl_info);
-			rc = rdp_rdpdr_handle(&dr->dr,
-				payload + 8, payload_len - 8,
+			rc = rdp_rdpdr_handle(&dr->dr, drpdu, drpdu_len,
 				resp, sizeof resp, &resp_len,
 				&compl_info);
 			{
@@ -2050,6 +2054,7 @@ maybe_dispatch_clip(struct rdp_tls *t, int be_fd,
 				}
 			}
 		}
+		rdp_vc_reasm_reset(&dr->reasm);
 		return 1;
 	}
 
@@ -4039,7 +4044,8 @@ rdp_conn_run(int fd, const struct rdp_conn_cfg *cfg, const char *peer)
 	uint32_t logon_id = 0;
 	uint8_t  arc_random[16] = {0};
 	clip.user_id = user_id;
-	rdp_cliprdr_reasm_init(&clip.reasm, CLIP_MAX_PDU);
+	rdp_vc_reasm_init(&clip.reasm, CLIP_MAX_PDU);
+	rdp_vc_reasm_init(&devr.reasm, RDPDR_MAX_PDU);
 	dynvc.dv.disp_channel_id = -1;
 	dynvc.dv.gfx_channel_id = -1;
 	dynvc.dv.audioin_channel_id = -1;
@@ -4754,7 +4760,8 @@ send_disconnect:
 	}
 
 done:
-	rdp_cliprdr_reasm_reset(&clip.reasm);
+	rdp_vc_reasm_reset(&clip.reasm);
+	rdp_vc_reasm_reset(&devr.reasm);
 	explicit_bzero(nla_pass, sizeof nla_pass);
 	rdp_bmpcache_destroy(g_bmpcache);
 	g_bmpcache = NULL;

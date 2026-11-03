@@ -68,7 +68,7 @@ SESSMGR_DAEMON_OBJ = src/sessionmgr/sessionmgr.o $(SESSMGR_AUTH_OBJ) \
 	src/sec/nla_crypto.o
 
 # Static virtual channels.
-CHANNELS_OBJS = src/channels/cliprdr.o src/channels/drdynvc.o src/channels/rdpsnd.o \
+CHANNELS_OBJS = src/channels/vchan.o src/channels/cliprdr.o src/channels/drdynvc.o src/channels/rdpsnd.o \
 	src/channels/sndin.o src/channels/rdpgfx.o src/channels/rdpdr.o \
 	src/channels/autodetect.o src/channels/rdpei.o src/channels/rail.o \
 	src/channels/cam.o
@@ -266,10 +266,10 @@ regress/wire/rdpdr_test: regress/wire/rdpdr_test.c src/channels/rdpdr.c \
 # CLIPRDR channel reassembly test.  cliprdr.c is recompiled with the test;
 # $(TEST_SAN) covers the attacker-controlled fragment-length bounds.
 regress/wire/cliprdr_test: regress/wire/cliprdr_test.c src/channels/cliprdr.c \
-		src/common/buf.c src/common/utf16.c
+		src/channels/vchan.c src/common/buf.c src/common/utf16.c
 	$(CC) $(CFLAGS) $(TEST_SAN) -Isrc/include \
 		-o $@ regress/wire/cliprdr_test.c src/channels/cliprdr.c \
-		src/common/buf.c src/common/utf16.c
+		src/channels/vchan.c src/common/buf.c src/common/utf16.c
 
 # SNDIN (MS-RDPEAI audio input) channel test.  sndin.c is recompiled with the
 # test so $(TEST_SAN) covers the attacker-controlled PDU bounds and the
