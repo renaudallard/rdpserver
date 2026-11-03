@@ -47,8 +47,8 @@
 
 /* Decode a context-specific tag with the given tag number and
  * primitive/constructed flag.  Returns header bytes consumed,
- * stores the inner value length in *vlen, or -1 if no match.
- * Caller checks that vlen fits in the remaining buffer. */
+ * stores the inner value length in *vlen, or -1 if no match or if
+ * the value would run past the `left` bytes available. */
 static ssize_t
 read_ctx_tag(const uint8_t *p, size_t left, uint8_t wire_tag,
 		size_t *vlen)
@@ -57,7 +57,23 @@ read_ctx_tag(const uint8_t *p, size_t left, uint8_t wire_tag,
 	if (left < 1 || p[0] != wire_tag) return -1;
 	r = rdp_ber_read_length(p + 1, left - 1, vlen);
 	if (r < 0) return -1;
+	if (*vlen > left - 1 - (size_t)r) return -1;
 	return r + 1;
+}
+
+/* Skip an unrecognised element: tag byte, length, then its value.
+ * Returns the bytes to skip, or -1 if the value runs past `left`. */
+static ssize_t
+skip_element(const uint8_t *p, size_t left)
+{
+	size_t vlen;
+	ssize_t r;
+
+	if (left < 1) return -1;
+	r = rdp_ber_read_length(p + 1, left - 1, &vlen);
+	if (r < 0) return -1;
+	if (vlen > left - 1 - (size_t)r) return -1;
+	return 1 + r + (ssize_t)vlen;
 }
 
 int
@@ -160,10 +176,9 @@ rdp_cssp_parse(const uint8_t *p, size_t len, struct rdp_tsrequest *out)
 			out->client_nonce_len = odl;
 			off += comp_len;
 		} else {
-			r = rdp_ber_read_length(p + off + 1, len - off - 1,
-				&comp_len);
+			r = skip_element(p + off, len - off);
 			if (r < 0) return -1;
-			off += (size_t)r + 1 + comp_len;
+			off += (size_t)r;
 		}
 	}
 	return 0;
@@ -310,10 +325,9 @@ rdp_cssp_parse_tscredentials(const uint8_t *p, size_t len,
 				off += comp_len;
 			}
 		} else {
-			r = rdp_ber_read_length(p + off + 1, len - off - 1,
-				&comp_len);
+			r = skip_element(p + off, len - off);
 			if (r < 0) return -1;
-			off += (size_t)r + 1 + comp_len;
+			off += (size_t)r;
 		}
 	}
 	if (cred_type != 1 || creds_blob == NULL) return -1;

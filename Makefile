@@ -119,6 +119,7 @@ REGRESS_PROGS = \
 	regress/wire/mic_test \
 	regress/wire/avc444_test \
 	regress/wire/tz_test \
+	regress/wire/cssp_test \
 	regress/wire/autodetect_test \
 	regress/wire/rdpei_test \
 	regress/wire/rail_test \
@@ -304,6 +305,14 @@ regress/wire/tz_test: regress/wire/tz_test.c src/wire/sec.c \
 	$(CC) $(CFLAGS) $(TEST_SAN) -Isrc/include \
 		-o $@ regress/wire/tz_test.c src/wire/sec.c \
 		src/common/utf16.c src/common/log.c
+
+# CredSSP TSRequest and TSCredentials parse bounds.  cssp.c and ber.c are
+# recompiled with the test so $(TEST_SAN) covers the length checks.
+regress/wire/cssp_test: regress/wire/cssp_test.c src/sec/cssp.c \
+		src/common/ber.c src/common/buf.c
+	$(CC) $(CFLAGS) $(TEST_SAN) -Isrc/include \
+		-o $@ regress/wire/cssp_test.c src/sec/cssp.c \
+		src/common/ber.c src/common/buf.c
 
 # Network auto-detection PDU build/parse.  autodetect.c is recompiled
 # with the test so $(TEST_SAN) covers the response parse bounds.
