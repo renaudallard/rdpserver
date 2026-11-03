@@ -66,5 +66,7 @@ void rdp_paint_string(struct rdp_fb *fb, int x, int y,
 void rdp_rect_union(struct rdp_rect *acc, struct rdp_rect r);
 int  rdp_rect_empty(const struct rdp_rect *r);
 void rdp_rect_reset(struct rdp_rect *r);
+/* Clip r to the framebuffer; returns non-zero if anything is left. */
+int  rdp_rect_clip(const struct rdp_fb *fb, struct rdp_rect *r);
 
 #endif /* RDP_PAINT_H */

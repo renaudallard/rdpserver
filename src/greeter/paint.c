@@ -43,8 +43,8 @@ clamp(int v, int lo, int hi)
 	return v;
 }
 
-static int
-clip_rect(const struct rdp_fb *fb, struct rdp_rect *r)
+int
+rdp_rect_clip(const struct rdp_fb *fb, struct rdp_rect *r)
 {
 	int x0 = clamp(r->x, 0, fb->w);
 	int y0 = clamp(r->y, 0, fb->h);
@@ -62,7 +62,7 @@ rdp_paint_fill(struct rdp_fb *fb, struct rdp_rect r,
 		uint8_t b, uint8_t g, uint8_t rd)
 {
 	int yy, xx;
-	if (!clip_rect(fb, &r)) return;
+	if (!rdp_rect_clip(fb, &r)) return;
 	for (yy = 0; yy < r.h; yy++) {
 		uint8_t *row = fb->data + (size_t)(r.y + yy) * fb->w * 3
 			+ (size_t)r.x * 3;
