@@ -464,9 +464,64 @@ test_cam_data(void)
 	}
 }
 
+static void
+put_le32(uint8_t *p, uint32_t v)
+{
+	p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8);
+	p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
+}
+
+/* DisplayControl monitor layouts: a normal two-monitor layout resizes to
+ * its bounding box, and edge values that overflow 32-bit sums are refused
+ * without undefined behaviour (UBSan guard). */
+static void
+test_disp_layout(void)
+{
+	struct drdynvc_state st;
+	uint8_t body[16 + 2 * 40], pdu[256];
+	const uint8_t *out_data;
+	size_t out_len, n;
+	uint8_t resp[64];
+	size_t resp_len;
+	uint16_t w = 0, h = 0;
+	int r;
+
+	memset(&st, 0, sizeof st);
+	st.disp_channel_id = 7;
+	st.gfx_channel_id = -1;
+	st.audioin_channel_id = -1;
+	st.rdpei_channel_id = -1;
+
+	memset(body, 0, sizeof body);
+	put_le32(body + 12, 2);                       /* numMonitors */
+	put_le32(body + 16 + 4, 0);                   /* m0 left */
+	put_le32(body + 16 + 12, 1280);               /* m0 width */
+	put_le32(body + 16 + 16, 1024);               /* m0 height */
+	put_le32(body + 56 + 4, 1280);                /* m1 left */
+	put_le32(body + 56 + 12, 1024);               /* m1 width */
+	put_le32(body + 56 + 16, 768);                /* m1 height */
+	n = build_data(pdu, 7, body, sizeof body);
+	r = rdp_drdynvc_handle(&st, pdu, n, resp, sizeof resp, &resp_len,
+		&w, &h, &out_data, &out_len);
+	if (r != 1 || w != 2304 || h != 1024)
+		FAIL("disp layout: r=%d %ux%u (want 1 2304x1024)", r, w, h);
+
+	w = h = 0;
+	put_le32(body + 16 + 4, 0x7fffffffu);         /* left at INT32_MAX */
+	put_le32(body + 16 + 12, 0xffffffffu);        /* huge width */
+	put_le32(body + 56 + 4, 0x80000000u);         /* left at INT32_MIN */
+	n = build_data(pdu, 7, body, sizeof body);
+	r = rdp_drdynvc_handle(&st, pdu, n, resp, sizeof resp, &resp_len,
+		&w, &h, &out_data, &out_len);
+	if (r == 1 || w != 0 || h != 0)
+		FAIL("disp overflow layout accepted: r=%d %ux%u", r, w, h);
+	rdp_drdynvc_cleanup(&st);
+}
+
 int
 main(void)
 {
+	test_disp_layout();
 	test_same_channel_two_fragments();
 	test_single_pdu_passthrough();
 	test_interleaved_reassembly();

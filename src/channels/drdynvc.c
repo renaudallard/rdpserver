@@ -430,18 +430,18 @@ rdp_drdynvc_handle(struct drdynvc_state *st,
 		{
 			uint32_t nm = ld32(data + 12);
 			uint32_t mi;
-			int32_t min_x = 0, min_y = 0;
-			int32_t max_x = 0, max_y = 0;
+			/* 64-bit: left + width of hostile 32-bit values
+			 * would overflow int32_t. */
+			int64_t min_x = 0, min_y = 0;
+			int64_t max_x = 0, max_y = 0;
 			if (nm < 1 || nm > 16) return 0;
 			if (data_len < 16 + nm * 40) return 0;
 			for (mi = 0; mi < nm; mi++) {
 				const uint8_t *m = data + 16 + mi * 40;
-				int32_t ml = (int32_t)ld32(m + 4);
-				int32_t mt = (int32_t)ld32(m + 8);
-				uint32_t mw = ld32(m + 12);
-				uint32_t mh = ld32(m + 16);
-				int32_t mr = ml + (int32_t)mw;
-				int32_t mb = mt + (int32_t)mh;
+				int64_t ml = (int32_t)ld32(m + 4);
+				int64_t mt = (int32_t)ld32(m + 8);
+				int64_t mr = ml + ld32(m + 12);
+				int64_t mb = mt + ld32(m + 16);
 				if (mi == 0) {
 					min_x = ml; min_y = mt;
 					max_x = mr; max_y = mb;
@@ -453,8 +453,8 @@ rdp_drdynvc_handle(struct drdynvc_state *st,
 				}
 			}
 			{
-				uint32_t tw = (uint32_t)(max_x - min_x);
-				uint32_t th = (uint32_t)(max_y - min_y);
+				int64_t tw = max_x - min_x;
+				int64_t th = max_y - min_y;
 				if (tw >= 200 && tw <= 8192
 				    && th >= 200 && th <= 8192) {
 					*new_w = (uint16_t)tw;
