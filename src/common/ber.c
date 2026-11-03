@@ -215,7 +215,9 @@ rdp_ber_read_universal_tag(const uint8_t *p, size_t left,
 	if (p[0] != want) return -1;
 	r = rdp_ber_read_length(p + 1, left - 1, value_len_out);
 	if (r < 0) return -1;
-	if ((size_t)(r + 1) + *value_len_out > left) return -1;
+	/* Subtraction form, so a 4-byte length cannot wrap the sum where
+	 * size_t is 32 bits; read_length guarantees r < left. */
+	if (*value_len_out > left - 1 - (size_t)r) return -1;
 	return r + 1;
 }
 
@@ -247,7 +249,7 @@ rdp_ber_read_app_tag(const uint8_t *p, size_t left,
 	}
 	r = rdp_ber_read_length(p + off, left - off, value_len_out);
 	if (r < 0) return -1;
-	if (off + (size_t)r + *value_len_out > left) return -1;
+	if (*value_len_out > left - off - (size_t)r) return -1;
 	return (ssize_t)off + r;
 }
 

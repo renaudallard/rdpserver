@@ -91,7 +91,9 @@ read_tsrequest(struct rdp_tls *t, uint8_t *buf, size_t cap, size_t *out_len)
 		body_len = acc;
 		hdr_len = 2 + nlen;
 	}
-	if (hdr_len + body_len > cap) return -1;
+	/* Subtraction form: a 4-byte length can wrap the sum where size_t
+	 * is 32 bits. */
+	if (body_len > cap - hdr_len) return -1;
 	n = rdp_tls_read_full(t, buf + hdr_len, body_len);
 	if (n != (ssize_t)body_len) return -1;
 	*out_len = hdr_len + body_len;
