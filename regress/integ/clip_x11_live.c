@@ -707,6 +707,17 @@ incr_owner(const uint8_t *data, size_t len, size_t chunk,
 				continue;
 			}
 
+			/* chunk 0: the whole value in one property, no INCR,
+			 * which is what a client like Firefox does for a
+			 * large selection when BIG-REQUESTS allows it. */
+			if (chunk == 0) {
+				XChangeProperty(d, req, prop, utf8, 8,
+					PropModeReplace, data, (int)len);
+				XSendEvent(d, req, False, NoEventMask, &note);
+				XFlush(d);
+				continue;
+			}
+
 			/* INCR start: watch the requestor's property deletes,
 			 * advertise INCR, then feed chunks. */
 			XSelectInput(d, req, PropertyChangeMask);
@@ -927,6 +938,114 @@ reap:
 		/* Let clip see the owner-cleared event. */
 		(void)drive_until(NULL, NULL, 200);
 	}
+}
+
+/* X -> RDP with a selection over the 4 MiB transfer cap: the session must
+ * answer the request with a failure status, not a truncated payload that
+ * the client would take as the whole selection. */
+static void
+test_x_to_rdp_oversize(const char *name, size_t len)
+{
+	struct rdp_be_clip_request rq;
+	struct rdp_be_clip_data_hdr h;
+	pid_t owner;
+	uint32_t type = 0;
+	uint8_t *data, *buf;
+	size_t cap = 4u * 1024u * 1024u + 4096u;
+	ssize_t n;
+	int rp[2], dp[2];
+
+	(void)printf("%s: X -> RDP, %zu bytes in one property (over the cap)\n",
+	    name, len);
+	data = malloc(len);
+	buf = malloc(cap);
+	if (data == NULL || buf == NULL || pipe(rp) != 0) {
+		FAILF("setup");
+		free(data);
+		free(buf);
+		return;
+	}
+	if (pipe(dp) != 0) {
+		FAILF("pipe: %s", strerror(errno));
+		(void)close(rp[0]);
+		(void)close(rp[1]);
+		free(data);
+		free(buf);
+		return;
+	}
+	memset(data, 'z', len);
+	owner = incr_owner(data, len, 0, rp, dp);
+	(void)close(rp[1]);
+	(void)close(dp[0]);
+	if (owner < 0) {
+		FAILF("owner spawn failed");
+		(void)close(rp[0]);
+		goto out;
+	}
+	{
+		long deadline = now_ms() + 5000;
+		int ready = 0;
+		while (now_ms() < deadline && !ready) {
+			struct pollfd p;
+			char b;
+			pump_once();
+			p.fd = rp[0];
+			p.events = POLLIN;
+			p.revents = 0;
+			if (poll(&p, 1, 50) > 0 && (p.revents & POLLIN))
+				ready = read(rp[0], &b, 1) == 1;
+		}
+		(void)close(rp[0]);
+		if (!ready) {
+			FAILF("owner never signalled ready");
+			goto reap;
+		}
+	}
+	/* An oversize value is refused when clip reads it for the offer, so
+	 * either no text is offered or the request is answered with a
+	 * failure status; a truncated payload is the bug. */
+	if (drive_until(pred_sv0_readable, NULL, 6000)
+	    && rdp_be_recv(g_sv0, &type, buf, cap) >= 0
+	    && type == RDP_BE_CLIP_OFFER) {
+		rq.format = RDP_BE_CLIP_FMT_TEXT;
+		if (rdp_be_send(g_sv0, RDP_BE_CLIP_REQUEST, &rq,
+		    sizeof rq) != 0) {
+			FAILF("send CLIP_REQUEST: %s", strerror(errno));
+			goto reap;
+		}
+		if (!drive_until(pred_sv0_readable, NULL, 8000)) {
+			(void)printf("  no data answered for the oversize "
+			    "selection ok\n");
+			goto reap;
+		}
+		n = rdp_be_recv(g_sv0, &type, buf, cap);
+		if (n < (ssize_t)sizeof h || type != RDP_BE_CLIP_DATA) {
+			FAILF("expected CLIP_DATA, got type %u len %zd",
+			    type, n);
+			goto reap;
+		}
+		memcpy(&h, buf, sizeof h);
+		if (h.status == 0) {
+			FAILF("oversize selection sent as %zd bytes of data",
+			    n - (ssize_t)sizeof h);
+			goto reap;
+		}
+	}
+	(void)printf("  oversize selection refused, nothing truncated sent "
+	    "ok\n");
+reap:
+	(void)close(dp[1]);
+	dp[1] = -1;
+	if (owner > 0) {
+		(void)kill(owner, SIGTERM);
+		(void)waitpid(owner, NULL, 0);
+		(void)drive_until(NULL, NULL, 200);
+	}
+out:
+	if (dp[1] >= 0)
+		(void)close(dp[1]);
+	free(data);
+	free(buf);
 }
 
 /* X -> RDP via a forced INCR transfer.  Uses our own INCR selection owner
@@ -2852,6 +2971,9 @@ main(void)
 
 	/* B: X -> RDP, large (~1 MiB). */
 	test_x_to_rdp("B", big, BIG_LEN);
+
+	/* B2: X -> RDP, over the 4 MiB cap: refused, not truncated. */
+	test_x_to_rdp_oversize("B2", 5u * 1024u * 1024u);
 
 	/* C: RDP -> X, small. */
 	test_rdp_to_x("C", (const uint8_t *)"from rdp side",

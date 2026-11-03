@@ -702,7 +702,10 @@ read_property_bytes(struct rdp_clip *c, Window win, Atom prop, size_t *len_out)
 		}
 		if (out_len + nitems > CLIP_X11_MAX) {
 			XFree(chunk);
-			break;   /* refuse oversize; drop the partial read */
+			free(out);   /* refuse oversize; drop the partial read */
+			out = NULL;
+			out_len = 0;
+			break;
 		}
 		nb = realloc(out, out_len + nitems + 1);
 		if (nb == NULL) {
