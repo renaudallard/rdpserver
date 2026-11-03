@@ -2536,6 +2536,38 @@ read_client_finalization(struct rdp_tls *t, uint16_t user_id,
 	}
 }
 
+/*
+ * Copy a frame region into the desktop-sized shadow (dw x dh, 3 bytes a
+ * pixel), clipped to the desktop, growing the shadow as needed.  The GFX
+ * encoders take whole desktop frames while the DDX backend sends only the
+ * damaged regions, so those are composed here first.  Returns -1 when the
+ * shadow cannot be allocated.
+ */
+static int
+shadow_put(uint8_t **shadow, size_t *cap, uint16_t dw, uint16_t dh,
+		const struct rdp_be_frame_hdr *f, const uint8_t *pix)
+{
+	size_t need = (size_t)dw * dh * 3;
+	uint32_t cw, ch, row;
+
+	if (*shadow == NULL || *cap < need) {
+		uint8_t *nb = calloc(1, need);
+		if (nb == NULL)
+			return -1;
+		free(*shadow);
+		*shadow = nb;
+		*cap = need;
+	}
+	if (f->x >= dw || f->y >= dh)
+		return 0;
+	cw = f->w < dw - f->x ? f->w : (uint32_t)(dw - f->x);
+	ch = f->h < dh - f->y ? f->h : (uint32_t)(dh - f->y);
+	for (row = 0; row < ch; row++)
+		memcpy(*shadow + ((size_t)(f->y + row) * dw + f->x) * 3,
+		    pix + (size_t)row * f->w * 3, (size_t)cw * 3);
+	return 0;
+}
+
 static void
 run_proxy(struct rdp_tls *t, int be_fd,
 		struct clip_state *cs, struct dynvc_state *dv,
@@ -2567,6 +2599,8 @@ run_proxy(struct rdp_tls *t, int be_fd,
 		ictx.ptr_cache_n = 0;
 	uint8_t *frame_buf = NULL;
 	size_t   frame_cap = 0;
+	uint8_t *shadow = NULL;      /* whole desktop for GFX, from regions */
+	size_t   shadow_cap = 0;
 	time_t   last_drop_log_s = 0;   /* rate-limit the backlog-drop warning */
 	struct rdpgfx_state gfx = {0};
 	struct rdp_h264 *h264 = NULL;
@@ -2878,6 +2912,11 @@ run_proxy(struct rdp_tls *t, int be_fd,
 					 * MapSurface on the next frame (which
 					 * also forces an IDR for it). */
 					gfx.surface_created = 0;
+					/* The shadow's layout follows the desktop;
+					 * start a fresh one at the new size. */
+					free(shadow);
+					shadow = NULL;
+					shadow_cap = 0;
 				}
 				if (r == 4 && !gfx.active
 				    && dv->dv.gfx_channel_id >= 0
@@ -3148,6 +3187,8 @@ run_proxy(struct rdp_tls *t, int be_fd,
 			if (type == RDP_BE_FRAME) {
 				struct rdp_be_frame_hdr fhdr;
 				size_t pix_bytes;
+				const uint8_t *epix;
+				uint16_t ew, eh;
 				if (rdp_read_full(be_fd, &fhdr,
 					sizeof fhdr) != sizeof fhdr)
 					break;
@@ -3195,6 +3236,28 @@ run_proxy(struct rdp_tls *t, int be_fd,
 					}
 					continue;
 				}
+				/* The GFX encoders need the whole desktop.  A
+				 * partial region (DDX damage) is composed into
+				 * the shadow and the shadow is encoded; once a
+				 * shadow exists, full frames refresh it too. */
+				epix = frame_buf;
+				ew = fhdr.w;
+				eh = fhdr.h;
+				if (gfx.active) {
+					int partial = fhdr.x != 0 || fhdr.y != 0
+					    || fhdr.w < desktop_w
+					    || fhdr.h < desktop_h;
+					if ((partial || shadow != NULL)
+					    && shadow_put(&shadow, &shadow_cap,
+					    desktop_w, desktop_h, &fhdr,
+					    frame_buf) != 0)
+						continue;
+					if (partial) {
+						epix = shadow;
+						ew = desktop_w;
+						eh = desktop_h;
+					}
+				}
 				if (gfx.active && h264 != NULL
 				    && dv->dv.gfx_channel_id >= 0) {
 					int fresh = !gfx.surface_created;
@@ -3207,8 +3270,7 @@ run_proxy(struct rdp_tls *t, int be_fd,
 						size_t h264_len;
 						int keyframe;
 						if (rdp_h264_encode(h264,
-							frame_buf, fhdr.w,
-							fhdr.h,
+							epix, ew, eh,
 							&h264_out, &h264_len,
 							&keyframe) == 0
 						    && h264_out != NULL
@@ -3261,8 +3323,7 @@ run_proxy(struct rdp_tls *t, int be_fd,
 						size_t m_len, a_len;
 						int keyframe;
 						if (rdp_avc444_encode(avc444,
-							frame_buf, fhdr.w,
-							fhdr.h,
+							epix, ew, eh,
 							&m_out, &m_len,
 							&a_out, &a_len,
 							&keyframe) == 0
@@ -3316,8 +3377,7 @@ run_proxy(struct rdp_tls *t, int be_fd,
 						const uint8_t *prog_out;
 						size_t prog_len;
 						if (rdp_progressive_encode(prog,
-							frame_buf, fhdr.w,
-							fhdr.h,
+							epix, ew, eh,
 							&prog_out, &prog_len)
 							== 0) {
 							uint8_t *gpdu;
@@ -3967,6 +4027,7 @@ out:
 	if (avc444 != NULL) rdp_avc444_close(avc444);
 	if (prog != NULL) rdp_progressive_close(prog);
 	free(frame_buf);
+	free(shadow);
 	rdp_drdynvc_cleanup(&dv->dv);
 	free(dv->cam_frame);
 	dv->cam_frame = NULL;
