@@ -59,6 +59,7 @@
 #include "../common/utf16.h"	/* rdp_utf8_to_utf16le for RAIL window titles */
 #include "../channels/rdpei.h"	/* RDPEI_CONTACT_*, RDPEI_MAX_CONTACTS */
 #include "../wire/h264enc.h"
+#include "run.h"
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -1304,47 +1305,27 @@ static void
 set_keymap(int display_num, uint32_t lcid)
 {
 	const char *layout = NULL, *variant = NULL;
-	struct sigaction dfl, old;
+	const char *av[8];
 	char disp[16];
-	pid_t pid;
-	int status = -1, restore = 0;
+	int n = 0;
 
 	rdp_klid_to_xkb(lcid, &layout, &variant);
 	(void)snprintf(disp, sizeof disp, ":%d", display_num);
-
-	/* The process-wide SIGCHLD handler uses SA_NOCLDWAIT, under which
-	 * waitpid blocks until the child exits but cannot return its status.
-	 * Reap this one child with the default disposition so we can report
-	 * whether setxkbmap actually succeeded, then restore the handler. */
-	memset(&dfl, 0, sizeof dfl);
-	dfl.sa_handler = SIG_DFL;
-	if (sigaction(SIGCHLD, &dfl, &old) == 0)
-		restore = 1;
-
-	pid = fork();
-	if (pid < 0) {
-		rdp_warn("setxkbmap: fork: %s", strerror(errno));
-	} else if (pid == 0) {
-		if (variant != NULL)
-			execlp("setxkbmap", "setxkbmap", "-display", disp,
-				"-layout", layout, "-variant", variant,
-				(char *)NULL);
-		else
-			execlp("setxkbmap", "setxkbmap", "-display", disp,
-				"-layout", layout, (char *)NULL);
-		_exit(127);
-	} else {
-		while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
-			;
-		if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
-			rdp_info("keyboard layout: LCID 0x%x -> %s",
-				(unsigned)lcid, layout);
-		else
-			rdp_warn("setxkbmap %s failed; keeping us layout",
-				layout);
+	av[n++] = "setxkbmap";
+	av[n++] = "-display";
+	av[n++] = disp;
+	av[n++] = "-layout";
+	av[n++] = layout;
+	if (variant != NULL) {
+		av[n++] = "-variant";
+		av[n++] = variant;
 	}
-	if (restore)
-		(void)sigaction(SIGCHLD, &old, NULL);
+	av[n] = NULL;
+	if (rdp_run("setxkbmap", av, NULL, 0) >= 0)
+		rdp_info("keyboard layout: LCID 0x%x -> %s",
+			(unsigned)lcid, layout);
+	else
+		rdp_warn("setxkbmap %s failed; keeping us layout", layout);
 }
 
 int

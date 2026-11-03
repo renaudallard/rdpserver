@@ -82,6 +82,7 @@ BACKEND_LIB  = src/backend/libbackend.a
 # is always linked; the wire backend object (FUSE_BACKEND_OBJ) is the Linux
 # raw /dev/fuse one, the OpenBSD fusebuf one, or empty, as configure chose.
 SESSION_OBJS = src/session/rdp_session.o src/session/clip_x11.o \
+	src/session/run.o \
 	src/channels/cliprdr.o \
 	src/session/fuse_drive.o $(FUSE_BACKEND_OBJ) \
 	src/session/printer.o \
@@ -118,6 +119,7 @@ REGRESS_PROGS = \
 	regress/wire/drdynvc_test \
 	regress/wire/printer_test \
 	regress/wire/mic_test \
+	regress/wire/run_test \
 	regress/wire/avc444_test \
 	regress/wire/tz_test \
 	regress/wire/cssp_test \
@@ -423,11 +425,11 @@ regress/greeter/keymap_test: regress/greeter/keymap_test.c src/greeter/keymap.c
 # framing and io/log printer.c calls into, but exercises only the
 # dependency free pieces (no CUPS, no socket).
 regress/wire/printer_test: regress/wire/printer_test.c \
-		src/session/printer.c src/backend/proto.c \
+		src/session/printer.c src/session/run.c src/backend/proto.c \
 		src/common/io.c src/common/log.c
 	$(CC) $(CFLAGS) $(TEST_SAN) -Isrc/include \
 		-o $@ regress/wire/printer_test.c \
-		src/session/printer.c src/backend/proto.c \
+		src/session/printer.c src/session/run.c src/backend/proto.c \
 		src/common/io.c src/common/log.c
 
 # Microphone module unit test.  mic.c is recompiled with the test so the
@@ -435,12 +437,17 @@ regress/wire/printer_test: regress/wire/printer_test.c \
 # out-of-bounds in the bounded parse.  It links the io/log helpers mic.c
 # calls into, but exercises only the dependency free parser (no pactl, no
 # FIFO).
+# rdp_run exit status under the session's SA_NOCLDWAIT SIGCHLD.
+regress/wire/run_test: regress/wire/run_test.c src/session/run.c
+	$(CC) $(CFLAGS) $(TEST_SAN) -Isrc/include \
+		-o $@ regress/wire/run_test.c src/session/run.c
+
 regress/wire/mic_test: regress/wire/mic_test.c \
-		src/session/mic.c \
+		src/session/mic.c src/session/run.c \
 		src/common/io.c src/common/log.c
 	$(CC) $(CFLAGS) $(TEST_SAN) -Isrc/include \
 		-o $@ regress/wire/mic_test.c \
-		src/session/mic.c \
+		src/session/mic.c src/session/run.c \
 		src/common/io.c src/common/log.c
 
 # Drive read-path FUSE protocol test.  The protocol agnostic core
@@ -510,11 +517,11 @@ regress/integ/linux_fuse_live: regress/integ/linux_fuse_live.c \
 # It links printer.c with a harness that creates a real CUPS queue, prints a
 # file through lp, and verifies the mock worker received the RDP_BE_PRINT_JOB.
 regress/integ/printer_live: regress/integ/printer_live.c \
-		src/session/printer.c src/backend/proto.c \
+		src/session/printer.c src/session/run.c src/backend/proto.c \
 		src/common/io.c src/common/log.c src/common/str.c
 	$(CC) $(CFLAGS) -Isrc/include \
 		-o $@ regress/integ/printer_live.c \
-		src/session/printer.c src/backend/proto.c \
+		src/session/printer.c src/session/run.c src/backend/proto.c \
 		src/common/io.c src/common/log.c src/common/str.c
 
 # Live end to end test of the session microphone source against a REAL
@@ -526,11 +533,11 @@ regress/integ/printer_live: regress/integ/printer_live.c \
 # from rdp_microphone with parecord while feeding a known PCM pattern, and
 # verifies the pattern round-trips and the source and FIFO tear down cleanly.
 regress/integ/mic_live: regress/integ/mic_live.c \
-		src/session/mic.c \
+		src/session/mic.c src/session/run.c \
 		src/common/io.c src/common/log.c
 	$(CC) $(CFLAGS) -Isrc/include \
 		-o $@ regress/integ/mic_live.c \
-		src/session/mic.c \
+		src/session/mic.c src/session/run.c \
 		src/common/io.c src/common/log.c
 
 # Live validation of the X11 clipboard bridge (clip_x11.c) against a REAL X

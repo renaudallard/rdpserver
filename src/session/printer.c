@@ -39,6 +39,7 @@
 #include "../backend/proto.h"
 #include "../backend/proto_api.h"
 #include "printer.h"
+#include "run.h"
 
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -128,68 +129,11 @@ lpadmin_present(void)
 	return access(RDP_LPADMIN_PATH, X_OK) == 0;
 }
 
-/*
- * Run lpadmin with the given NULL terminated argv (argv[0] is the path).
- * Returns 0 if lpadmin exited 0, -1 otherwise.  Output is sent to the bit
- * bucket so a noisy CUPS does not pollute the session log; errors are
- * summarized by the caller.  No shell is involved, so the printer name and
- * URI cannot be interpreted as shell metacharacters.
- */
-/* Maximum lpadmin arguments we ever pass (queue create is the longest). */
+/* Maximum lpadmin arguments we ever pass (queue create is the longest).
+ * lpadmin runs through rdp_run with no shell, so the printer name and URI
+ * cannot be read as shell metacharacters, and its output is dropped so a
+ * noisy CUPS does not fill the session log. */
 #define LPADMIN_MAX_ARGS 12
-
-static int
-run_lpadmin(const char *const argv[])
-{
-	char *child[LPADMIN_MAX_ARGS + 1];
-	size_t nargs = 0;
-	pid_t pid;
-	int st;
-
-	/* Copy the const argv into a mutable child argv so execv gets a clean
-	 * char *const[] without a const-discarding cast.  The copies live in
-	 * the child only briefly before exec; on the error path we free them. */
-	while (argv[nargs] != NULL) {
-		if (nargs >= LPADMIN_MAX_ARGS)
-			return -1;
-		child[nargs] = strdup(argv[nargs]);
-		if (child[nargs] == NULL) {
-			while (nargs > 0)
-				free(child[--nargs]);
-			return -1;
-		}
-		nargs++;
-	}
-	child[nargs] = NULL;
-
-	pid = fork();
-	if (pid < 0) {
-		while (nargs > 0)
-			free(child[--nargs]);
-		return -1;
-	}
-	if (pid == 0) {
-		int devnull = open("/dev/null", O_RDWR);
-		if (devnull >= 0) {
-			(void)dup2(devnull, STDIN_FILENO);
-			(void)dup2(devnull, STDOUT_FILENO);
-			(void)dup2(devnull, STDERR_FILENO);
-			if (devnull > STDERR_FILENO)
-				(void)close(devnull);
-		}
-		execv(RDP_LPADMIN_PATH, child);
-		_exit(127);
-	}
-	while (nargs > 0)
-		free(child[--nargs]);
-	while (waitpid(pid, &st, 0) < 0) {
-		if (errno != EINTR)
-			return -1;
-	}
-	if (WIFEXITED(st) && WEXITSTATUS(st) == 0)
-		return 0;
-	return -1;
-}
 
 int
 rdp_printer_init(struct rdp_printer *p, int be_fd)
@@ -404,7 +348,7 @@ rdp_printer_handle_device(struct rdp_printer *p, const uint8_t *buf,
 			av[n++] = "-u"; av[n++] = allowarg;
 		}
 		av[n] = NULL;
-		if (run_lpadmin(av) != 0) {
+		if (rdp_run(RDP_LPADMIN_PATH, av, NULL, 0) < 0) {
 			rdp_warn("printer: lpadmin failed for %s (queue %s); "
 			    "skipping", pd.name, qname);
 			return;
@@ -674,7 +618,7 @@ rdp_printer_close(struct rdp_printer *p)
 				"-x", p->queues[i].queue,
 				NULL
 			};
-			(void)run_lpadmin(av);
+			(void)rdp_run(RDP_LPADMIN_PATH, av, NULL, 0);
 		}
 		p->queues[i].used = 0;
 	}

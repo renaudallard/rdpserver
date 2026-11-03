@@ -34,6 +34,7 @@
  */
 
 #include "mic.h"
+#include "run.h"
 
 #include "../include/compat.h"
 #include "../include/rdp_log.h"
@@ -142,130 +143,6 @@ build_fifo_path(char *out, size_t outsz)
 #define PACTL_MAX_ARGS 8
 
 /*
- * Run pactl with the given NULL terminated argv (argv[0] is the path),
- * capturing its stdout into cap (NUL terminated, bounded by capsz).  Returns
- * the number of stdout bytes captured (>= 0) if pactl exited 0, or -1 on any
- * failure (fork/exec error or a non-zero exit).  No shell is involved, so the
- * source name and FIFO path cannot be read as shell metacharacters.
- */
-static ssize_t
-run_pactl(const char *const argv[], char *cap, size_t capsz)
-{
-	char *child[PACTL_MAX_ARGS + 1];
-	size_t nargs = 0;
-	int pfd[2];
-	pid_t pid;
-	int st;
-	ssize_t got = 0;
-	struct sigaction sigchld_dfl, sigchld_old;
-	int sigchld_restore;
-
-	if (cap == NULL || capsz == 0)
-		return -1;
-	cap[0] = '\0';
-
-	while (argv[nargs] != NULL) {
-		if (nargs >= PACTL_MAX_ARGS)
-			return -1;
-		child[nargs] = strdup(argv[nargs]);
-		if (child[nargs] == NULL) {
-			while (nargs > 0)
-				free(child[--nargs]);
-			return -1;
-		}
-		nargs++;
-	}
-	child[nargs] = NULL;
-
-	if (pipe(pfd) != 0) {
-		while (nargs > 0)
-			free(child[--nargs]);
-		return -1;
-	}
-
-	/* The session installs a process-wide SIGCHLD handler with
-	 * SA_NOCLDWAIT, under which a terminated child is auto-reaped and
-	 * waitpid cannot return its status (it fails with ECHILD).  Restore the
-	 * default disposition around the fork and wait so we read pactl's exit
-	 * status, then put the handler back (the same workaround set_keymap
-	 * uses for setxkbmap). */
-	sigchld_restore = 0;
-	memset(&sigchld_dfl, 0, sizeof sigchld_dfl);
-	sigchld_dfl.sa_handler = SIG_DFL;
-	sigemptyset(&sigchld_dfl.sa_mask);
-	if (sigaction(SIGCHLD, &sigchld_dfl, &sigchld_old) == 0)
-		sigchld_restore = 1;
-
-	pid = fork();
-	if (pid < 0) {
-		if (sigchld_restore)
-			(void)sigaction(SIGCHLD, &sigchld_old, NULL);
-		(void)close(pfd[0]);
-		(void)close(pfd[1]);
-		while (nargs > 0)
-			free(child[--nargs]);
-		return -1;
-	}
-	if (pid == 0) {
-		int devnull = open("/dev/null", O_RDWR);
-		if (devnull >= 0) {
-			(void)dup2(devnull, STDIN_FILENO);
-			(void)dup2(devnull, STDERR_FILENO);
-			if (devnull > STDERR_FILENO)
-				(void)close(devnull);
-		}
-		(void)dup2(pfd[1], STDOUT_FILENO);
-		(void)close(pfd[0]);
-		(void)close(pfd[1]);
-		execv(RDP_PACTL_PATH, child);
-		_exit(127);
-	}
-
-	(void)close(pfd[1]);
-	while (nargs > 0)
-		free(child[--nargs]);
-
-	/* Drain pactl's stdout into cap, keeping one byte for the NUL. */
-	for (;;) {
-		ssize_t r;
-		if ((size_t)got >= capsz - 1) {
-			char drop[256];
-			r = read(pfd[0], drop, sizeof drop);
-			if (r <= 0) {
-				if (r < 0 && errno == EINTR)
-					continue;
-				break;
-			}
-			continue;
-		}
-		r = read(pfd[0], cap + got, capsz - 1 - (size_t)got);
-		if (r < 0) {
-			if (errno == EINTR)
-				continue;
-			break;
-		}
-		if (r == 0)
-			break;
-		got += r;
-	}
-	cap[got] = '\0';
-	(void)close(pfd[0]);
-
-	while (waitpid(pid, &st, 0) < 0) {
-		if (errno != EINTR) {
-			if (sigchld_restore)
-				(void)sigaction(SIGCHLD, &sigchld_old, NULL);
-			return -1;
-		}
-	}
-	if (sigchld_restore)
-		(void)sigaction(SIGCHLD, &sigchld_old, NULL);
-	if (WIFEXITED(st) && WEXITSTATUS(st) == 0)
-		return got;
-	return -1;
-}
-
-/*
  * Open (or reopen) the FIFO write end, non-blocking.  module-pipe-source owns
  * the read end; with no reader yet the open can fail with ENXIO, so this is
  * allowed to fail quietly and is retried lazily on the next write.  Returns 0
@@ -337,7 +214,7 @@ rdp_mic_open(void)
 		av[k++] = "channels=2";
 		av[k] = NULL;
 
-		n = run_pactl(av, cap, sizeof cap);
+		n = rdp_run(RDP_PACTL_PATH, av, cap, sizeof cap);
 	}
 	if (n < 0) {
 		rdp_warn("mic: pactl load-module failed; microphone off");
@@ -413,7 +290,7 @@ rdp_mic_close(struct rdp_mic *m)
 			RDP_PACTL_PATH, "unload-module", idx, NULL
 		};
 		(void)snprintf(idx, sizeof idx, "%d", m->module);
-		(void)run_pactl(av, cap, sizeof cap);
+		(void)rdp_run(RDP_PACTL_PATH, av, cap, sizeof cap);
 		m->module = -1;
 	}
 	/* module-pipe-source unlinks the FIFO on unload, but remove it anyway
